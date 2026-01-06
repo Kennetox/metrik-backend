@@ -27,9 +27,23 @@ app = FastAPI(
     description="Backend inicial del sistema Kensar 2.0"
 )
 
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://metrikpos.com",
+    "https://www.metrikpos.com",
+    "https://kensar-frontend-wyu3.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,11 +84,6 @@ async def validation_exception_handler(
             "body": body_text,
         },
     )
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "Kensar API is running"}
 
 
 # Registrar routers
