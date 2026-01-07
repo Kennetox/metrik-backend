@@ -38,6 +38,7 @@ sqlmodel==0.0.31
 starlette==0.50.0
 tinycss2==1.5.1
 tinyhtml5==2.0.0
+psycopg[binary]==3.3.2
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.2
