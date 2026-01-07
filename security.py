@@ -35,11 +35,12 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     try:
         salt_b64, digest_b64 = hashed.split(".")
-    except ValueError:
+        salt = _b64decode(salt_b64)
+        expected_digest = _b64decode(digest_b64)
+    except Exception:
+        # Hash corrupto o de un formato anterior: tratamos como credencial inválida.
         return False
 
-    salt = _b64decode(salt_b64)
-    expected_digest = _b64decode(digest_b64)
     new_digest = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
