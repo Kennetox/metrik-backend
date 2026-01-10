@@ -110,6 +110,7 @@ class Sale(Base):
     customer_address = Column(String, nullable=True)
     notes = Column(String, nullable=True)
     pos_name = Column(String, nullable=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
     vendor_name = Column(String, nullable=True)
     closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
 
@@ -133,6 +134,7 @@ class Sale(Base):
         cascade="all, delete-orphan",
     )
     closure = relationship("PosClosure", back_populates="sales")
+    station = relationship("PosStation")
     customer = relationship("PosCustomer", back_populates="sales")
     separated_order = relationship(
         "SeparatedOrder",
@@ -369,6 +371,7 @@ class PosClosure(Base):
     id = Column(Integer, primary_key=True, index=True)
     pos_name = Column(String, nullable=True)
     pos_identifier = Column(String, nullable=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
     closed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False)
     closed_by_user_name = Column(String, nullable=False)
     opened_at = Column(DateTime, nullable=True)
@@ -391,6 +394,7 @@ class PosClosure(Base):
     total_surcharge = Column(Float, nullable=False, default=0)
 
     closed_by_user = relationship("PosUser")
+    station = relationship("PosStation")
     sales = relationship("Sale", back_populates="closure")
     separated_payments = relationship(
         "SeparatedOrderPayment",
@@ -453,9 +457,11 @@ class SeparatedOrderPayment(Base):
     reference = Column(String, nullable=True)
     note = Column(Text, nullable=True)
     closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
 
     separated_order = relationship("SeparatedOrder", back_populates="payments")
     closure = relationship("PosClosure", back_populates="separated_payments")
+    station = relationship("PosStation")
 
 class SaleReturn(Base):
     __tablename__ = "sale_returns"
