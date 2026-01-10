@@ -198,9 +198,14 @@ class PosSettingsBase(BaseModel):
     low_stock_alert: bool = True
     require_seller_pin: bool = False
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
-    logo_url: Optional[str] = None
+    logo_url: Optional[str] = Field(
+        default=None,
+        serialization_alias="logoUrl",
+        validation_alias="logoUrl",
+    )
     ticket_logo_url: Optional[str] = Field(
         default=None,
+        serialization_alias="ticketLogoUrl",
         validation_alias="ticketLogoUrl",
     )
     closure_email_recipients: List[EmailStr] = Field(
@@ -436,6 +441,7 @@ class SaleBase(BaseModel):
     customer_address: Optional[str] = None
     notes: Optional[str] = None
     pos_name: Optional[str] = None
+    station_id: Optional[str] = None
     vendor_name: Optional[str] = None
 
 
@@ -522,6 +528,10 @@ class MonthlySalesPoint(BaseModel):
 class UploadProductImageResponse(BaseModel):
     url: str
     thumb_url: str
+
+
+class UploadLogoResponse(BaseModel):
+    url: str
 
 
 class ReportEmailRequest(BaseModel):
@@ -635,10 +645,12 @@ class EmailSendRequest(BaseModel):
     subject: Optional[str] = None
     message: Optional[str] = None
     attach_pdf: bool = False
+    document_type: Literal["ticket", "invoice"] = "ticket"
 
 
 class EmailSendResponse(BaseModel):
     status: str = "sent"
+    document_type: Literal["ticket", "invoice"] = "ticket"
 
 
 class SeparatedOrderPaymentBase(BaseModel):
@@ -646,6 +658,7 @@ class SeparatedOrderPaymentBase(BaseModel):
     amount: float
     reference: Optional[str] = None
     note: Optional[str] = None
+    station_id: Optional[str] = None
 
 
 class SeparatedOrderPaymentCreate(SeparatedOrderPaymentBase):
@@ -655,6 +668,7 @@ class SeparatedOrderPaymentCreate(SeparatedOrderPaymentBase):
 class SeparatedOrderPaymentRead(SeparatedOrderPaymentBase):
     id: int
     paid_at: datetime
+    closure_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -699,6 +713,7 @@ class SeparatedOrderStatusUpdate(BaseModel):
 class PosClosureBase(BaseModel):
     pos_name: Optional[str] = None
     pos_identifier: Optional[str] = None
+    station_id: Optional[str] = None
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     total_amount: float = 0.0
