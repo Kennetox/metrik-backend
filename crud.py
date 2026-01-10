@@ -2,6 +2,7 @@ from collections import defaultdict
 from datetime import datetime
 import hashlib
 import logging
+import re
 import secrets
 import string
 from typing import Any, Dict, List, Optional, Sequence
@@ -482,6 +483,17 @@ def create_sale(db: Session, sale_in: schemas.SaleCreate) -> models.Sale:
 
     # 3) Crear la venta (aún sin sale_number / document_number)
 
+    pos_name = _clean_field(getattr(sale_in, "pos_name", None))
+    station_id = _resolve_station_id(db, getattr(sale_in, "station_id", None))
+    is_pos_web = _is_pos_web_name(pos_name)
+
+    if station_id and is_pos_web:
+        raise ValueError("POS Web no puede registrar estación")
+    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name)
+    if not station_id and not is_pos_web:
+        raise ValueError("Debe seleccionar una estación para registrar la venta")
+
     sale = models.Sale(
         total=sale_total,
         paid_amount=total_paid,
@@ -498,7 +510,8 @@ def create_sale(db: Session, sale_in: schemas.SaleCreate) -> models.Sale:
         customer_tax_id=customer_payload["customer_tax_id"],
         customer_address=customer_payload["customer_address"],
         notes=sale_in.notes,
-        pos_name=sale_in.pos_name,
+        pos_name=pos_name,
+        station_id=station_id,
         vendor_name=sale_in.vendor_name,
         sale_number=sale_number_preassigned,
         surcharge_amount=surcharge_amount,
@@ -660,12 +673,25 @@ def add_separated_order_payment(
     if amount - float(order.balance or 0.0) > 0.01:
         raise ValueError("El abono supera el saldo pendiente")
 
+    station_id = _resolve_station_id(db, payment_in.station_id)
+    if not station_id and order.sale.station_id:
+        station_id = _resolve_station_id(db, order.sale.station_id)
+    is_pos_web = _is_pos_web_name(order.sale.pos_name)
+
+    if station_id and is_pos_web:
+        raise ValueError("POS Web no puede registrar estación")
+    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, order.sale.pos_name)
+    if not station_id and not is_pos_web:
+        raise ValueError("Debe seleccionar una estación para registrar el abono")
+
     payment = models.SeparatedOrderPayment(
         separated_order_id=order.id,
         method=payment_in.method,
         amount=amount,
         reference=payment_in.reference,
         note=payment_in.note,
+        station_id=station_id,
     )
     db.add(payment)
 
@@ -1101,6 +1127,55 @@ _station_logger = logging.getLogger("kensar.pos_station")
 _closure_logger = logging.getLogger("kensar.pos_closure")
 
 
+def _is_pos_web_name(pos_name: Optional[str]) -> bool:
+    if not pos_name:
+        return False
+    return "pos web" in pos_name.strip().lower()
+
+
+def _station_label_from_pos_name(pos_name: Optional[str]) -> Optional[str]:
+    if not pos_name:
+        return None
+    normalized = re.sub(r"^(pos\s+)+", "", pos_name.strip(), flags=re.IGNORECASE)
+    return normalized or None
+
+
+def _resolve_station_id_from_pos_name(
+    db: Session,
+    pos_name: Optional[str],
+) -> Optional[str]:
+    label = _station_label_from_pos_name(pos_name)
+    if not label:
+        return None
+    stations = (
+        db.query(models.PosStation)
+        .filter(
+            func.lower(models.PosStation.label) == label.lower(),
+            models.PosStation.is_active.is_(True),
+        )
+        .all()
+    )
+    if len(stations) == 1:
+        return stations[0].id
+    return None
+
+
+def _resolve_station_id(
+    db: Session,
+    station_id: Optional[str],
+) -> Optional[str]:
+    if not station_id:
+        return None
+    station = (
+        db.query(models.PosStation)
+        .filter(models.PosStation.id == station_id)
+        .first()
+    )
+    if not station or not station.is_active:
+        raise ValueError("Estación inválida o inactiva")
+    return station.id
+
+
 def _generate_station_pin(length: int = 6) -> str:
     digits = string.digits
     return "".join(secrets.choice(digits) for _ in range(length))
@@ -1349,17 +1424,48 @@ def create_pos_closure(
     closure_in: schemas.PosClosureCreate,
     user: models.PosUser,
 ) -> models.PosClosure:
+    pos_name = closure_in.pos_name.strip() if closure_in.pos_name else None
+    station_id = _resolve_station_id(db, closure_in.station_id)
+    is_pos_web = _is_pos_web_name(pos_name)
+
+    if station_id and is_pos_web:
+        raise ValueError("POS Web no puede cerrar con estación")
+    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name)
+    if not station_id and not is_pos_web:
+        raise ValueError("Debe seleccionar una estación para cerrar caja")
+
     pending_sales_query = db.query(models.Sale).filter(
         models.Sale.closure_id.is_(None)
     )
-    if closure_in.pos_name:
+    if station_id:
         pending_sales_query = pending_sales_query.filter(
-            models.Sale.pos_name == closure_in.pos_name
+            models.Sale.station_id == station_id
+        )
+    elif pos_name:
+        pending_sales_query = pending_sales_query.filter(
+            models.Sale.pos_name == pos_name
         )
 
-    pending_sales = (
-        pending_sales_query.order_by(models.Sale.created_at.asc()).all()
-    )
+    pending_sales = pending_sales_query.order_by(models.Sale.created_at.asc()).all()
+    admin_fallback_used = False
+
+    if not pending_sales and station_id and user.role == "Administrador":
+        fallback_query = db.query(models.Sale).filter(
+            models.Sale.closure_id.is_(None),
+            models.Sale.station_id.is_(None),
+        )
+        if pos_name:
+            fallback_query = fallback_query.filter(
+                models.Sale.pos_name == pos_name
+            )
+        pending_sales = fallback_query.order_by(models.Sale.created_at.asc()).all()
+        if pending_sales:
+            for sale in pending_sales:
+                sale.station_id = station_id
+            db.flush()
+            admin_fallback_used = True
+
     if not pending_sales:
         raise ValueError("No hay ventas pendientes por cerrar")
 
@@ -1425,9 +1531,26 @@ def create_pos_closure(
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(models.SeparatedOrderPayment.closure_id.is_(None))
     )
-    if closure_in.pos_name:
-        sep_payment_filter = sep_payment_filter.filter(models.Sale.pos_name == closure_in.pos_name)
-        sep_ids_query = sep_ids_query.filter(models.Sale.pos_name == closure_in.pos_name)
+    if station_id:
+        sep_payment_filter = sep_payment_filter.filter(
+            or_(
+                models.SeparatedOrderPayment.station_id == station_id,
+                models.Sale.station_id == station_id,
+            )
+        )
+        sep_ids_query = sep_ids_query.filter(
+            or_(
+                models.SeparatedOrderPayment.station_id == station_id,
+                models.Sale.station_id == station_id,
+            )
+        )
+    elif pos_name:
+        sep_payment_filter = sep_payment_filter.filter(
+            models.Sale.pos_name == pos_name
+        )
+        sep_ids_query = sep_ids_query.filter(
+            models.Sale.pos_name == pos_name
+        )
 
     sep_rows = sep_payment_filter.group_by(models.SeparatedOrderPayment.method).all()
     sep_payment_ids = [row[0] for row in sep_ids_query.all()]
@@ -1441,8 +1564,9 @@ def create_pos_closure(
     total_surcharge = sum(float(sale.surcharge_amount or 0.0) for sale in pending_sales)
 
     closure = models.PosClosure(
-        pos_name=closure_in.pos_name,
+        pos_name=pos_name,
         pos_identifier=closure_in.pos_identifier,
+        station_id=station_id,
         closed_by_user_id=user.id,
         closed_by_user_name=user.name,
         opened_at=range_start,
@@ -1476,6 +1600,13 @@ def create_pos_closure(
             .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
             .update({"closure_id": closure.id}, synchronize_session=False)
         )
+        if admin_fallback_used and station_id:
+            (
+                db.query(models.SeparatedOrderPayment)
+                .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
+                .filter(models.SeparatedOrderPayment.station_id.is_(None))
+                .update({"station_id": station_id}, synchronize_session=False)
+            )
 
     db.commit()
     db.refresh(closure)
