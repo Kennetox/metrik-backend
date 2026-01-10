@@ -303,7 +303,7 @@ TICKET_STYLE = """
 INVOICE_STYLE = """
         @page {
           size: auto;
-          margin: 18mm 20mm 22mm 20mm;
+          margin: 12mm 16mm 14mm 16mm;
           @bottom-right {
             content: "Página " counter(page);
             font-size: 11px;
@@ -313,50 +313,53 @@ INVOICE_STYLE = """
         body {
           font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
           margin: 0;
-          background: #f1f5f9;
+          background: #f8fafc;
           color: #0f172a;
         }
         .invoice-wrapper {
-          max-width: 860px;
+          max-width: 760px;
           margin: 0 auto;
           background: #ffffff;
-          padding: 32px 36px 40px;
-          box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+          padding: 24px 28px 28px;
+          box-shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+          border-radius: 14px;
+          page-break-inside: avoid;
         }
         .invoice-header {
           display: flex;
           justify-content: space-between;
-          gap: 24px;
-          padding-bottom: 18px;
+          gap: 18px;
+          padding-bottom: 14px;
           border-bottom: 1px solid #e2e8f0;
         }
         .invoice-title {
-          font-size: 26px;
+          font-size: 24px;
           letter-spacing: 0.08em;
           font-weight: 700;
         }
         .invoice-company {
-          margin-top: 12px;
-          font-size: 13px;
-          line-height: 1.4;
+          margin-top: 8px;
+          font-size: 12px;
+          line-height: 1.35;
           color: #475569;
         }
         .invoice-logo img {
-          max-width: 140px;
-          max-height: 90px;
+          max-width: 120px;
+          max-height: 72px;
           object-fit: contain;
         }
         .invoice-meta {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-          gap: 16px;
-          margin-top: 24px;
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+          gap: 12px;
+          margin-top: 18px;
         }
         .invoice-card {
           border: 1px solid #e2e8f0;
-          border-radius: 14px;
-          padding: 16px;
+          border-radius: 12px;
+          padding: 14px;
           background: #f8fafc;
+          page-break-inside: avoid;
         }
         .invoice-card .label,
         .invoice-notes .label {
@@ -368,14 +371,14 @@ INVOICE_STYLE = """
           font-weight: 600;
         }
         .invoice-card .value {
-          font-size: 14px;
+          font-size: 13px;
           color: #0f172a;
         }
         .invoice-card .row {
           display: flex;
           justify-content: space-between;
-          font-size: 13px;
-          margin-bottom: 4px;
+          font-size: 12px;
+          margin-bottom: 3px;
         }
         .invoice-card .row:last-child {
           margin-bottom: 0;
@@ -383,21 +386,22 @@ INVOICE_STYLE = """
         .invoice-table {
           width: 100%;
           border-collapse: collapse;
-          margin-top: 30px;
+          margin-top: 18px;
+          page-break-inside: avoid;
         }
         .invoice-table thead th {
           background: #e2e8f0;
-          padding: 10px 8px;
-          font-size: 12px;
+          padding: 8px 6px;
+          font-size: 11px;
           text-transform: uppercase;
           letter-spacing: 0.05em;
           color: #475569;
           text-align: left;
         }
         .invoice-table tbody td {
-          padding: 12px 8px;
+          padding: 10px 6px;
           border-bottom: 1px solid #e2e8f0;
-          font-size: 13px;
+          font-size: 12px;
         }
         .invoice-table tbody tr:last-child td {
           border-bottom: none;
@@ -412,49 +416,53 @@ INVOICE_STYLE = """
         }
         .invoice-summary {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-          gap: 18px;
-          margin-top: 24px;
+          grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+          gap: 14px;
+          margin-top: 18px;
+          page-break-inside: avoid;
         }
         .totals-card,
         .payments-card {
           border: 1px solid #e2e8f0;
-          border-radius: 16px;
-          padding: 18px;
+          border-radius: 12px;
+          padding: 14px;
           background: #ffffff;
+          page-break-inside: avoid;
         }
         .totals-card .row,
         .payments-card .row {
           display: flex;
           justify-content: space-between;
-          font-size: 14px;
-          margin-bottom: 8px;
+          font-size: 13px;
+          margin-bottom: 6px;
         }
         .totals-card .row.total {
           font-weight: 700;
-          font-size: 18px;
+          font-size: 16px;
           color: #0f172a;
         }
         .payments-card .row.emphasis {
           font-weight: 600;
         }
         .invoice-notes {
-          margin-top: 24px;
+          margin-top: 16px;
           border: 1px solid #e2e8f0;
-          border-radius: 12px;
-          padding: 16px;
+          border-radius: 10px;
+          padding: 14px;
           background: #fff7ed;
           color: #7c2d12;
-          font-size: 13px;
+          font-size: 12px;
+          page-break-inside: avoid;
         }
         .invoice-notes .label {
           color: #7c2d12;
         }
         .invoice-footer {
-          margin-top: 30px;
+          margin-top: 18px;
           text-align: center;
-          font-size: 12px;
+          font-size: 11px;
           color: #94a3b8;
+          page-break-inside: avoid;
         }
 """
 
@@ -812,6 +820,180 @@ def _generate_code39_svg(
     )
 
 
+CODE128_PATTERNS = [
+    "212222",
+    "222122",
+    "222221",
+    "121223",
+    "121322",
+    "131222",
+    "122213",
+    "122312",
+    "132212",
+    "221213",
+    "221312",
+    "231212",
+    "112232",
+    "122132",
+    "122231",
+    "113222",
+    "123122",
+    "123221",
+    "223211",
+    "221132",
+    "221231",
+    "213212",
+    "223112",
+    "312131",
+    "311222",
+    "321122",
+    "321221",
+    "312212",
+    "322112",
+    "322211",
+    "212123",
+    "212321",
+    "232121",
+    "111323",
+    "131123",
+    "131321",
+    "112313",
+    "132113",
+    "132311",
+    "211313",
+    "231113",
+    "231311",
+    "112133",
+    "112331",
+    "132131",
+    "113123",
+    "113321",
+    "133121",
+    "313121",
+    "211331",
+    "231131",
+    "213113",
+    "213311",
+    "213131",
+    "311123",
+    "311321",
+    "331121",
+    "312113",
+    "312311",
+    "332111",
+    "314111",
+    "221411",
+    "431111",
+    "111224",
+    "111422",
+    "121124",
+    "121421",
+    "141122",
+    "141221",
+    "112214",
+    "112412",
+    "122114",
+    "122411",
+    "142112",
+    "142211",
+    "241211",
+    "221114",
+    "413111",
+    "241112",
+    "134111",
+    "111242",
+    "121142",
+    "121241",
+    "114212",
+    "124112",
+    "124211",
+    "411212",
+    "421112",
+    "421211",
+    "212141",
+    "214121",
+    "412121",
+    "111143",
+    "111341",
+    "131141",
+    "114113",
+    "114311",
+    "411113",
+    "411311",
+    "113141",
+    "114131",
+    "311141",
+    "411131",
+    "211412",
+    "211214",
+    "211232",
+    "2331112",
+]
+
+
+def _sanitize_code128c_value(value: str) -> str:
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    return digits or "0"
+
+
+def _generate_code128_svg(
+    value: str,
+    height: float = 90.0,
+    module_width: float = 2.0,
+    include_text: bool = True,
+    font_size: float = 14.0,
+    quiet_zone_modules: int = 10,
+) -> str:
+    if not value:
+        return ""
+    data = _sanitize_code128c_value(value)
+    if len(data) % 2 == 1:
+        data = f"0{data}"
+
+    codes = [105]  # Start Code C
+    for idx in range(0, len(data), 2):
+        codes.append(int(data[idx : idx + 2]))
+
+    checksum = codes[0]
+    for idx in range(1, len(codes)):
+        checksum += codes[idx] * idx
+    codes.append(checksum % 103)
+    codes.append(106)  # Stop
+
+    quiet_zone = module_width * quiet_zone_modules
+    x_position = quiet_zone
+    bars = []
+
+    for code in codes:
+        pattern = CODE128_PATTERNS[code]
+        for idx, module in enumerate(pattern):
+            width = int(module) * module_width
+            if idx % 2 == 0:
+                bars.append(
+                    f'<rect x="{x_position:.2f}" y="0" width="{width:.2f}" height="{height:.2f}" fill="#0f172a" />'
+                )
+            x_position += width
+
+    x_position += quiet_zone
+    total_width = max(x_position, 160.0)
+    text_space = font_size + 6 if include_text else 0
+    view_height = height + text_space
+    text_element = ""
+    if include_text:
+        text_element = (
+            f'<text x="{total_width/2:.2f}" y="{height + font_size:.2f}" '
+            f'font-size="{font_size}" text-anchor="middle" fill="#0f172a" '
+            'font-family="Inter, Arial, sans-serif">'
+            f"{_escape_html(data)}</text>"
+        )
+    bars_html = "".join(bars)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_width:.2f}" '
+        f'height="{view_height:.2f}" viewBox="0 0 {total_width:.2f} {view_height:.2f}">'
+        f"{bars_html}{text_element}</svg>"
+    )
+
+
 def _render_modern_ticket_html(
     sale: models.Sale,
     company: dict,
@@ -837,7 +1019,12 @@ def _render_modern_ticket_html(
     customer_block = _customer_block(sale)
     cart_discount_label, cart_discount_display = _cart_discount_meta(sale)
     footer_html = _footer_lines(company["footer"])
-    barcode_svg = _generate_code39_svg(str(sale_number))
+    sale_number_str = str(sale_number or "")
+    numeric_sale = "".join(ch for ch in sale_number_str if ch.isdigit()) or sale_number_str
+    if not numeric_sale.isdigit():
+        numeric_sale = ""
+    padded_sale = numeric_sale.zfill(6) if numeric_sale else "000000"
+    barcode_svg = _generate_code128_svg(padded_sale, height=90.0, module_width=2.0, include_text=True, font_size=14.0, quiet_zone_modules=10)
     total_amount = _effective_total(sale)
 
     parts: List[str] = [
