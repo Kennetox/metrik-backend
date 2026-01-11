@@ -17,6 +17,7 @@ from database import get_db
 from dependencies import require_permission
 from services import email as email_service
 from services import ticket_renderer
+from services import storage
 from services.password_reset import (
     PASSWORD_RESET_TOKEN_TTL_SECONDS,
     build_reset_link,
@@ -401,14 +402,26 @@ def update_pos_settings(
     return updated
 
 
-@router.post("/settings/logo")
-async def upload_logo_placeholder(
+@router.post("/logo-upload", response_model=schemas.UploadLogoResponse)
+@router.post("/settings/logo", response_model=schemas.UploadLogoResponse)
+async def upload_logo(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     _: models.PosUser = Depends(require_permission("settings.manage")),
 ):
-    # TODO: implementar almacenamiento real y actualización de logo_url
-    raise HTTPException(status_code=501, detail="Subida de logo pendiente de implementación")
+    try:
+        result = await storage.save_pos_logo(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        raise HTTPException(500, detail=f"No se pudo guardar el logo: {exc}") from exc
+
+    settings = crud.get_pos_settings(db)
+    settings.logo_url = result.url
+    settings.ticket_logo_url = result.url
+    db.commit()
+    db.refresh(settings)
+    return schemas.UploadLogoResponse(url=result.url)
 
 
 @router.get(
