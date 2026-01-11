@@ -453,7 +453,6 @@ def update_pos_settings(
 @router.get("/qz/cert")
 def get_qz_certificate(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
 ):
     cert = _get_qz_cert()
     return Response(content=cert, media_type="text/plain")
