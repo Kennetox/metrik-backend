@@ -1,6 +1,8 @@
 from datetime import datetime
 from html import escape
 from typing import List, Optional
+import base64
+import os
 
 from fastapi import (
     APIRouter,
@@ -11,6 +13,8 @@ from fastapi import (
     Response,
 )
 from sqlalchemy.orm import Session
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 import schemas, crud, models
 from database import get_db
@@ -29,6 +33,50 @@ router = APIRouter(
     prefix="/pos",
     tags=["pos"],
 )
+
+
+def _load_qz_env(name: str) -> str:
+    value = os.getenv(name, "")
+    if not value:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Falta configurar {name} en el servidor.",
+        )
+    value = value.replace("\\n", "\n")
+    if "-----BEGIN" not in value:
+        try:
+            value = base64.b64decode(value).decode("utf-8")
+        except Exception:
+            pass
+    return value
+
+
+def _get_qz_cert() -> str:
+    return _load_qz_env("QZ_CERT")
+
+
+def _get_qz_private_key() -> str:
+    return _load_qz_env("QZ_PRIVATE_KEY")
+
+
+def _sign_qz_payload(payload: str) -> str:
+    private_key_pem = _get_qz_private_key()
+    try:
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode("utf-8"),
+            password=None,
+        )
+        signature = private_key.sign(
+            payload.encode("utf-8"),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo firmar el reto de QZ: {exc}",
+        ) from exc
+    return base64.b64encode(signature).decode("utf-8")
 
 
 def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
@@ -400,6 +448,25 @@ def update_pos_settings(
     settings = crud.get_pos_settings(db)
     updated = crud.update_pos_settings(db, settings, settings_in)
     return updated
+
+
+@router.get("/qz/cert")
+def get_qz_certificate(
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    cert = _get_qz_cert()
+    return Response(content=cert, media_type="text/plain")
+
+
+@router.post("/qz/sign", response_model=schemas.QzSignResponse)
+def sign_qz_request(
+    payload: schemas.QzSignRequest,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    signature = _sign_qz_payload(payload.data)
+    return schemas.QzSignResponse(signature=signature)
 
 
 @router.post("/logo-upload", response_model=schemas.UploadLogoResponse)

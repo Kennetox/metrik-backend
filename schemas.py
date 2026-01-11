@@ -534,6 +534,14 @@ class UploadLogoResponse(BaseModel):
     url: str
 
 
+class QzSignRequest(BaseModel):
+    data: str
+
+
+class QzSignResponse(BaseModel):
+    signature: str
+
+
 class ReportEmailRequest(BaseModel):
     recipients: List[EmailStr]
     subject: Optional[str] = None
