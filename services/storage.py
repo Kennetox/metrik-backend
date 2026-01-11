@@ -8,6 +8,8 @@ from fastapi import UploadFile
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 2 * 1024 * 1024  # 2MB
+LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
+MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 
 
 @dataclass
@@ -15,6 +17,12 @@ class StoredProductImage:
     filename: str
     url: str
     thumb_url: str
+
+
+@dataclass
+class StoredLogo:
+    filename: str
+    url: str
 
 
 def _get_base_dir(tenant_id: Optional[int] = None) -> Path:
@@ -50,6 +58,18 @@ def _build_public_url(filename: str, tenant_id: Optional[int] = None) -> str:
     return f"{storage_path.rstrip('/')}/{relative_path}"
 
 
+def _get_logo_dir() -> Path:
+    return Path(os.getenv("POS_LOGO_UPLOAD_DIR", "uploads/pos-logos"))
+
+
+def _build_logo_url(filename: str) -> str:
+    base_url = os.getenv("POS_LOGO_BASE_URL")
+    if base_url:
+        return f"{base_url.rstrip('/')}/{filename}"
+    storage_path = os.getenv("POS_LOGO_PUBLIC_PATH", "/uploads/pos-logos")
+    return f"{storage_path.rstrip('/')}/{filename}"
+
+
 async def save_product_image(
     file: UploadFile,
     tenant_id: Optional[int] = None,
@@ -76,3 +96,25 @@ async def save_product_image(
 
     url = _build_public_url(filename, tenant_id)
     return StoredProductImage(filename=filename, url=url, thumb_url=url)
+
+
+async def save_pos_logo(file: UploadFile) -> StoredLogo:
+    original_name = file.filename or ""
+    extension = Path(original_name).suffix.lower()
+    if extension not in LOGO_ALLOWED_EXTENSIONS:
+        raise ValueError("Formato no soportado. Usa PNG, JPG o SVG.")
+
+    contents = await file.read()
+    if len(contents) > MAX_LOGO_SIZE:
+        raise ValueError("El logo supera 1MB")
+
+    filename = f"pos-logo-{uuid4().hex}{extension}"
+    base_dir = _get_logo_dir()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    file_path = base_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    url = _build_logo_url(filename)
+    return StoredLogo(filename=filename, url=url)
