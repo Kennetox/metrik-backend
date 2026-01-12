@@ -162,7 +162,7 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
 )
 def list_payment_methods(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    _: models.PosUser = Depends(require_permission("settings.payment_methods.view")),
 ):
     methods = crud.list_payment_methods(db)
     return methods

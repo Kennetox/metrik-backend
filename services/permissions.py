@@ -146,6 +146,14 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "label": "Métodos de pago",
                 "roles": _role_flags(Administrador=True),
             },
+            {
+                "id": "settings.payment_methods.view",
+                "label": "Ver métodos de pago",
+                "description": "Permite consultar los métodos de pago desde el POS.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Vendedor=True
+                ),
+            },
         ],
     },
     {
