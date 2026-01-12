@@ -45,7 +45,10 @@ def export_labels_excel(
         raise HTTPException(status_code=400, detail="Debes enviar al menos un producto")
 
     workbook = Workbook()
-    workbook.calculation_properties.fullCalcOnLoad = True
+    try:
+        workbook.calculation_properties.fullCalcOnLoad = True
+    except AttributeError:
+        pass
     sheet = workbook.active
     sheet.title = "Etiquetas"
     headers = ["SKU", "Nombre", "Precio", "Código de barras"]
