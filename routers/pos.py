@@ -446,7 +446,7 @@ def get_return(
 @router.get("/settings", response_model=schemas.PosSettingsRead)
 def get_pos_settings(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    _: models.PosUser = Depends(require_permission("settings.view")),
 ):
     settings = crud.get_pos_settings(db)
     return settings

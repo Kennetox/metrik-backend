@@ -19,7 +19,7 @@ def list_groups(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("products.manage")),
+    _: object = Depends(require_permission("products.view")),
 ):
     return crud.list_product_groups(db, skip=skip, limit=limit)
 

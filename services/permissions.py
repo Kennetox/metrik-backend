@@ -86,6 +86,14 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
         "roles": _role_flags(Administrador=True, Supervisor=True),
         "actions": [
             {
+                "id": "products.view",
+                "label": "Ver productos",
+                "description": "Permite consultar catálogo y grupos para el POS.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Vendedor=True, Auditor=True
+                ),
+            },
+            {
                 "id": "products.manage",
                 "label": "Administrar productos",
                 "roles": _role_flags(Administrador=True, Supervisor=True),
@@ -120,6 +128,14 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
         "description": "Preferencias del POS, SMTP y otros ajustes.",
         "roles": _role_flags(Administrador=True),
         "actions": [
+            {
+                "id": "settings.view",
+                "label": "Ver configuración POS",
+                "description": "Permite consultar las preferencias para el POS.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Vendedor=True
+                ),
+            },
             {
                 "id": "settings.manage",
                 "label": "Configurar POS",
