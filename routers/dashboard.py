@@ -1,5 +1,6 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends
@@ -107,9 +108,13 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         )
 
     # --- Últimos 7 días (incluye hoy) ---
+    bogota_tz = ZoneInfo("America/Bogota")
     trend_map = {}
     for sale in sales_last_7:
-        day = sale.created_at.date()
+        created_at = sale.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        day = created_at.astimezone(bogota_tz).date()
         if day not in trend_map:
             trend_map[day] = {"total": 0.0, "tickets": 0}
 
@@ -123,7 +128,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     last_7_days: List[schemas.SalesTrendPoint] = []
     for day in sorted(trend_map.keys()):
         stats = trend_map[day]
-        day_dt = datetime(day.year, day.month, day.day)
+        day_dt = datetime(day.year, day.month, day.day, tzinfo=bogota_tz)
         last_7_days.append(
             schemas.SalesTrendPoint(
                 date=day_dt,
@@ -131,6 +136,8 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
                 tickets=int(stats["tickets"]),
             )
         )
+
+
 
     return schemas.DashboardSummary(
         today_sales_total=today_sales_total,
