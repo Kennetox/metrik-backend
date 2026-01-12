@@ -45,12 +45,14 @@ def export_labels_excel(
         raise HTTPException(status_code=400, detail="Debes enviar al menos un producto")
 
     workbook = Workbook()
+    workbook.calculation_properties.fullCalcOnLoad = True
     sheet = workbook.active
     sheet.title = "Etiquetas"
     headers = ["SKU", "Nombre", "Precio", "Código de barras"]
     sheet.append(headers)
     for cell in sheet[sheet.max_row]:
         cell.number_format = "@"
+        cell.data_type = "s"
         if cell.value is not None:
             cell.value = str(cell.value)
 
@@ -71,6 +73,7 @@ def export_labels_excel(
             )
             for cell in sheet[sheet.max_row]:
                 cell.number_format = "@"
+                cell.data_type = "s"
                 if cell.value is not None:
                     cell.value = str(cell.value)
 
