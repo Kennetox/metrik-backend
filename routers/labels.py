@@ -49,6 +49,10 @@ def export_labels_excel(
     sheet.title = "Etiquetas"
     headers = ["SKU", "Nombre", "Precio", "Código de barras"]
     sheet.append(headers)
+    for cell in sheet[sheet.max_row]:
+        cell.number_format = "@"
+        if cell.value is not None:
+            cell.value = str(cell.value)
 
     for item in payload.items:
         try:
@@ -65,6 +69,10 @@ def export_labels_excel(
                     (item.barcode or ""),
                 ]
             )
+            for cell in sheet[sheet.max_row]:
+                cell.number_format = "@"
+                if cell.value is not None:
+                    cell.value = str(cell.value)
 
     stream = BytesIO()
     workbook.save(stream)
