@@ -463,6 +463,45 @@ def update_pos_settings(
     return updated
 
 
+@router.post("/settings/test-email", response_model=schemas.EmailSendResponse)
+def send_settings_test_email(
+    payload: schemas.SmtpTestEmailRequest,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("settings.manage")),
+):
+    recipients = list(payload.recipients or [])
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Agrega al menos un destinatario")
+
+    settings = crud.get_pos_settings(db)
+    smtp_config = {
+        "smtp_host": payload.smtp_host or settings.smtp_host,
+        "smtp_port": payload.smtp_port or settings.smtp_port,
+        "smtp_user": payload.smtp_user or settings.smtp_user,
+        "smtp_password": payload.smtp_password or settings.smtp_password,
+        "smtp_use_tls": (
+            payload.smtp_use_tls
+            if payload.smtp_use_tls is not None
+            else settings.smtp_use_tls
+        ),
+        "email_from": payload.email_from or settings.email_from,
+    }
+    subject = payload.subject or "Prueba de correo - Kensar POS"
+    message = payload.message or "Este es un correo de prueba del POS."
+
+    try:
+        email_service.send_email(
+            recipients=recipients,
+            subject=subject,
+            body=f"<p>{escape(message)}</p>",
+            smtp_config=smtp_config,
+        )
+    except email_service.EmailDeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return schemas.EmailSendResponse(status="sent")
+
+
 @router.get("/qz/cert")
 def get_qz_certificate(
     db: Session = Depends(get_db),

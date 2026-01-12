@@ -661,6 +661,18 @@ class EmailSendResponse(BaseModel):
     document_type: Literal["ticket", "invoice"] = "ticket"
 
 
+class SmtpTestEmailRequest(BaseModel):
+    recipients: List[EmailStr] = Field(default_factory=list)
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_use_tls: Optional[bool] = None
+    email_from: Optional[EmailStr] = None
+    subject: Optional[str] = None
+    message: Optional[str] = None
+
+
 class SeparatedOrderPaymentBase(BaseModel):
     method: str
     amount: float
