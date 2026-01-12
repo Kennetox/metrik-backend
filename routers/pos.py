@@ -59,9 +59,22 @@ def _get_qz_private_key() -> str:
     return _load_qz_env("QZ_PRIVATE_KEY")
 
 
+def _get_qz_signature_hash() -> hashes.HashAlgorithm:
+    algo = os.getenv("QZ_SIGNATURE_ALGO", "sha256").strip().lower()
+    if algo in ("sha1", "sha-1"):
+        return hashes.SHA1()
+    if algo in ("sha256", "sha-256"):
+        return hashes.SHA256()
+    raise HTTPException(
+        status_code=500,
+        detail=f"Algoritmo de firma QZ invalido: {algo}. Usa sha256 o sha1.",
+    )
+
+
 def _sign_qz_payload(payload: str) -> str:
     private_key_pem = _get_qz_private_key()
     try:
+        hash_algo = _get_qz_signature_hash()
         private_key = serialization.load_pem_private_key(
             private_key_pem.encode("utf-8"),
             password=None,
@@ -69,7 +82,7 @@ def _sign_qz_payload(payload: str) -> str:
         signature = private_key.sign(
             payload.encode("utf-8"),
             padding.PKCS1v15(),
-            hashes.SHA256(),
+            hash_algo,
         )
     except Exception as exc:
         raise HTTPException(
