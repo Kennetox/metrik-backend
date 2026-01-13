@@ -48,164 +48,208 @@ def _table_exists(connection, table: str) -> bool:
     return result is not None
 
 
+def _ensure_column_postgres(
+    connection, table: str, column: str, ddl: str
+) -> None:
+    connection.execute(
+        text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
+    )
+
+
 def run_schema_upgrades(engine: Engine) -> None:
-    """Adds the new discount-related columns if they don't exist yet."""
+    """Adds missing columns if they don't exist yet."""
+
+    backend = engine.url.get_backend_name()
+    if backend not in {"sqlite", "postgresql"}:
+        return
 
     with engine.connect() as connection:
         with connection.begin():
-            _ensure_column(
-                connection,
-                "sales",
-                "cart_discount_value",
-                "FLOAT DEFAULT 0",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "cart_discount_percent",
-                "FLOAT DEFAULT 0",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "surcharge_amount",
-                "FLOAT DEFAULT 0",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "surcharge_label",
-                "VARCHAR(60)",
-            )
-            _ensure_column(
-                connection,
-                "products",
-                "image_url",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "products",
-                "image_thumb_url",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "products",
-                "tile_color",
-                "VARCHAR(7)",
-            )
-            _ensure_table_password_resets(connection)
-            _ensure_table_payment_methods(connection)
-            _seed_default_payment_methods(connection)
-            _ensure_column(
-                connection,
-                "sales",
-                "customer_id",
-                "INTEGER",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "pos_name",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "vendor_name",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "customer_phone",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "customer_email",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "customer_tax_id",
-                "TEXT",
-            )
-            _ensure_column(
-                connection,
-                "sales",
-                "customer_address",
-                "TEXT",
-            )
-            _ensure_table_pos_stations(connection)
-            _ensure_column(connection, "pos_users", "phone", "TEXT")
-            _ensure_column(connection, "pos_users", "position", "TEXT")
-            _ensure_column(connection, "pos_users", "notes", "TEXT")
-            _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
-            _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
-            if _table_exists(connection, "pos_settings"):
+            if backend == "sqlite":
                 _ensure_column(
                     connection,
-                    "pos_settings",
-                    "ticket_logo_url",
+                    "sales",
+                    "cart_discount_value",
+                    "FLOAT DEFAULT 0",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "cart_discount_percent",
+                    "FLOAT DEFAULT 0",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "surcharge_amount",
+                    "FLOAT DEFAULT 0",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "surcharge_label",
+                    "VARCHAR(60)",
+                )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "image_url",
                     "TEXT",
                 )
                 _ensure_column(
                     connection,
-                    "pos_settings",
-                    "closure_email_recipients",
-                    "TEXT DEFAULT '[]'",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "ticket_email_cc",
-                    "TEXT DEFAULT '[]'",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "smtp_host",
-                    "TEXT DEFAULT ''",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "smtp_port",
-                    "INTEGER DEFAULT 0",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "smtp_user",
-                    "TEXT DEFAULT ''",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "smtp_password",
-                    "TEXT DEFAULT ''",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "smtp_use_tls",
-                    "BOOLEAN DEFAULT 1",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "email_from",
-                    "TEXT DEFAULT ''",
-                )
-                _ensure_column(
-                    connection,
-                    "pos_settings",
-                    "role_permissions",
+                    "products",
+                    "image_thumb_url",
                     "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "tile_color",
+                    "VARCHAR(7)",
+                )
+                _ensure_table_password_resets(connection)
+                _ensure_table_payment_methods(connection)
+                _seed_default_payment_methods(connection)
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "customer_id",
+                    "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "pos_name",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "station_id",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "vendor_name",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "customer_phone",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "customer_email",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "customer_tax_id",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "customer_address",
+                    "TEXT",
+                )
+                _ensure_table_pos_stations(connection)
+                _ensure_column(connection, "pos_users", "phone", "TEXT")
+                _ensure_column(connection, "pos_users", "position", "TEXT")
+                _ensure_column(connection, "pos_users", "notes", "TEXT")
+                _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
+                _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
+                if _table_exists(connection, "pos_settings"):
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "ticket_logo_url",
+                        "TEXT",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "closure_email_recipients",
+                        "TEXT DEFAULT '[]'",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "ticket_email_cc",
+                        "TEXT DEFAULT '[]'",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "smtp_host",
+                        "TEXT DEFAULT ''",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "smtp_port",
+                        "INTEGER DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "smtp_user",
+                        "TEXT DEFAULT ''",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "smtp_password",
+                        "TEXT DEFAULT ''",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "smtp_use_tls",
+                        "BOOLEAN DEFAULT 1",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "email_from",
+                        "TEXT DEFAULT ''",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "role_permissions",
+                        "TEXT",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "web_pos_send_closure_email",
+                        "BOOLEAN DEFAULT 1",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "station_closure_email_overrides",
+                        "TEXT DEFAULT '{}'",
+                    )
+            elif backend == "postgresql":
+                _ensure_column_postgres(
+                    connection,
+                    "pos_settings",
+                    "web_pos_send_closure_email",
+                    "BOOLEAN DEFAULT TRUE",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_settings",
+                    "station_closure_email_overrides",
+                    "JSONB DEFAULT '{}'::jsonb",
                 )
 
             if not _table_exists(connection, "pos_closures"):
@@ -216,6 +260,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                             id INTEGER PRIMARY KEY,
                             pos_name TEXT,
                             pos_identifier TEXT,
+                            station_id TEXT,
                             closed_by_user_id INTEGER NOT NULL,
                             closed_by_user_name TEXT NOT NULL,
                             opened_at DATETIME,
@@ -325,6 +370,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
             )
             if _table_exists(connection, "pos_closures"):
+                _ensure_column(
+                    connection,
+                    "pos_closures",
+                    "station_id",
+                    "TEXT",
+                )
                 _ensure_column(
                     connection,
                     "pos_closures",
@@ -554,7 +605,9 @@ def run_schema_upgrades(engine: Engine) -> None:
                             reference TEXT,
                             note TEXT,
                             closure_id INTEGER,
+                            station_id TEXT,
                             FOREIGN KEY(separated_order_id) REFERENCES separated_orders(id) ON DELETE CASCADE,
+                            FOREIGN KEY(station_id) REFERENCES pos_stations(id),
                             FOREIGN KEY(closure_id) REFERENCES pos_closures(id)
                         )
                         """
@@ -578,6 +631,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "separated_order_payments",
                     "closure_id",
                     "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "station_id",
+                    "TEXT",
                 )
 
             if _table_exists(connection, "pos_users"):

@@ -548,7 +548,7 @@ async def upload_logo(
 )
 def get_role_permissions(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    _: models.PosUser = Depends(require_permission("settings.view")),
 ):
     modules = crud.get_role_permissions(db)
     return schemas.RolePermissionMatrix(modules=modules)

@@ -984,6 +984,11 @@ def get_pos_settings(db: Session) -> models.PosSettings:
     settings.smtp_user = settings.smtp_user or ""
     settings.smtp_password = settings.smtp_password or ""
     settings.email_from = settings.email_from or ""
+    if settings.web_pos_send_closure_email is None:
+        settings.web_pos_send_closure_email = True
+    settings.station_closure_email_overrides = (
+        settings.station_closure_email_overrides or {}
+    )
     normalized_permissions = permissions.ensure_permissions(settings.role_permissions)
     if settings.role_permissions != normalized_permissions:
         settings.role_permissions = normalized_permissions

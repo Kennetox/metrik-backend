@@ -222,6 +222,10 @@ class PosSettingsBase(BaseModel):
     smtp_password: Optional[str] = None
     smtp_use_tls: bool = True
     email_from: Optional[EmailStr] = None
+    web_pos_send_closure_email: bool = True
+    station_closure_email_overrides: Dict[str, bool] = Field(
+        default_factory=dict
+    )
 
     @field_validator(
         "tax_id",

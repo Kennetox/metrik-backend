@@ -287,6 +287,8 @@ class PosSettings(Base):
     smtp_use_tls = Column(Boolean, nullable=True)
     email_from = Column(String, nullable=True)
     role_permissions = Column(JSON, nullable=True)
+    web_pos_send_closure_email = Column(Boolean, nullable=True, default=True)
+    station_closure_email_overrides = Column(JSON, nullable=True)
 
 
 class PosCustomer(Base):
