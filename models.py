@@ -365,6 +365,11 @@ class PosStation(Base):
     bound_at = Column(DateTime, nullable=True)
     bound_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     bound_by_user_name = Column(String, nullable=True)
+    printer_mode = Column(String, nullable=True)
+    printer_name = Column(String, nullable=True)
+    printer_width = Column(String, nullable=True)
+    printer_auto_open_drawer = Column(Boolean, nullable=True)
+    printer_show_drawer_button = Column(Boolean, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,

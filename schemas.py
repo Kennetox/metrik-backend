@@ -306,6 +306,23 @@ class PosStationUpdate(BaseModel):
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
 
 
+class PosStationPrinterConfigBase(BaseModel):
+    printer_mode: Optional[Literal["browser", "qz-tray"]] = None
+    printer_name: Optional[str] = None
+    printer_width: Optional[Literal["58mm", "80mm"]] = None
+    printer_auto_open_drawer: Optional[bool] = None
+    printer_show_drawer_button: Optional[bool] = None
+
+
+class PosStationPrinterConfigUpdate(PosStationPrinterConfigBase):
+    pass
+
+
+class PosStationPrinterConfigRead(PosStationPrinterConfigBase):
+    class Config:
+        from_attributes = True
+
+
 class PosStationRead(BaseModel):
     id: str
     label: str
@@ -317,6 +334,11 @@ class PosStationRead(BaseModel):
     bound_at: Optional[datetime] = None
     bound_by_user_id: Optional[int] = None
     bound_by_user_name: Optional[str] = None
+    printer_mode: Optional[Literal["browser", "qz-tray"]] = None
+    printer_name: Optional[str] = None
+    printer_width: Optional[Literal["58mm", "80mm"]] = None
+    printer_auto_open_drawer: Optional[bool] = None
+    printer_show_drawer_button: Optional[bool] = None
     created_at: datetime
     updated_at: datetime
 

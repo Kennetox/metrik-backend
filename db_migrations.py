@@ -311,6 +311,36 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "bound_by_user_name",
                     "TEXT",
                 )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_mode",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_name",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_width",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_auto_open_drawer",
+                    "BOOLEAN",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_show_drawer_button",
+                    "BOOLEAN",
+                )
 
             if not _table_exists(connection, "pos_closures"):
                 connection.execute(
@@ -831,6 +861,11 @@ def _ensure_table_pos_stations(connection) -> None:
                     failed_attempts INTEGER NOT NULL DEFAULT 0,
                     last_login_at DATETIME,
                     last_failed_at DATETIME,
+                    printer_mode TEXT,
+                    printer_name TEXT,
+                    printer_width TEXT,
+                    printer_auto_open_drawer BOOLEAN,
+                    printer_show_drawer_button BOOLEAN,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(pos_user_id) REFERENCES pos_users(id)
@@ -851,6 +886,11 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "bound_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "bound_by_user_id", "INTEGER")
         _ensure_column(connection, "pos_stations", "bound_by_user_name", "TEXT")
+        _ensure_column(connection, "pos_stations", "printer_mode", "TEXT")
+        _ensure_column(connection, "pos_stations", "printer_name", "TEXT")
+        _ensure_column(connection, "pos_stations", "printer_width", "TEXT")
+        _ensure_column(connection, "pos_stations", "printer_auto_open_drawer", "BOOLEAN")
+        _ensure_column(connection, "pos_stations", "printer_show_drawer_button", "BOOLEAN")
         _ensure_column(connection, "pos_stations", "created_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "updated_at", "DATETIME")
 

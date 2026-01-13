@@ -107,6 +107,11 @@ def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
         bound_at=station.bound_at,
         bound_by_user_id=station.bound_by_user_id,
         bound_by_user_name=station.bound_by_user_name,
+        printer_mode=station.printer_mode,
+        printer_name=station.printer_name,
+        printer_width=station.printer_width,
+        printer_auto_open_drawer=station.printer_auto_open_drawer,
+        printer_show_drawer_button=station.printer_show_drawer_button,
         created_at=station.created_at,
         updated_at=station.updated_at,
     )
@@ -119,6 +124,18 @@ def _station_to_response(
     data = _station_to_read(station).model_dump()
     data["pin_plain"] = pin_plain
     return schemas.PosStationResponse(**data)
+
+
+def _station_printer_config(
+    station: models.PosStation,
+) -> schemas.PosStationPrinterConfigRead:
+    return schemas.PosStationPrinterConfigRead(
+        printer_mode=station.printer_mode,
+        printer_name=station.printer_name,
+        printer_width=station.printer_width,
+        printer_auto_open_drawer=station.printer_auto_open_drawer,
+        printer_show_drawer_button=station.printer_show_drawer_button,
+    )
 
 
 def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
@@ -707,6 +724,38 @@ def update_pos_station(
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     station, pin_plain = crud.update_pos_station(db, station, payload)
     return _station_to_response(station, pin_plain)
+
+
+@router.get(
+    "/stations/{station_id}/printer-config",
+    response_model=schemas.PosStationPrinterConfigRead,
+)
+def get_station_printer_config(
+    station_id: str,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    return _station_printer_config(station)
+
+
+@router.put(
+    "/stations/{station_id}/printer-config",
+    response_model=schemas.PosStationPrinterConfigRead,
+)
+def update_station_printer_config(
+    station_id: str,
+    payload: schemas.PosStationPrinterConfigUpdate,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    station = crud.update_pos_station_printer_config(db, station, payload)
+    return _station_printer_config(station)
 
 
 @router.delete("/stations/{station_id}", status_code=204)

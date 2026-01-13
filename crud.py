@@ -1250,6 +1250,27 @@ def update_pos_station(
     return station, pin_plain
 
 
+def update_pos_station_printer_config(
+    db: Session,
+    station: models.PosStation,
+    payload: schemas.PosStationPrinterConfigUpdate,
+) -> models.PosStation:
+    data = payload.model_dump(exclude_unset=True)
+    if "printer_mode" in data:
+        station.printer_mode = data["printer_mode"]
+    if "printer_name" in data:
+        station.printer_name = data["printer_name"]
+    if "printer_width" in data:
+        station.printer_width = data["printer_width"]
+    if "printer_auto_open_drawer" in data:
+        station.printer_auto_open_drawer = data["printer_auto_open_drawer"]
+    if "printer_show_drawer_button" in data:
+        station.printer_show_drawer_button = data["printer_show_drawer_button"]
+    db.commit()
+    db.refresh(station)
+    return station
+
+
 def deactivate_pos_station(db: Session, station: models.PosStation):
     station.is_active = False
     db.commit()
