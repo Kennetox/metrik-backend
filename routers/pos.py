@@ -823,7 +823,7 @@ def email_closure_report(
             detail="Debe indicar destinatarios o configurar correos por defecto",
         )
 
-    closure_html = ticket_renderer.render_closure_html(closure)
+    closure_html = ticket_renderer.render_closure_html(closure, settings=settings)
     body_parts = []
     if email_in.message:
         body_parts.append(f"<p>{escape(email_in.message)}</p>")

@@ -1356,7 +1356,20 @@ def _format_currency(value: float) -> str:
     return f"${amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
-def render_closure_html(closure: models.PosClosure) -> str:
+def render_closure_html(
+    closure: models.PosClosure,
+    settings: Optional[models.PosSettings] = None,
+) -> str:
+    profile = _company_profile(settings)
+    logo_url = profile.get("logo_url") or ""
+    company_name = html_escape(profile.get("name") or "Metrik POS")
+    formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
+        str(closure.closed_at)
+    )
+    pos_name = html_escape(closure.pos_name or "N/A")
+    closed_by = html_escape(closure.closed_by_user_name or "N/A")
+    closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
+    sales_count = int(closure.sales_count or 0)
     totals = [
         ("Total ventas", closure.total_amount),
         ("Total efectivo", closure.total_cash),
@@ -1370,20 +1383,79 @@ def render_closure_html(closure: models.PosClosure) -> str:
         ("Diferencia caja", closure.difference),
     ]
     rows = "".join(
-        f"<tr><td>{html_escape(label)}</td>"
-        f"<td style='text-align:right'>{_format_currency(value)}</td></tr>"
+        "<tr>"
+        f"<td style=\"padding:8px 0; color:#e2e8f0;\">{html_escape(label)}</td>"
+        f"<td style=\"padding:8px 0; text-align:right; color:#e2e8f0;\">{_format_currency(value)}</td>"
+        "</tr>"
         for label, value in totals
     )
+    logo_block = ""
+    if logo_url:
+        logo_block = (
+            f"<img src=\"{html_escape(logo_url)}\" alt=\"{company_name}\" "
+            "style=\"height:42px; max-width:160px; display:block;\"/>"
+        )
 
     return f"""
-    <div style="font-family: Arial, sans-serif; max-width: 520px;">
-        <h2>Reporte Z {html_escape(closure.consecutive or f'CL-{closure.id:06d}')}</h2>
-        <p><strong>POS:</strong> {html_escape(closure.pos_name or 'N/A')}<br/>
-        <strong>Cerrado por:</strong> {html_escape(closure.closed_by_user_name)}<br/>
-        <strong>Fecha:</strong> {closure.closed_at}</p>
-        <p><strong># ventas incluidas:</strong> {closure.sales_count}</p>
-        <table style="width:100%;">{rows}</table>
-        <p><strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}</p>
+    <div style="margin:0; padding:0; background:#0b1220;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0b1220; padding:24px 12px;">
+        <tr>
+          <td align="center">
+            <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px; background:#0f172a; border:1px solid #1f2937; border-radius:16px; overflow:hidden; font-family: Arial, sans-serif;">
+              <tr>
+                <td style="padding:22px 28px; background:#0b1220; border-bottom:1px solid #1f2937;">
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                    <tr>
+                      <td style="color:#e2e8f0;">
+                        <div style="font-size:18px; font-weight:700;">Reporte Z</div>
+                        <div style="font-size:12px; color:#94a3b8;">{company_name}</div>
+                      </td>
+                      <td align="right">{logo_block}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:24px 28px 8px; color:#e2e8f0;">
+                  <div style="font-size:20px; font-weight:700; margin-bottom:6px;">Reporte Z {closure_label}</div>
+                  <div style="font-size:13px; color:#94a3b8; margin-bottom:16px;">Resumen del cierre de caja</div>
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-size:13px;">
+                    <tr>
+                      <td style="padding-bottom:6px;"><strong>POS:</strong> {pos_name}</td>
+                      <td style="padding-bottom:6px; text-align:right;"><strong>Fecha:</strong> {formatted_date}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Cerrado por:</strong> {closed_by}</td>
+                      <td style="text-align:right;"><strong>Ventas incluidas:</strong> {sales_count}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0 28px 18px;">
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; font-size:13px;">
+                    <tr>
+                      <th align="left" style="padding:8px 0; text-align:left; color:#94a3b8; border-bottom:1px solid #1f2937;">Concepto</th>
+                      <th align="right" style="padding:8px 0; text-align:right; color:#94a3b8; border-bottom:1px solid #1f2937;">Monto</th>
+                    </tr>
+                    {rows}
+                  </table>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0 28px 24px;">
+                  <div style="font-size:12px; color:#94a3b8; border-top:1px dashed #1f2937; padding-top:12px;">
+                    <strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}
+                  </div>
+                  <div style="font-size:12px; color:#94a3b8; margin-top:8px;">
+                    Adjunto: Reporte Z en PDF
+                  </div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
     </div>
     """
 
