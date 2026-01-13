@@ -39,7 +39,7 @@ def _resolve_sku_text(sku: Optional[str], product_id: int) -> str:
 @router.post("/export/xlsx")
 def export_labels_excel(
     payload: schemas.LabelExportRequest,
-    _: object = Depends(require_permission("products.labels")),
+    _: object = Depends(require_permission("labels.export")),
 ):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Debes enviar al menos un producto")

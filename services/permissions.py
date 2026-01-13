@@ -98,10 +98,18 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "label": "Administrar productos",
                 "roles": _role_flags(Administrador=True, Supervisor=True),
             },
+        ],
+    },
+    {
+        "id": "labels",
+        "label": "Etiquetas",
+        "description": "Generación de archivos para etiquetas.",
+        "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
+        "actions": [
             {
-                "id": "products.labels",
+                "id": "labels.export",
                 "label": "Exportar etiquetas",
-                "roles": _role_flags(Administrador=True, Supervisor=True),
+                "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
             },
         ],
     },
