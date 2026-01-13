@@ -329,7 +329,11 @@ class PosUser(Base):
     invited_at = Column(DateTime, nullable=True)
     accepted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    stations = relationship("PosStation", back_populates="user")
+    stations = relationship(
+        "PosStation",
+        back_populates="user",
+        foreign_keys="PosStation.pos_user_id",
+    )
 
 
 class PasswordReset(Base):
@@ -369,7 +373,11 @@ class PosStation(Base):
         nullable=False,
     )
 
-    user = relationship("PosUser", back_populates="stations")
+    user = relationship(
+        "PosUser",
+        back_populates="stations",
+        foreign_keys=[pos_user_id],
+    )
 
 
 class PosClosure(Base):
