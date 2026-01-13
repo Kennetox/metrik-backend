@@ -831,7 +831,7 @@ def email_closure_report(
 
     attachments = []
     if email_in.attach_pdf:
-        pdf_bytes = ticket_renderer.render_closure_pdf(closure)
+        pdf_bytes = ticket_renderer.render_closure_pdf(closure, settings=settings)
         attachments.append(
             (
                 f"cierre_{closure.consecutive or closure.id}.pdf",

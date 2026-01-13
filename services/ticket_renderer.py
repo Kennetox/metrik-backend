@@ -1361,7 +1361,6 @@ def render_closure_html(
     settings: Optional[models.PosSettings] = None,
 ) -> str:
     profile = _company_profile(settings)
-    logo_url = profile.get("logo_url") or ""
     company_name = html_escape(profile.get("name") or "Metrik POS")
     formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
         str(closure.closed_at)
@@ -1382,105 +1381,129 @@ def render_closure_html(
         ("Neto", closure.net_amount),
         ("Diferencia caja", closure.difference),
     ]
-    rows = "".join(
-        "<tr>"
-        f"<td style=\"padding:8px 0; color:#e2e8f0;\">{html_escape(label)}</td>"
-        f"<td style=\"padding:8px 0; text-align:right; color:#e2e8f0;\">{_format_currency(value)}</td>"
-        "</tr>"
+    totals_lines = "\n".join(
+        f"{html_escape(label)}: {_format_currency(value)}"
         for label, value in totals
+        if float(value or 0) != 0 or label == "Total ventas"
     )
-    logo_block = ""
-    if logo_url:
-        logo_block = (
-            f"<img src=\"{html_escape(logo_url)}\" alt=\"{company_name}\" "
-            "style=\"height:42px; max-width:160px; display:block;\"/>"
-        )
 
     return f"""
-    <div style="margin:0; padding:0; background:#0b1220;">
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0b1220; padding:24px 12px;">
-        <tr>
-          <td align="center">
-            <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="max-width:640px; background:#0f172a; border:1px solid #1f2937; border-radius:16px; overflow:hidden; font-family: Arial, sans-serif;">
-              <tr>
-                <td style="padding:22px 28px; background:#0b1220; border-bottom:1px solid #1f2937;">
-                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
-                    <tr>
-                      <td style="color:#e2e8f0;">
-                        <div style="font-size:18px; font-weight:700;">Reporte Z</div>
-                        <div style="font-size:12px; color:#94a3b8;">{company_name}</div>
-                      </td>
-                      <td align="right">{logo_block}</td>
-                    </tr>
-                  </table>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding:24px 28px 8px; color:#e2e8f0;">
-                  <div style="font-size:20px; font-weight:700; margin-bottom:6px;">Reporte Z {closure_label}</div>
-                  <div style="font-size:13px; color:#94a3b8; margin-bottom:16px;">Resumen del cierre de caja</div>
-                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="font-size:13px;">
-                    <tr>
-                      <td style="padding-bottom:6px;"><strong>POS:</strong> {pos_name}</td>
-                      <td style="padding-bottom:6px; text-align:right;"><strong>Fecha:</strong> {formatted_date}</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Cerrado por:</strong> {closed_by}</td>
-                      <td style="text-align:right;"><strong>Ventas incluidas:</strong> {sales_count}</td>
-                    </tr>
-                  </table>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding:0 28px 18px;">
-                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; font-size:13px;">
-                    <tr>
-                      <th align="left" style="padding:8px 0; text-align:left; color:#94a3b8; border-bottom:1px solid #1f2937;">Concepto</th>
-                      <th align="right" style="padding:8px 0; text-align:right; color:#94a3b8; border-bottom:1px solid #1f2937;">Monto</th>
-                    </tr>
-                    {rows}
-                  </table>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding:0 28px 24px;">
-                  <div style="font-size:12px; color:#94a3b8; border-top:1px dashed #1f2937; padding-top:12px;">
-                    <strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}
-                  </div>
-                  <div style="font-size:12px; color:#94a3b8; margin-top:8px;">
-                    Adjunto: Reporte Z en PDF
-                  </div>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-      </table>
+    <div style="font-family: Arial, sans-serif; color:#111827;">
+      <h2 style="margin:0 0 8px;">Reporte Z {closure_label}</h2>
+      <p style="margin:0 0 12px; color:#374151;">{company_name}</p>
+      <p style="margin:0 0 16px;">
+        <strong>POS:</strong> {pos_name}<br/>
+        <strong>Cerrado por:</strong> {closed_by}<br/>
+        <strong>Fecha:</strong> {formatted_date}
+      </p>
+      <p style="margin:0 0 12px;"><strong>Ventas incluidas:</strong> {sales_count}</p>
+      <pre style="font-family: Arial, sans-serif; margin:0 0 16px; white-space:pre-wrap;">{totals_lines}</pre>
+      <p style="margin:0;"><strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}</p>
+      <p style="margin:8px 0 0; color:#6b7280;">Adjunto: Reporte Z en PDF.</p>
     </div>
     """
 
 
-def render_closure_pdf(closure: models.PosClosure) -> bytes:
-    lines = [
-        f"POS: {closure.pos_name or 'N/A'}",
-        f"Cerrado por: {closure.closed_by_user_name}",
-        f"Fecha: {closure.closed_at}",
-        f"Ventas incluidas: {closure.sales_count}",
-        "",
-        f"Total ventas: {_format_currency(closure.total_amount)}",
-        f"Efectivo: {_format_currency(closure.total_cash)}",
-        f"Tarjeta: {_format_currency(closure.total_card)}",
-        f"QR: {_format_currency(closure.total_qr)}",
-        f"Nequi: {_format_currency(closure.total_nequi)}",
-        f"Daviplata: {_format_currency(closure.total_daviplata)}",
-        f"Crédito: {_format_currency(closure.total_credit)}",
-        f"Devoluciones: {_format_currency(closure.total_refunds)}",
-        f"Neto: {_format_currency(closure.net_amount)}",
-        f"Diferencia: {_format_currency(closure.difference)}",
-        "",
-        f"Notas: {closure.notes or 'Sin notas'}",
+def render_closure_pdf(
+    closure: models.PosClosure,
+    settings: Optional[models.PosSettings] = None,
+) -> bytes:
+    profile = _company_profile(settings)
+    logo_url = profile.get("logo_url") or ""
+    company_name = html_escape(profile.get("name") or "Metrik POS")
+    address = html_escape(profile.get("address") or "")
+    tax_id = html_escape(profile.get("tax_id") or "")
+    formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
+        str(closure.closed_at)
+    )
+    pos_name = html_escape(closure.pos_name or "N/A")
+    closed_by = html_escape(closure.closed_by_user_name or "N/A")
+    closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
+    sales_count = int(closure.sales_count or 0)
+
+    payment_rows = [
+        ("Efectivo", closure.total_cash),
+        ("Tarjeta", closure.total_card),
+        ("QR", closure.total_qr),
+        ("Nequi", closure.total_nequi),
+        ("Daviplata", closure.total_daviplata),
+        ("Crédito", closure.total_credit),
     ]
-    return build_simple_pdf(
+    payment_lines = "\n".join(
+        "<tr>"
+        f"<td style=\"padding:4px 0;\">{html_escape(label)}</td>"
+        f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(value)}</td>"
+        "</tr>"
+        for label, value in payment_rows
+        if float(value or 0) != 0
+    )
+
+    totals_lines = "\n".join(
+        "<tr>"
+        f"<td style=\"padding:4px 0;\">{html_escape(label)}</td>"
+        f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(value)}</td>"
+        "</tr>"
+        for label, value in [
+            ("Total ventas", closure.total_amount),
+            ("Devoluciones", closure.total_refunds),
+            ("Neto", closure.net_amount),
+            ("Diferencia", closure.difference),
+        ]
+    )
+
+    logo_block = ""
+    if logo_url:
+        logo_block = (
+            f"<img src=\"{html_escape(logo_url)}\" "
+            "style=\"height:64px; max-width:140px;\"/>"
+        )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color:#0f172a;">
+        <table width="100%" cellspacing="0" cellpadding="0" style="width:100%;">
+          <tr>
+            <td style="padding:24px;">
+              <table width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td>
+                    <div style="font-size:18px; font-weight:700;">Informe Z</div>
+                    <div style="font-size:16px; font-weight:600;">{company_name}</div>
+                    {f"<div style='font-size:12px; color:#475569;'>{address}</div>" if address else ""}
+                    {f"<div style='font-size:12px; color:#475569;'>NIT: {tax_id}</div>" if tax_id else ""}
+                  </td>
+                  <td align="right">{logo_block}</td>
+                </tr>
+              </table>
+              <div style="height:16px;"></div>
+              <table width="100%" cellspacing="0" cellpadding="0" style="font-size:12px; color:#334155;">
+                <tr>
+                  <td><strong>POS:</strong> {pos_name}</td>
+                  <td align="right"><strong>Fecha:</strong> {formatted_date}</td>
+                </tr>
+                <tr>
+                  <td><strong>Cerrado por:</strong> {closed_by}</td>
+                  <td align="right"><strong>Ventas incluidas:</strong> {sales_count}</td>
+                </tr>
+              </table>
+              <div style="height:12px;"></div>
+              <div style="border-top:1px solid #cbd5f5; padding-top:10px;"></div>
+              <div style="font-weight:600; margin:8px 0;">Resumen</div>
+              <table width="100%" cellspacing="0" cellpadding="0" style="font-size:12px;">
+                {totals_lines}
+              </table>
+              {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Tipos de pago</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'>" + payment_lines + "</table>" if payment_lines else ""}
+              <div style="height:12px;"></div>
+              <div style="border-top:1px solid #cbd5f5; padding-top:10px; font-size:12px;">
+                <strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}
+              </div>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+    return build_pdf_from_html(
         f"Reporte Z {closure.consecutive or f'CL-{closure.id:06d}'}",
-        lines,
+        html,
     )
