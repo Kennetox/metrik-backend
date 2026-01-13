@@ -66,6 +66,21 @@ def pos_login(
         crud.register_pos_station_login_failure(db, station)
         raise HTTPException(status_code=401, detail="PIN inválido o expirado")
 
+    if payload.device_id:
+        if station.bound_device_id and station.bound_device_id != payload.device_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Esta estación ya está vinculada a otro equipo. Solicita al administrador que la libere.",
+            )
+        if not station.bound_device_id:
+            station.bound_device_id = payload.device_id
+            station.bound_device_label = payload.device_label
+            station.bound_at = datetime.utcnow()
+            station.bound_by_user_id = user.id
+            station.bound_by_user_name = user.name
+        elif payload.device_label and not station.bound_device_label:
+            station.bound_device_label = payload.device_label
+
     crud.register_pos_station_login_success(db, station)
     token = create_access_token(user.id, user.role)
     user.last_login = datetime.utcnow()

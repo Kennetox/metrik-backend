@@ -102,6 +102,11 @@ def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
         pos_user_email=email,
         is_active=bool(station.is_active),
         last_login_at=station.last_login_at,
+        bound_device_id=station.bound_device_id,
+        bound_device_label=station.bound_device_label,
+        bound_at=station.bound_at,
+        bound_by_user_id=station.bound_by_user_id,
+        bound_by_user_name=station.bound_by_user_name,
         created_at=station.created_at,
         updated_at=station.updated_at,
     )
@@ -715,6 +720,28 @@ def deactivate_pos_station(
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     crud.deactivate_pos_station(db, station)
     return Response(status_code=204)
+
+
+@router.post(
+    "/stations/{station_id}/unbind",
+    response_model=schemas.PosStationRead,
+)
+def unbind_pos_station(
+    station_id: str,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("stations.manage")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    station.bound_device_id = None
+    station.bound_device_label = None
+    station.bound_at = None
+    station.bound_by_user_id = None
+    station.bound_by_user_name = None
+    db.commit()
+    db.refresh(station)
+    return _station_to_read(station)
 
 
 @router.get("/customers", response_model=List[schemas.PosCustomerRead])

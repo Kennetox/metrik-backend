@@ -356,6 +356,11 @@ class PosStation(Base):
     failed_attempts = Column(Integer, nullable=False, default=0)
     last_login_at = Column(DateTime, nullable=True)
     last_failed_at = Column(DateTime, nullable=True)
+    bound_device_id = Column(String, nullable=True)
+    bound_device_label = Column(String, nullable=True)
+    bound_at = Column(DateTime, nullable=True)
+    bound_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    bound_by_user_name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,

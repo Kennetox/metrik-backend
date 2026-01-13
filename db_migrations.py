@@ -238,6 +238,36 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "station_closure_email_overrides",
                         "TEXT DEFAULT '{}'",
                     )
+                    _ensure_column(
+                        connection,
+                        "pos_stations",
+                        "bound_device_id",
+                        "TEXT",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_stations",
+                        "bound_device_label",
+                        "TEXT",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_stations",
+                        "bound_at",
+                        "DATETIME",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_stations",
+                        "bound_by_user_id",
+                        "INTEGER",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_stations",
+                        "bound_by_user_name",
+                        "TEXT",
+                    )
             elif backend == "postgresql":
                 _ensure_column_postgres(
                     connection,
@@ -250,6 +280,36 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "pos_settings",
                     "station_closure_email_overrides",
                     "JSONB DEFAULT '{}'::jsonb",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_device_id",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_device_label",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_by_user_name",
+                    "TEXT",
                 )
 
             if not _table_exists(connection, "pos_closures"):
@@ -786,6 +846,11 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "failed_attempts", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "pos_stations", "last_login_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "last_failed_at", "DATETIME")
+        _ensure_column(connection, "pos_stations", "bound_device_id", "TEXT")
+        _ensure_column(connection, "pos_stations", "bound_device_label", "TEXT")
+        _ensure_column(connection, "pos_stations", "bound_at", "DATETIME")
+        _ensure_column(connection, "pos_stations", "bound_by_user_id", "INTEGER")
+        _ensure_column(connection, "pos_stations", "bound_by_user_name", "TEXT")
         _ensure_column(connection, "pos_stations", "created_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "updated_at", "DATETIME")
 

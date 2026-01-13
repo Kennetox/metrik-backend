@@ -312,6 +312,11 @@ class PosStationRead(BaseModel):
     pos_user_email: EmailStr
     is_active: bool
     last_login_at: Optional[datetime] = None
+    bound_device_id: Optional[str] = None
+    bound_device_label: Optional[str] = None
+    bound_at: Optional[datetime] = None
+    bound_by_user_id: Optional[int] = None
+    bound_by_user_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -631,6 +636,8 @@ class AuthValidateResetTokenResponse(BaseModel):
 class AuthPosLoginRequest(BaseModel):
     station_id: str
     pin: str
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
 
 
 class RolePermissionAction(BaseModel):
