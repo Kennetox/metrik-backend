@@ -837,6 +837,7 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
 
     items_data = []
     total_refund = 0.0
+    original_total_refund = 0.0
 
     for item_in in return_in.items:
         sale_item = sale_items.get(item_in.sale_item_id)
@@ -890,12 +891,50 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
         total_refund += line_total_refund
         refunded_qty[sale_item.id] += requested_qty
 
+    original_total_refund = total_refund
     if total_refund <= 0:
         raise ValueError("El total calculado de la devolución debe ser mayor a cero")
 
-    projected_total_refunded = float(sale.refunded_total or 0.0) + total_refund
-    if projected_total_refunded - float(sale.total or 0.0) > 0.01:
-        raise ValueError("El total devuelto supera el total cobrado en la venta")
+    paid_total = float(sale.total or 0.0)
+    if sale.is_separated and sale.separated_order:
+        separated = sale.separated_order
+        paid_total = float(separated.initial_payment or 0.0) + sum(
+            float(payment.amount or 0.0) for payment in separated.payments
+        )
+    refunded_so_far = float(sale.refunded_total or 0.0)
+    available_refund = max(0.0, paid_total - refunded_so_far)
+
+    if sale.is_separated:
+        if available_refund <= 0.0:
+            raise ValueError(
+                "No hay abonos disponibles para reembolsar en esta venta separada"
+            )
+        if total_refund - available_refund > 0.01:
+            ratio = available_refund / total_refund if total_refund else 0.0
+            for item_data in items_data:
+                item_data["unit_price_net"] = float(item_data["unit_price_net"]) * ratio
+                item_data["line_discount_value"] = (
+                    float(item_data["line_discount_value"]) * ratio
+                )
+                item_data["cart_discount_share"] = (
+                    float(item_data["cart_discount_share"]) * ratio
+                )
+                item_data["total_refund"] = float(item_data["total_refund"]) * ratio
+            total_refund = available_refund
+            pending_cancelled = max(0.0, original_total_refund - total_refund)
+            note_prefix = (
+                f"Reembolso limitado a abonos (${total_refund:,.0f}). "
+                f"Saldo pendiente anulado (${pending_cancelled:,.0f})."
+            )
+            return_in.notes = (
+                f"{note_prefix}\n{return_in.notes}"
+                if return_in.notes
+                else note_prefix
+            )
+    else:
+        projected_total_refunded = refunded_so_far + total_refund
+        if projected_total_refunded - float(sale.total or 0.0) > 0.01:
+            raise ValueError("El total devuelto supera el total cobrado en la venta")
 
     payments_payload = (
         list(return_in.payments)
@@ -1379,6 +1418,7 @@ def list_pos_customers(
             or_(
                 func.lower(models.PosCustomer.name).like(pattern),
                 func.lower(models.PosCustomer.phone).like(pattern),
+                func.lower(models.PosCustomer.email).like(pattern),
                 func.lower(models.PosCustomer.tax_id).like(pattern),
             )
         )
