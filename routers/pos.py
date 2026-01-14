@@ -812,6 +812,20 @@ def list_pos_customers(
     return customers
 
 
+@router.get("/customers/frequent", response_model=List[schemas.PosCustomerFrequentRead])
+def list_pos_frequent_customers(
+    min_sales: int = 5,
+    limit: int = 12,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.customers")),
+):
+    return crud.list_pos_frequent_customers(
+        db,
+        min_sales=min_sales,
+        limit=limit,
+    )
+
+
 @router.post(
     "/customers",
     response_model=schemas.PosCustomerRead,

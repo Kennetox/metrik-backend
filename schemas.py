@@ -388,6 +388,10 @@ class PosCustomerRead(PosCustomerBase):
         from_attributes = True
 
 
+class PosCustomerFrequentRead(PosCustomerRead):
+    sales_count: int
+
+
 class ReturnPaymentBase(BaseModel):
     method: str
     amount: float

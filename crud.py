@@ -1391,6 +1391,40 @@ def list_pos_customers(
     )
 
 
+def list_pos_frequent_customers(
+    db: Session,
+    min_sales: int = 5,
+    limit: int = 10,
+):
+    count_expr = func.count(models.Sale.id)
+    query = (
+        db.query(models.PosCustomer, count_expr.label("sales_count"))
+        .join(models.Sale, models.Sale.customer_id == models.PosCustomer.id)
+        .filter(models.PosCustomer.is_active.is_(True))
+        .group_by(models.PosCustomer.id)
+        .having(count_expr >= min_sales)
+        .order_by(count_expr.desc(), func.lower(models.PosCustomer.name).asc())
+        .limit(limit)
+    )
+    results = []
+    for customer, sales_count in query.all():
+        results.append(
+            {
+                "id": customer.id,
+                "name": customer.name,
+                "phone": customer.phone,
+                "email": customer.email,
+                "tax_id": customer.tax_id,
+                "address": customer.address,
+                "is_active": customer.is_active,
+                "created_at": customer.created_at,
+                "updated_at": customer.updated_at,
+                "sales_count": int(sales_count or 0),
+            }
+        )
+    return results
+
+
 def get_pos_customer(db: Session, customer_id: int) -> Optional[models.PosCustomer]:
     return (
         db.query(models.PosCustomer)
