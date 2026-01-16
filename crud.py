@@ -791,6 +791,24 @@ def list_returns(db: Session, skip: int = 0, limit: int = 100):
     )
 
 
+def list_changes(db: Session, skip: int = 0, limit: int = 100):
+    return (
+        db.query(models.SaleChange)
+        .order_by(models.SaleChange.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_sale_change(db: Session, change_id: int) -> Optional[models.SaleChange]:
+    return (
+        db.query(models.SaleChange)
+        .filter(models.SaleChange.id == change_id)
+        .first()
+    )
+
+
 def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.SaleReturn:
     if not return_in.items or len(return_in.items) == 0:
         raise ValueError("La devolución debe incluir al menos un ítem")
@@ -1002,6 +1020,228 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
     db.commit()
     db.refresh(sale_return)
     return sale_return
+
+
+def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.SaleChange:
+    if not change_in.return_items or len(change_in.return_items) == 0:
+        raise ValueError("El cambio debe incluir al menos un ítem devuelto")
+    if not change_in.new_items or len(change_in.new_items) == 0:
+        raise ValueError("El cambio debe incluir al menos un ítem nuevo")
+
+    sale: Optional[models.Sale] = None
+    if change_in.sale_id is not None:
+        sale = get_sale(db, change_in.sale_id)
+    elif change_in.sale_document_number:
+        sale = get_sale_by_document(db, change_in.sale_document_number)
+
+    if not sale:
+        raise ValueError(
+            "No encontramos la venta asociada (usa sale_id o sale_document_number)"
+        )
+
+    sale_items = {item.id: item for item in sale.items}
+    if not sale_items:
+        raise ValueError("La venta seleccionada no tiene ítems registrados")
+
+    confirmed_statuses = {"confirmed"}
+    refunded_qty = defaultdict(float)
+    for previous_return in sale.returns:
+        if previous_return.status not in confirmed_statuses:
+            continue
+        for previous_item in previous_return.items:
+            refunded_qty[previous_item.sale_item_id] += float(
+                previous_item.quantity or 0.0
+            )
+    for previous_change in sale.changes:
+        if previous_change.status not in confirmed_statuses:
+            continue
+        for previous_item in previous_change.items_returned:
+            refunded_qty[previous_item.sale_item_id] += float(
+                previous_item.quantity or 0.0
+            )
+
+    subtotal_after_lines = sum(float(item.total or 0.0) for item in sale.items)
+    cart_discount_value = float(sale.cart_discount_value or 0.0)
+    cart_share_per_unit = {}
+
+    for item in sale.items:
+        if float(item.quantity or 0) == 0:
+            cart_share_per_unit[item.id] = 0.0
+            continue
+
+        if subtotal_after_lines > 0 and cart_discount_value > 0:
+            share_total = (float(item.total or 0.0) / subtotal_after_lines) * cart_discount_value
+            cart_share_per_unit[item.id] = share_total / float(item.quantity)
+        else:
+            cart_share_per_unit[item.id] = 0.0
+
+    returned_items_data = []
+    total_credit = 0.0
+
+    for item_in in change_in.return_items:
+        sale_item = sale_items.get(item_in.sale_item_id)
+        if not sale_item:
+            raise ValueError(
+                f"El ítem {item_in.sale_item_id} no pertenece a la venta especificada"
+            )
+
+        requested_qty = float(item_in.quantity or 0.0)
+        if requested_qty <= 0:
+            raise ValueError("La cantidad devuelta debe ser mayor a cero")
+
+        already_refunded = refunded_qty[sale_item.id]
+        available_qty = float(sale_item.quantity or 0.0) - already_refunded
+        if requested_qty - available_qty > 0.0001:
+            raise ValueError(
+                f"La cantidad disponible para el ítem {sale_item.id} es {available_qty},"
+                " no se puede devolver más de lo vendido"
+            )
+
+        line_quantity = float(sale_item.quantity or 0.0)
+        unit_net_after_line = (
+            float(sale_item.total or 0.0) / line_quantity if line_quantity else 0.0
+        )
+        unit_cart_share = cart_share_per_unit.get(sale_item.id, 0.0)
+        unit_credit_value = max(0.0, unit_net_after_line - unit_cart_share)
+        line_total_credit = unit_credit_value * requested_qty
+
+        line_discount_per_unit = (
+            float(sale_item.line_discount_value or 0.0) / line_quantity
+            if line_quantity
+            else 0.0
+        )
+        line_discount_value = line_discount_per_unit * requested_qty
+        cart_discount_share_value = unit_cart_share * requested_qty
+
+        returned_items_data.append(
+            {
+                "sale_item": sale_item,
+                "quantity": requested_qty,
+                "reason": item_in.reason,
+                "unit_price_original": float(sale_item.unit_price_original or 0.0),
+                "unit_price_net": unit_net_after_line,
+                "line_discount_value": line_discount_value,
+                "cart_discount_share": cart_discount_share_value,
+                "total_credit": line_total_credit,
+            }
+        )
+
+        total_credit += line_total_credit
+        refunded_qty[sale_item.id] += requested_qty
+
+    new_items_data = []
+    total_new = 0.0
+    for item_in in change_in.new_items:
+        requested_qty = float(item_in.quantity or 0.0)
+        if requested_qty <= 0:
+            raise ValueError("La cantidad del nuevo producto debe ser mayor a cero")
+        product = db.query(models.Product).filter(models.Product.id == item_in.product_id).first()
+        if not product:
+            raise ValueError(
+                f"No encontramos el producto {item_in.product_id} para el cambio"
+            )
+        unit_price = float(product.price or 0.0)
+        line_total = unit_price * requested_qty
+        new_items_data.append(
+            {
+                "product": product,
+                "quantity": requested_qty,
+                "unit_price": unit_price,
+                "total": line_total,
+            }
+        )
+        total_new += line_total
+
+    if total_credit <= 0:
+        raise ValueError("El total de crédito debe ser mayor a cero")
+    if total_new <= 0:
+        raise ValueError("El total del nuevo producto debe ser mayor a cero")
+
+    net_total = total_new - total_credit
+    extra_payment = max(0.0, net_total)
+    refund_due = max(0.0, -net_total)
+
+    payments_payload = []
+    if extra_payment > 0:
+        payments_payload = (
+            list(change_in.payments)
+            if change_in.payments and len(change_in.payments) > 0
+            else [schemas.SaleChangePaymentCreate(method="cash", amount=extra_payment)]
+        )
+        payments_total = sum(float(p.amount) for p in payments_payload)
+        if abs(payments_total - extra_payment) > 0.01:
+            raise ValueError(
+                "La suma de los pagos debe coincidir con el excedente a cobrar"
+            )
+    elif change_in.payments:
+        raise ValueError("No debes registrar pagos cuando no hay excedente")
+
+    status = change_in.status or "confirmed"
+
+    sale_change = models.SaleChange(
+        sale_id=sale.id,
+        status=status,
+        notes=change_in.notes,
+        created_by=change_in.created_by,
+        total_credit=total_credit,
+        total_new=total_new,
+        net_total=net_total,
+        extra_payment=extra_payment,
+        refund_due=refund_due,
+        pos_name=sale.pos_name,
+        seller_name=change_in.created_by or sale.vendor_name,
+        station_id=sale.station_id,
+    )
+    db.add(sale_change)
+    db.flush()
+
+    if not sale_change.document_number:
+        sale_change.document_number = f"CB-{sale_change.id:06d}"
+
+    for item_data in returned_items_data:
+        sale_item = item_data["sale_item"]
+        db_return_item = models.SaleChangeReturnItem(
+            change_id=sale_change.id,
+            sale_item_id=sale_item.id,
+            product_id=sale_item.product_id,
+            product_name=sale_item.product_name,
+            product_sku=sale_item.product_sku,
+            product_barcode=sale_item.product_barcode,
+            reason=item_data["reason"],
+            quantity=item_data["quantity"],
+            unit_price_original=item_data["unit_price_original"],
+            unit_price_net=item_data["unit_price_net"],
+            line_discount_value=item_data["line_discount_value"],
+            cart_discount_share=item_data["cart_discount_share"],
+            total_credit=item_data["total_credit"],
+        )
+        db.add(db_return_item)
+
+    for item_data in new_items_data:
+        product = item_data["product"]
+        db_new_item = models.SaleChangeNewItem(
+            change_id=sale_change.id,
+            product_id=product.id,
+            product_name=product.name,
+            product_sku=product.sku,
+            product_barcode=product.barcode,
+            quantity=item_data["quantity"],
+            unit_price=item_data["unit_price"],
+            total=item_data["total"],
+        )
+        db.add(db_new_item)
+
+    for payment in payments_payload:
+        db_payment = models.SaleChangePayment(
+            change_id=sale_change.id,
+            method=payment.method,
+            amount=payment.amount,
+        )
+        db.add(db_payment)
+
+    db.commit()
+    db.refresh(sale_change)
+    return sale_change
 
 
 # ===================== POS SETTINGS =====================
@@ -1586,7 +1826,6 @@ def create_pos_closure(
     sale_ids = [sale.id for sale in pending_sales]
     total_amount = sum(float(sale.total or 0.0) for sale in pending_sales)
     total_refunds = sum(float(sale.refunded_total or 0.0) for sale in pending_sales)
-    net_amount = total_amount - total_refunds
     sales_count = len(pending_sales)
 
     payment_totals = {
@@ -1660,6 +1899,37 @@ def create_pos_closure(
         if key:
             payment_totals[key] += float(amount or 0.0)
 
+    change_query = db.query(models.SaleChange).filter(
+        models.SaleChange.closure_id.is_(None),
+        models.SaleChange.status == "confirmed",
+    )
+    if station_id:
+        change_query = change_query.filter(
+            models.SaleChange.station_id == station_id
+        )
+    elif pos_name:
+        change_query = change_query.filter(
+            models.SaleChange.pos_name == pos_name
+        )
+    change_query = change_query.filter(
+        models.SaleChange.created_at >= range_start,
+        models.SaleChange.created_at <= range_end,
+    )
+    pending_changes = change_query.all()
+    change_extra_total = sum(float(change.extra_payment or 0.0) for change in pending_changes)
+    change_refund_total = sum(float(change.refund_due or 0.0) for change in pending_changes)
+    change_count = len(pending_changes)
+
+    for change in pending_changes:
+        for payment in change.payments:
+            key = method_map.get((payment.method or "").lower())
+            if key:
+                payment_totals[key] += float(payment.amount or 0.0)
+        if float(change.refund_due or 0.0) > 0:
+            payment_totals["cash"] -= float(change.refund_due or 0.0)
+
+    net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
+
     difference = float(closure_in.counted_cash or 0.0) - payment_totals["cash"]
     total_surcharge = sum(float(sale.surcharge_amount or 0.0) for sale in pending_sales)
 
@@ -1684,6 +1954,9 @@ def create_pos_closure(
         difference=difference,
         notes=closure_in.notes,
         sales_count=sales_count,
+        change_extra_total=change_extra_total,
+        change_refund_total=change_refund_total,
+        change_count=change_count,
         total_surcharge=total_surcharge,
     )
     db.add(closure)
@@ -1697,7 +1970,13 @@ def create_pos_closure(
     if sep_payment_ids:
         (
             db.query(models.SeparatedOrderPayment)
-            .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
+                .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
+                .update({"closure_id": closure.id}, synchronize_session=False)
+        )
+    if pending_changes:
+        (
+            db.query(models.SaleChange)
+            .filter(models.SaleChange.id.in_([change.id for change in pending_changes]))
             .update({"closure_id": closure.id}, synchronize_session=False)
         )
         if admin_fallback_used and station_id:

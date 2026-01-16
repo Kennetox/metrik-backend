@@ -65,6 +65,99 @@ def run_schema_upgrades(engine: Engine) -> None:
 
     with engine.connect() as connection:
         with connection.begin():
+            if backend == "postgresql":
+                _ensure_table_sale_changes_postgres(connection)
+                _ensure_column_postgres(
+                    connection,
+                    "pos_closures",
+                    "change_extra_total",
+                    "FLOAT DEFAULT 0",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_closures",
+                    "change_refund_total",
+                    "FLOAT DEFAULT 0",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_closures",
+                    "change_count",
+                    "INTEGER DEFAULT 0",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_settings",
+                    "web_pos_send_closure_email",
+                    "BOOLEAN DEFAULT TRUE",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_settings",
+                    "station_closure_email_overrides",
+                    "JSONB DEFAULT '{}'::jsonb",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_device_id",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_device_label",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "bound_by_user_name",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_mode",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_name",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_width",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_auto_open_drawer",
+                    "BOOLEAN",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "printer_show_drawer_button",
+                    "BOOLEAN",
+                )
+                return
             if backend == "sqlite":
                 _ensure_column(
                     connection,
@@ -160,11 +253,31 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "TEXT",
                 )
                 _ensure_table_pos_stations(connection)
+                _ensure_table_sale_changes(connection)
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
                 _ensure_column(connection, "pos_users", "notes", "TEXT")
                 _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
                 _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
+                if _table_exists(connection, "pos_closures"):
+                    _ensure_column(
+                        connection,
+                        "pos_closures",
+                        "change_extra_total",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_closures",
+                        "change_refund_total",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_closures",
+                        "change_count",
+                        "INTEGER DEFAULT 0",
+                    )
                 if _table_exists(connection, "pos_settings"):
                     _ensure_column(
                         connection,
@@ -238,110 +351,6 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "station_closure_email_overrides",
                         "TEXT DEFAULT '{}'",
                     )
-                    _ensure_column(
-                        connection,
-                        "pos_stations",
-                        "bound_device_id",
-                        "TEXT",
-                    )
-                    _ensure_column(
-                        connection,
-                        "pos_stations",
-                        "bound_device_label",
-                        "TEXT",
-                    )
-                    _ensure_column(
-                        connection,
-                        "pos_stations",
-                        "bound_at",
-                        "DATETIME",
-                    )
-                    _ensure_column(
-                        connection,
-                        "pos_stations",
-                        "bound_by_user_id",
-                        "INTEGER",
-                    )
-                    _ensure_column(
-                        connection,
-                        "pos_stations",
-                        "bound_by_user_name",
-                        "TEXT",
-                    )
-            elif backend == "postgresql":
-                _ensure_column_postgres(
-                    connection,
-                    "pos_settings",
-                    "web_pos_send_closure_email",
-                    "BOOLEAN DEFAULT TRUE",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_settings",
-                    "station_closure_email_overrides",
-                    "JSONB DEFAULT '{}'::jsonb",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "bound_device_id",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "bound_device_label",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "bound_at",
-                    "TIMESTAMP",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "bound_by_user_id",
-                    "INTEGER",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "bound_by_user_name",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "printer_mode",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "printer_name",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "printer_width",
-                    "TEXT",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "printer_auto_open_drawer",
-                    "BOOLEAN",
-                )
-                _ensure_column_postgres(
-                    connection,
-                    "pos_stations",
-                    "printer_show_drawer_button",
-                    "BOOLEAN",
-                )
-
             if not _table_exists(connection, "pos_closures"):
                 connection.execute(
                     text(
@@ -893,6 +902,192 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "printer_show_drawer_button", "BOOLEAN")
         _ensure_column(connection, "pos_stations", "created_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "updated_at", "DATETIME")
+
+
+def _ensure_table_sale_changes(connection) -> None:
+    if not _table_exists(connection, "sale_changes"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE sale_changes (
+                    id INTEGER PRIMARY KEY,
+                    sale_id INTEGER NOT NULL,
+                    closure_id INTEGER,
+                    document_number TEXT UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'confirmed',
+                    notes TEXT,
+                    created_by TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    pos_name TEXT,
+                    seller_name TEXT,
+                    station_id TEXT,
+                    total_credit FLOAT NOT NULL DEFAULT 0,
+                    total_new FLOAT NOT NULL DEFAULT 0,
+                    net_total FLOAT NOT NULL DEFAULT 0,
+                    extra_payment FLOAT NOT NULL DEFAULT 0,
+                    refund_due FLOAT NOT NULL DEFAULT 0,
+                    FOREIGN KEY(sale_id) REFERENCES sales(id),
+                    FOREIGN KEY(closure_id) REFERENCES pos_closures(id),
+                    FOREIGN KEY(station_id) REFERENCES pos_stations(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "sale_changes", "sale_id", "INTEGER")
+        _ensure_column(connection, "sale_changes", "closure_id", "INTEGER")
+        _ensure_column(connection, "sale_changes", "document_number", "TEXT")
+        _ensure_column(connection, "sale_changes", "status", "TEXT")
+        _ensure_column(connection, "sale_changes", "notes", "TEXT")
+        _ensure_column(connection, "sale_changes", "created_by", "TEXT")
+        _ensure_column(connection, "sale_changes", "created_at", "DATETIME")
+        _ensure_column(connection, "sale_changes", "pos_name", "TEXT")
+        _ensure_column(connection, "sale_changes", "seller_name", "TEXT")
+        _ensure_column(connection, "sale_changes", "station_id", "TEXT")
+        _ensure_column(connection, "sale_changes", "total_credit", "FLOAT DEFAULT 0")
+        _ensure_column(connection, "sale_changes", "total_new", "FLOAT DEFAULT 0")
+        _ensure_column(connection, "sale_changes", "net_total", "FLOAT DEFAULT 0")
+        _ensure_column(connection, "sale_changes", "extra_payment", "FLOAT DEFAULT 0")
+        _ensure_column(connection, "sale_changes", "refund_due", "FLOAT DEFAULT 0")
+
+    if not _table_exists(connection, "sale_change_return_items"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE sale_change_return_items (
+                    id INTEGER PRIMARY KEY,
+                    change_id INTEGER NOT NULL,
+                    sale_item_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    product_name TEXT NOT NULL,
+                    product_sku TEXT,
+                    product_barcode TEXT,
+                    reason TEXT,
+                    quantity FLOAT NOT NULL DEFAULT 0,
+                    unit_price_original FLOAT NOT NULL DEFAULT 0,
+                    unit_price_net FLOAT NOT NULL DEFAULT 0,
+                    line_discount_value FLOAT NOT NULL DEFAULT 0,
+                    cart_discount_share FLOAT NOT NULL DEFAULT 0,
+                    total_credit FLOAT NOT NULL DEFAULT 0,
+                    FOREIGN KEY(change_id) REFERENCES sale_changes(id),
+                    FOREIGN KEY(sale_item_id) REFERENCES sale_items(id)
+                )
+                """
+            )
+        )
+
+    if not _table_exists(connection, "sale_change_new_items"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE sale_change_new_items (
+                    id INTEGER PRIMARY KEY,
+                    change_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    product_name TEXT NOT NULL,
+                    product_sku TEXT,
+                    product_barcode TEXT,
+                    quantity FLOAT NOT NULL DEFAULT 0,
+                    unit_price FLOAT NOT NULL DEFAULT 0,
+                    total FLOAT NOT NULL DEFAULT 0,
+                    FOREIGN KEY(change_id) REFERENCES sale_changes(id)
+                )
+                """
+            )
+        )
+
+    if not _table_exists(connection, "sale_change_payments"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE sale_change_payments (
+                    id INTEGER PRIMARY KEY,
+                    change_id INTEGER NOT NULL,
+                    method TEXT NOT NULL,
+                    amount FLOAT NOT NULL DEFAULT 0,
+                    FOREIGN KEY(change_id) REFERENCES sale_changes(id)
+                )
+                """
+            )
+        )
+
+
+def _ensure_table_sale_changes_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS sale_changes (
+                id SERIAL PRIMARY KEY,
+                sale_id INTEGER NOT NULL REFERENCES sales(id),
+                closure_id INTEGER REFERENCES pos_closures(id),
+                document_number TEXT UNIQUE,
+                status TEXT NOT NULL DEFAULT 'confirmed',
+                notes TEXT,
+                created_by TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                pos_name TEXT,
+                seller_name TEXT,
+                station_id TEXT REFERENCES pos_stations(id),
+                total_credit FLOAT NOT NULL DEFAULT 0,
+                total_new FLOAT NOT NULL DEFAULT 0,
+                net_total FLOAT NOT NULL DEFAULT 0,
+                extra_payment FLOAT NOT NULL DEFAULT 0,
+                refund_due FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS sale_change_return_items (
+                id SERIAL PRIMARY KEY,
+                change_id INTEGER NOT NULL REFERENCES sale_changes(id),
+                sale_item_id INTEGER NOT NULL REFERENCES sale_items(id),
+                product_id INTEGER NOT NULL,
+                product_name TEXT NOT NULL,
+                product_sku TEXT,
+                product_barcode TEXT,
+                reason TEXT,
+                quantity FLOAT NOT NULL DEFAULT 0,
+                unit_price_original FLOAT NOT NULL DEFAULT 0,
+                unit_price_net FLOAT NOT NULL DEFAULT 0,
+                line_discount_value FLOAT NOT NULL DEFAULT 0,
+                cart_discount_share FLOAT NOT NULL DEFAULT 0,
+                total_credit FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS sale_change_new_items (
+                id SERIAL PRIMARY KEY,
+                change_id INTEGER NOT NULL REFERENCES sale_changes(id),
+                product_id INTEGER NOT NULL,
+                product_name TEXT NOT NULL,
+                product_sku TEXT,
+                product_barcode TEXT,
+                quantity FLOAT NOT NULL DEFAULT 0,
+                unit_price FLOAT NOT NULL DEFAULT 0,
+                total FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS sale_change_payments (
+                id SERIAL PRIMARY KEY,
+                change_id INTEGER NOT NULL REFERENCES sale_changes(id),
+                method TEXT NOT NULL,
+                amount FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
 
 
 def _seed_default_payment_methods(connection) -> None:

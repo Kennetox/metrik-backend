@@ -133,6 +133,11 @@ class Sale(Base):
         back_populates="sale",
         cascade="all, delete-orphan",
     )
+    changes = relationship(
+        "SaleChange",
+        back_populates="sale",
+        cascade="all, delete-orphan",
+    )
     closure = relationship("PosClosure", back_populates="sales")
     station = relationship("PosStation")
     customer = relationship("PosCustomer", back_populates="sales")
@@ -410,6 +415,9 @@ class PosClosure(Base):
     counted_cash = Column(Float, nullable=False, default=0)
     difference = Column(Float, nullable=False, default=0)
     sales_count = Column(Integer, nullable=False, default=0)
+    change_extra_total = Column(Float, nullable=False, default=0)
+    change_refund_total = Column(Float, nullable=False, default=0)
+    change_count = Column(Integer, nullable=False, default=0)
     notes = Column(Text, nullable=True)
     total_surcharge = Column(Float, nullable=False, default=0)
 
@@ -554,3 +562,113 @@ class SaleReturnPayment(Base):
     amount = Column(Float, nullable=False, default=0)
 
     return_ = relationship("SaleReturn", back_populates="payments")
+
+
+class SaleChange(Base):
+    __tablename__ = "sale_changes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
+    closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
+
+    document_number = Column(String, unique=True, index=True, nullable=True)
+    status = Column(String, nullable=False, default="confirmed")
+    notes = Column(String, nullable=True)
+    created_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    pos_name = Column(String, nullable=True)
+    seller_name = Column(String, nullable=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
+
+    total_credit = Column(Float, nullable=False, default=0)
+    total_new = Column(Float, nullable=False, default=0)
+    net_total = Column(Float, nullable=False, default=0)
+    extra_payment = Column(Float, nullable=False, default=0)
+    refund_due = Column(Float, nullable=False, default=0)
+
+    sale = relationship("Sale", back_populates="changes")
+    closure = relationship("PosClosure")
+    items_returned = relationship(
+        "SaleChangeReturnItem",
+        back_populates="change",
+        cascade="all, delete-orphan",
+    )
+    items_new = relationship(
+        "SaleChangeNewItem",
+        back_populates="change",
+        cascade="all, delete-orphan",
+    )
+    payments = relationship(
+        "SaleChangePayment",
+        back_populates="change",
+        cascade="all, delete-orphan",
+    )
+
+
+class SaleChangeReturnItem(Base):
+    __tablename__ = "sale_change_return_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(
+        Integer,
+        ForeignKey("sale_changes.id"),
+        nullable=False,
+        index=True,
+    )
+    sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=False)
+
+    product_id = Column(Integer, nullable=False)
+    product_name = Column(String, nullable=False)
+    product_sku = Column(String, nullable=True)
+    product_barcode = Column(String, nullable=True)
+
+    reason = Column(String, nullable=True)
+    quantity = Column(Float, nullable=False, default=0)
+
+    unit_price_original = Column(Float, nullable=False, default=0)
+    unit_price_net = Column(Float, nullable=False, default=0)
+    line_discount_value = Column(Float, nullable=False, default=0)
+    cart_discount_share = Column(Float, nullable=False, default=0)
+    total_credit = Column(Float, nullable=False, default=0)
+
+    change = relationship("SaleChange", back_populates="items_returned")
+    sale_item = relationship("SaleItem")
+
+
+class SaleChangeNewItem(Base):
+    __tablename__ = "sale_change_new_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(
+        Integer,
+        ForeignKey("sale_changes.id"),
+        nullable=False,
+        index=True,
+    )
+
+    product_id = Column(Integer, nullable=False)
+    product_name = Column(String, nullable=False)
+    product_sku = Column(String, nullable=True)
+    product_barcode = Column(String, nullable=True)
+    quantity = Column(Float, nullable=False, default=0)
+    unit_price = Column(Float, nullable=False, default=0)
+    total = Column(Float, nullable=False, default=0)
+
+    change = relationship("SaleChange", back_populates="items_new")
+
+
+class SaleChangePayment(Base):
+    __tablename__ = "sale_change_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(
+        Integer,
+        ForeignKey("sale_changes.id"),
+        nullable=False,
+        index=True,
+    )
+
+    method = Column(String, nullable=False)
+    amount = Column(Float, nullable=False, default=0)
+
+    change = relationship("SaleChange", back_populates="payments")

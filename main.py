@@ -51,9 +51,8 @@ app.add_middleware(
 
 # Crear tablas en la BD
 Base.metadata.create_all(bind=engine)
-# Sólo aplicamos los parches SQLite cuando el backend es SQLite.
-if engine.url.get_backend_name().startswith("sqlite"):
-    run_schema_upgrades(engine)
+# Aplicamos parches de schema para SQLite y Postgres.
+run_schema_upgrades(engine)
 
 logger = logging.getLogger("kensar.validation")
 

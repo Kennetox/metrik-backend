@@ -372,6 +372,22 @@ def create_return(
     return sale_return
 
 
+@router.post("/changes", response_model=schemas.SaleChangeRead, status_code=201)
+def create_change(
+    change_in: schemas.SaleChangeCreate,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.returns")),
+):
+    """Registra un cambio de productos vinculado a una venta."""
+
+    try:
+        sale_change = crud.create_change(db, change_in)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return sale_change
+
+
 @router.post(
     "/sales/{sale_id}/email",
     response_model=schemas.EmailSendResponse,
@@ -453,6 +469,17 @@ def list_returns(
     return returns
 
 
+@router.get("/changes", response_model=List[schemas.SaleChangeRead])
+def list_changes(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.returns")),
+):
+    changes = crud.list_changes(db, skip=skip, limit=limit)
+    return changes
+
+
 @router.get("/returns/{return_id}", response_model=schemas.SaleReturnRead)
 def get_return(
     return_id: int,
@@ -463,6 +490,18 @@ def get_return(
     if not sale_return:
         raise HTTPException(status_code=404, detail="Devolución no encontrada")
     return sale_return
+
+
+@router.get("/changes/{change_id}", response_model=schemas.SaleChangeRead)
+def get_change(
+    change_id: int,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.returns")),
+):
+    sale_change = crud.get_sale_change(db, change_id)
+    if not sale_change:
+        raise HTTPException(status_code=404, detail="Cambio no encontrado")
+    return sale_change
 
 
 @router.get("/settings", response_model=schemas.PosSettingsRead)

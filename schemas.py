@@ -459,6 +459,98 @@ class SaleReturnRead(BaseModel):
         from_attributes = True
 
 
+class SaleChangeReturnItemCreate(BaseModel):
+    sale_item_id: int
+    quantity: float
+    reason: Optional[str] = None
+
+
+class SaleChangeNewItemCreate(BaseModel):
+    product_id: int
+    quantity: float
+
+
+class SaleChangePaymentCreate(BaseModel):
+    method: str
+    amount: float
+
+
+class SaleChangeCreate(BaseModel):
+    sale_id: Optional[int] = None
+    sale_document_number: Optional[str] = None
+    status: Optional[str] = "confirmed"
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    return_items: List[SaleChangeReturnItemCreate]
+    new_items: List[SaleChangeNewItemCreate]
+    payments: Optional[List[SaleChangePaymentCreate]] = None
+
+
+class SaleChangeReturnItemRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    product_sku: Optional[str] = None
+    product_barcode: Optional[str] = None
+    reason: Optional[str] = None
+    quantity: float
+    unit_price_original: float
+    unit_price_net: float
+    line_discount_value: float
+    cart_discount_share: float
+    total_credit: float
+
+    class Config:
+        from_attributes = True
+
+
+class SaleChangeNewItemRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    product_sku: Optional[str] = None
+    product_barcode: Optional[str] = None
+    quantity: float
+    unit_price: float
+    total: float
+
+    class Config:
+        from_attributes = True
+
+
+class SaleChangePaymentRead(BaseModel):
+    method: str
+    amount: float
+
+    class Config:
+        from_attributes = True
+
+
+class SaleChangeRead(BaseModel):
+    id: int
+    sale_id: int
+    closure_id: Optional[int] = None
+    document_number: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    pos_name: Optional[str] = None
+    seller_name: Optional[str] = None
+    station_id: Optional[str] = None
+    total_credit: float
+    total_new: float
+    net_total: float
+    extra_payment: float
+    refund_due: float
+    items_returned: List[SaleChangeReturnItemRead]
+    items_new: List[SaleChangeNewItemRead]
+    payments: List[SaleChangePaymentRead]
+
+    class Config:
+        from_attributes = True
+
+
 class SaleBase(BaseModel):
     payment_method: str = "cash"
     total: float
@@ -617,6 +709,7 @@ class SaleRead(SaleBase):
     # lista de pagos asociados
     payments: List[SalePaymentRead] = []
     returns: List[SaleReturnRead] = []
+    changes: List[SaleChangeRead] = []
     refunded_payments: List[ReturnPaymentRead] = []
     is_separated: bool = False
     initial_payment_method: Optional[str] = None
@@ -784,6 +877,9 @@ class PosClosureBase(BaseModel):
     net_amount: float = 0.0
     counted_cash: float = 0.0
     difference: float = 0.0
+    change_extra_total: float = 0.0
+    change_refund_total: float = 0.0
+    change_count: int = 0
     notes: Optional[str] = None
     total_surcharge: float = 0.0
 
