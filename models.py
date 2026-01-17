@@ -428,6 +428,7 @@ class PosClosure(Base):
         "SeparatedOrderPayment",
         back_populates="closure",
     )
+    returns = relationship("SaleReturn", back_populates="closure")
 
 
 class SeparatedOrder(Base):
@@ -503,8 +504,10 @@ class SaleReturn(Base):
     created_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     total_refund = Column(Float, nullable=False, default=0)
+    closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
 
     sale = relationship("Sale", back_populates="returns")
+    closure = relationship("PosClosure", back_populates="returns")
     items = relationship(
         "SaleReturnItem",
         back_populates="return_",

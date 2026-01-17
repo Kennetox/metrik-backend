@@ -157,6 +157,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "printer_show_drawer_button",
                     "BOOLEAN",
                 )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_returns",
+                    "closure_id",
+                    "INTEGER",
+                )
                 return
             if backend == "sqlite":
                 _ensure_column(
@@ -194,6 +200,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "image_thumb_url",
                     "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sale_returns",
+                    "closure_id",
+                    "INTEGER",
                 )
                 _ensure_column(
                     connection,

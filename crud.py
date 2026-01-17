@@ -1806,12 +1806,92 @@ def create_pos_closure(
             db.flush()
             admin_fallback_used = True
 
-    if not pending_sales:
-        raise ValueError("No hay ventas pendientes por cerrar")
-
-    range_start = pending_sales[0].created_at
     closed_at = closure_in.closed_at or datetime.utcnow()
     range_end = closed_at
+
+    pending_returns_query = (
+        db.query(models.SaleReturn)
+        .join(models.Sale, models.SaleReturn.sale_id == models.Sale.id)
+        .filter(
+            models.SaleReturn.closure_id.is_(None),
+            models.SaleReturn.status == "confirmed",
+        )
+    )
+    if station_id:
+        pending_returns_query = pending_returns_query.filter(
+            models.Sale.station_id == station_id
+        )
+    elif pos_name:
+        pending_returns_query = pending_returns_query.filter(
+            models.Sale.pos_name == pos_name
+        )
+
+    pending_returns = pending_returns_query.order_by(models.SaleReturn.created_at.asc()).all()
+
+    pending_changes_base = (
+        db.query(models.SaleChange)
+        .filter(
+            models.SaleChange.closure_id.is_(None),
+            models.SaleChange.status == "confirmed",
+        )
+    )
+    if station_id:
+        pending_changes_base = pending_changes_base.filter(
+            models.SaleChange.station_id == station_id
+        )
+    elif pos_name:
+        pending_changes_base = pending_changes_base.filter(
+            models.SaleChange.pos_name == pos_name
+        )
+
+    pending_changes_all = pending_changes_base.order_by(models.SaleChange.created_at.asc()).all()
+
+    sep_paid_at = (
+        db.query(func.min(models.SeparatedOrderPayment.paid_at))
+        .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
+        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+        .filter(models.SeparatedOrderPayment.closure_id.is_(None))
+    )
+    if station_id:
+        sep_paid_at = sep_paid_at.filter(
+            or_(
+                models.SeparatedOrderPayment.station_id == station_id,
+                models.Sale.station_id == station_id,
+            )
+        )
+    elif pos_name:
+        sep_paid_at = sep_paid_at.filter(
+            models.Sale.pos_name == pos_name
+        )
+    sep_paid_at = sep_paid_at.scalar()
+
+    date_candidates = []
+    if pending_sales:
+        date_candidates.append(pending_sales[0].created_at)
+    if pending_returns:
+        date_candidates.append(pending_returns[0].created_at)
+    if pending_changes_all:
+        date_candidates.append(pending_changes_all[0].created_at)
+    if sep_paid_at:
+        date_candidates.append(sep_paid_at)
+
+    if not date_candidates:
+        raise ValueError("No hay movimientos pendientes por cerrar")
+
+    range_start = min(date_candidates)
+
+    if pending_returns:
+        pending_returns = [
+            ret
+            for ret in pending_returns
+            if ret.created_at <= range_end
+        ]
+
+    pending_changes = [
+        change
+        for change in pending_changes_all
+        if change.created_at <= range_end
+    ]
 
     _closure_logger.info(
         "POS closure debug -> aggregated range_start=%s, range_end=%s",
@@ -1825,7 +1905,7 @@ def create_pos_closure(
 
     sale_ids = [sale.id for sale in pending_sales]
     total_amount = sum(float(sale.total or 0.0) for sale in pending_sales)
-    total_refunds = sum(float(sale.refunded_total or 0.0) for sale in pending_sales)
+    total_refunds = sum(float(ret.total_refund or 0.0) for ret in pending_returns)
     sales_count = len(pending_sales)
 
     payment_totals = {
@@ -1854,6 +1934,19 @@ def create_pos_closure(
         key = method_map.get((method or "").lower())
         if key:
             payment_totals[key] += float(amount or 0.0)
+
+    if pending_returns:
+        return_ids = [ret.id for ret in pending_returns]
+        return_rows = (
+            db.query(models.SaleReturnPayment.method, func.sum(models.SaleReturnPayment.amount))
+            .filter(models.SaleReturnPayment.return_id.in_(return_ids))
+            .group_by(models.SaleReturnPayment.method)
+            .all()
+        )
+        for method, amount in return_rows:
+            key = method_map.get((method or "").lower())
+            if key:
+                payment_totals[key] -= float(amount or 0.0)
 
     sep_payment_filter = (
         db.query(
@@ -1899,23 +1992,11 @@ def create_pos_closure(
         if key:
             payment_totals[key] += float(amount or 0.0)
 
-    change_query = db.query(models.SaleChange).filter(
-        models.SaleChange.closure_id.is_(None),
-        models.SaleChange.status == "confirmed",
-    )
-    if station_id:
-        change_query = change_query.filter(
-            models.SaleChange.station_id == station_id
-        )
-    elif pos_name:
-        change_query = change_query.filter(
-            models.SaleChange.pos_name == pos_name
-        )
-    change_query = change_query.filter(
-        models.SaleChange.created_at >= range_start,
-        models.SaleChange.created_at <= range_end,
-    )
-    pending_changes = change_query.all()
+    pending_changes = [
+        change
+        for change in pending_changes
+        if change.created_at >= range_start
+    ]
     change_extra_total = sum(float(change.extra_payment or 0.0) for change in pending_changes)
     change_refund_total = sum(float(change.refund_due or 0.0) for change in pending_changes)
     change_count = len(pending_changes)
@@ -1966,6 +2047,13 @@ def create_pos_closure(
 
     for sale in pending_sales:
         sale.closure_id = closure.id
+
+    if pending_returns:
+        (
+            db.query(models.SaleReturn)
+            .filter(models.SaleReturn.id.in_([ret.id for ret in pending_returns]))
+            .update({"closure_id": closure.id}, synchronize_session=False)
+        )
 
     if sep_payment_ids:
         (
@@ -2026,6 +2114,11 @@ def list_pos_closures(
 def delete_pos_closure(db: Session, closure: models.PosClosure):
     for sale in closure.sales:
         sale.closure_id = None
+    (
+        db.query(models.SaleReturn)
+        .filter(models.SaleReturn.closure_id == closure.id)
+        .update({"closure_id": None}, synchronize_session=False)
+    )
     (
         db.query(models.SeparatedOrderPayment)
         .filter(models.SeparatedOrderPayment.closure_id == closure.id)
