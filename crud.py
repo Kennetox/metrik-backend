@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, or_
 
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, selectinload, joinedload
 
 import models, schemas
 from services import permissions
@@ -845,6 +845,7 @@ def get_sale_return(db: Session, return_id: int) -> Optional[models.SaleReturn]:
 def list_returns(db: Session, skip: int = 0, limit: int = 100):
     return (
         db.query(models.SaleReturn)
+        .options(joinedload(models.SaleReturn.sale))
         .order_by(models.SaleReturn.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -1478,6 +1479,14 @@ def _is_pos_web_name(pos_name: Optional[str]) -> bool:
     return "pos web" in pos_name.strip().lower()
 
 
+def _filter_pos_name(query, column, pos_name: Optional[str]):
+    if not pos_name:
+        return query
+    if _is_pos_web_name(pos_name):
+        return query.filter(func.lower(column).contains("pos web"))
+    return query.filter(column == pos_name)
+
+
 def _station_label_from_pos_name(pos_name: Optional[str]) -> Optional[str]:
     if not pos_name:
         return None
@@ -1844,8 +1853,10 @@ def create_pos_closure(
             models.Sale.station_id == station_id
         )
     elif pos_name:
-        pending_sales_query = pending_sales_query.filter(
-            models.Sale.pos_name == pos_name
+        pending_sales_query = _filter_pos_name(
+            pending_sales_query,
+            models.Sale.pos_name,
+            pos_name,
         )
 
     pending_sales = pending_sales_query.order_by(models.Sale.created_at.asc()).all()
@@ -1883,8 +1894,10 @@ def create_pos_closure(
             models.Sale.station_id == station_id
         )
     elif pos_name:
-        pending_returns_query = pending_returns_query.filter(
-            models.Sale.pos_name == pos_name
+        pending_returns_query = _filter_pos_name(
+            pending_returns_query,
+            models.Sale.pos_name,
+            pos_name,
         )
 
     pending_returns = pending_returns_query.order_by(models.SaleReturn.created_at.asc()).all()
@@ -1901,8 +1914,10 @@ def create_pos_closure(
             models.SaleChange.station_id == station_id
         )
     elif pos_name:
-        pending_changes_base = pending_changes_base.filter(
-            models.SaleChange.pos_name == pos_name
+        pending_changes_base = _filter_pos_name(
+            pending_changes_base,
+            models.SaleChange.pos_name,
+            pos_name,
         )
 
     pending_changes_all = pending_changes_base.order_by(models.SaleChange.created_at.asc()).all()
@@ -1921,8 +1936,10 @@ def create_pos_closure(
             )
         )
     elif pos_name:
-        sep_paid_at = sep_paid_at.filter(
-            models.Sale.pos_name == pos_name
+        sep_paid_at = _filter_pos_name(
+            sep_paid_at,
+            models.Sale.pos_name,
+            pos_name,
         )
     sep_paid_at = sep_paid_at.scalar()
 
@@ -2038,11 +2055,15 @@ def create_pos_closure(
             )
         )
     elif pos_name:
-        sep_payment_filter = sep_payment_filter.filter(
-            models.Sale.pos_name == pos_name
+        sep_payment_filter = _filter_pos_name(
+            sep_payment_filter,
+            models.Sale.pos_name,
+            pos_name,
         )
-        sep_ids_query = sep_ids_query.filter(
-            models.Sale.pos_name == pos_name
+        sep_ids_query = _filter_pos_name(
+            sep_ids_query,
+            models.Sale.pos_name,
+            pos_name,
         )
 
     sep_rows = sep_payment_filter.group_by(models.SeparatedOrderPayment.method).all()

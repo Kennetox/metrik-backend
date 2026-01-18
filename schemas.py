@@ -446,12 +446,16 @@ class SaleReturnCreate(BaseModel):
 class SaleReturnRead(BaseModel):
     id: int
     sale_id: int
+    closure_id: Optional[int] = None
     document_number: Optional[str] = None
+    sale_document_number: Optional[str] = None
     status: str
     total_refund: float
     notes: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
+    pos_name: Optional[str] = None
+    station_id: Optional[str] = None
     items: List[ReturnItemRead]
     payments: List[ReturnPaymentRead]
 

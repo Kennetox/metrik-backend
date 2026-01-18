@@ -1365,6 +1365,16 @@ def render_closure_html(
     formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
         str(closure.closed_at)
     )
+    opened_label = (
+        _format_ticket_datetime(closure.opened_at)
+        if closure.opened_at
+        else None
+    )
+    range_label = (
+        f"{html_escape(opened_label)} → {formatted_date}"
+        if opened_label
+        else None
+    )
     pos_name = html_escape(closure.pos_name or "N/A")
     closed_by = html_escape(closure.closed_by_user_name or "N/A")
     closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
@@ -1394,7 +1404,8 @@ def render_closure_html(
       <p style="margin:0 0 16px;">
         <strong>POS:</strong> {pos_name}<br/>
         <strong>Cerrado por:</strong> {closed_by}<br/>
-        <strong>Fecha:</strong> {formatted_date}
+        <strong>Fecha de cierre:</strong> {formatted_date}
+        {f"<br/><strong>Periodo:</strong> {range_label}" if range_label else ""}
       </p>
       <p style="margin:0 0 12px;"><strong>Ventas incluidas:</strong> {sales_count}</p>
       <pre style="font-family: Arial, sans-serif; margin:0 0 16px; white-space:pre-wrap;">{totals_lines}</pre>
@@ -1416,6 +1427,12 @@ def render_closure_pdf(
     formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
         str(closure.closed_at)
     )
+    opened_label = (
+        _format_ticket_datetime(closure.opened_at)
+        if closure.opened_at
+        else None
+    )
+    range_label = f"{opened_label} → {formatted_date}" if opened_label else ""
     pos_name = html_escape(closure.pos_name or "N/A")
     closed_by = html_escape(closure.closed_by_user_name or "N/A")
     closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
@@ -1479,8 +1496,9 @@ def render_closure_pdf(
               <table width="100%" cellspacing="0" cellpadding="0" style="font-size:12px; color:#334155;">
                 <tr>
                   <td><strong>POS:</strong> {pos_name}</td>
-                  <td align="right"><strong>Fecha:</strong> {formatted_date}</td>
+                  <td align="right"><strong>Fecha de cierre:</strong> {formatted_date}</td>
                 </tr>
+                {f"<tr><td colspan='2'><strong>Periodo:</strong> {range_label}</td></tr>" if range_label else ""}
                 <tr>
                   <td><strong>Cerrado por:</strong> {closed_by}</td>
                   <td align="right"><strong>Ventas incluidas:</strong> {sales_count}</td>

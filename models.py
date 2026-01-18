@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import (
     Column,
@@ -537,6 +538,18 @@ class SaleReturn(Base):
         back_populates="return_",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def station_id(self) -> Optional[str]:
+        return self.sale.station_id if self.sale else None
+
+    @property
+    def pos_name(self) -> Optional[str]:
+        return self.sale.pos_name if self.sale else None
+
+    @property
+    def sale_document_number(self) -> Optional[str]:
+        return self.sale.document_number if self.sale else None
 
 
 class SaleReturnItem(Base):
