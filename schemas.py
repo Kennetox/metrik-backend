@@ -732,6 +732,7 @@ class AuthLoginRequest(BaseModel):
 class AuthLoginResponse(BaseModel):
     token: str
     user: PosUserRead
+    expires_at: Optional[datetime] = None
 
 
 class AuthForgotPasswordRequest(BaseModel):

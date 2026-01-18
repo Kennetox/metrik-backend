@@ -339,6 +339,25 @@ class PosUser(Base):
         back_populates="user",
         foreign_keys="PosStation.pos_user_id",
     )
+    sessions = relationship("PosSession", back_populates="user")
+
+
+class PosSession(Base):
+    __tablename__ = "pos_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    token_hash = Column(String(128), unique=True, nullable=False, index=True)
+    session_type = Column(String, nullable=False)
+    station_id = Column(String, nullable=True)
+    device_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(String, nullable=True)
+
+    user = relationship("PosUser", back_populates="sessions")
 
 
 class PasswordReset(Base):

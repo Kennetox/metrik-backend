@@ -9,7 +9,9 @@ from typing import Dict
 
 PASSWORD_ITERATIONS = 120_000
 SECRET_KEY = os.getenv("POS_SECRET_KEY", "kensar-pos-secret-change-me")
-TOKEN_TTL_SECONDS = int(os.getenv("POS_TOKEN_TTL", 60 * 60 * 24))
+POS_TOKEN_TTL_SECONDS = int(os.getenv("POS_TOKEN_TTL", 60 * 60 * 12))
+WEB_TOKEN_TTL_SECONDS = int(os.getenv("WEB_TOKEN_TTL", 60 * 60 * 12))
+WEB_INACTIVITY_TIMEOUT_SECONDS = int(os.getenv("WEB_INACTIVITY_TIMEOUT", 60 * 20))
 
 
 def _b64encode(data: bytes) -> str:
@@ -50,7 +52,9 @@ def verify_password(password: str, hashed: str) -> bool:
     return hmac.compare_digest(new_digest, expected_digest)
 
 
-def create_access_token(user_id: int, role: str, ttl: int = TOKEN_TTL_SECONDS) -> str:
+def create_access_token(
+    user_id: int, role: str, ttl: int = POS_TOKEN_TTL_SECONDS
+) -> str:
     payload = {
         "sub": user_id,
         "role": role,

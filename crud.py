@@ -17,6 +17,67 @@ from services import permissions
 from security import hash_password, verify_password
 
 
+def _session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def revoke_user_sessions(
+    db: Session,
+    user_id: int,
+    reason: str = "replaced",
+) -> None:
+    now = datetime.utcnow()
+    (
+        db.query(models.PosSession)
+        .filter(
+            models.PosSession.user_id == user_id,
+            models.PosSession.revoked_at.is_(None),
+        )
+        .update(
+            {
+                models.PosSession.revoked_at: now,
+                models.PosSession.revoked_reason: reason,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+
+
+def create_pos_session(
+    db: Session,
+    user_id: int,
+    token: str,
+    session_type: str,
+    expires_at: datetime,
+    station_id: str | None = None,
+    device_id: str | None = None,
+) -> models.PosSession:
+    session = models.PosSession(
+        user_id=user_id,
+        token_hash=_session_token_hash(token),
+        session_type=session_type,
+        station_id=station_id,
+        device_id=device_id,
+        created_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        expires_at=expires_at,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_session_by_token(db: Session, token: str) -> models.PosSession | None:
+    token_hash = _session_token_hash(token)
+    return (
+        db.query(models.PosSession)
+        .filter(models.PosSession.token_hash == token_hash)
+        .first()
+    )
+
+
 # ===================== PRODUCTS =====================
 
 

@@ -67,6 +67,7 @@ def run_schema_upgrades(engine: Engine) -> None:
         with connection.begin():
             if backend == "postgresql":
                 _ensure_table_sale_changes_postgres(connection)
+                _ensure_table_pos_sessions_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "pos_closures",
@@ -214,6 +215,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "VARCHAR(7)",
                 )
                 _ensure_table_password_resets(connection)
+                _ensure_table_pos_sessions(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_column(
@@ -823,6 +825,41 @@ def _ensure_table_password_resets(connection) -> None:
         _ensure_column(connection, "password_resets", "created_at", "DATETIME")
 
 
+def _ensure_table_pos_sessions(connection) -> None:
+    if not _table_exists(connection, "pos_sessions"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE pos_sessions (
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    session_type TEXT NOT NULL,
+                    station_id TEXT,
+                    device_id TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at DATETIME,
+                    expires_at DATETIME NOT NULL,
+                    revoked_at DATETIME,
+                    revoked_reason TEXT,
+                    FOREIGN KEY(user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "pos_sessions", "user_id", "INTEGER")
+        _ensure_column(connection, "pos_sessions", "token_hash", "TEXT")
+        _ensure_column(connection, "pos_sessions", "session_type", "TEXT")
+        _ensure_column(connection, "pos_sessions", "station_id", "TEXT")
+        _ensure_column(connection, "pos_sessions", "device_id", "TEXT")
+        _ensure_column(connection, "pos_sessions", "created_at", "DATETIME")
+        _ensure_column(connection, "pos_sessions", "last_seen_at", "DATETIME")
+        _ensure_column(connection, "pos_sessions", "expires_at", "DATETIME")
+        _ensure_column(connection, "pos_sessions", "revoked_at", "DATETIME")
+        _ensure_column(connection, "pos_sessions", "revoked_reason", "TEXT")
+
+
 def _ensure_table_payment_methods(connection) -> None:
     if not _table_exists(connection, "payment_methods"):
         connection.execute(
@@ -1096,6 +1133,28 @@ def _ensure_table_sale_changes_postgres(connection) -> None:
                 change_id INTEGER NOT NULL REFERENCES sale_changes(id),
                 method TEXT NOT NULL,
                 amount FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_pos_sessions_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS pos_sessions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES pos_users(id),
+                token_hash TEXT NOT NULL UNIQUE,
+                session_type TEXT NOT NULL,
+                station_id TEXT,
+                device_id TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                revoked_at TIMESTAMP,
+                revoked_reason TEXT
             )
             """
         )

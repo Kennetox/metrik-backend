@@ -1,11 +1,18 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 import schemas, crud
 from database import get_db
-from security import verify_password, create_access_token
+from security import (
+    verify_password,
+    create_access_token,
+    POS_TOKEN_TTL_SECONDS,
+    WEB_TOKEN_TTL_SECONDS,
+    verify_access_token,
+    WEB_INACTIVITY_TIMEOUT_SECONDS,
+)
 from services import email as email_service
 from services.password_reset import (
     PASSWORD_RESET_TOKEN_TTL_SECONDS,
@@ -36,18 +43,79 @@ def login(
             detail="Credenciales inválidas",
         )
 
-    token = create_access_token(user.id, user.role)
+    crud.revoke_user_sessions(db, user.id, reason="replaced")
+    token = create_access_token(user.id, user.role, WEB_TOKEN_TTL_SECONDS)
+    expires_at = datetime.utcnow() + timedelta(seconds=WEB_TOKEN_TTL_SECONDS)
+    crud.create_pos_session(
+        db,
+        user_id=user.id,
+        token=token,
+        session_type="web",
+        expires_at=expires_at,
+    )
     user.last_login = datetime.utcnow()
     db.commit()
     db.refresh(user)
 
     user_read = schemas.PosUserRead.model_validate(user)
-    return schemas.AuthLoginResponse(token=token, user=user_read)
+    return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
 
 
 @router.post("/logout")
-def logout():
+def logout(
+    authorization: str | None = Header(None),
+    db: Session = Depends(get_db),
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        return {"detail": "Sesión finalizada. Elimina el token en el cliente."}
+    token = authorization.split(" ", 1)[1]
+    session = crud.get_session_by_token(db, token)
+    if session and not session.revoked_at:
+        session.revoked_at = datetime.utcnow()
+        session.revoked_reason = "logout"
+        db.commit()
     return {"detail": "Sesión finalizada. Elimina el token en el cliente."}
+
+
+@router.get("/session-status")
+def session_status(
+    authorization: str | None = Header(None),
+    db: Session = Depends(get_db),
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        return {"status": "invalid", "reason": "missing"}
+    token = authorization.split(" ", 1)[1]
+    try:
+        verify_access_token(token)
+    except ValueError as exc:
+        reason = "expired" if "expirado" in str(exc).lower() else "invalid"
+        return {"status": "invalid", "reason": reason}
+
+    session = crud.get_session_by_token(db, token)
+    if not session:
+        return {"status": "invalid", "reason": "missing"}
+    if session.revoked_at:
+        return {"status": "revoked", "reason": session.revoked_reason}
+
+    now = datetime.utcnow()
+    if session.expires_at < now:
+        session.revoked_at = now
+        session.revoked_reason = "expired"
+        db.commit()
+        return {"status": "invalid", "reason": "expired"}
+
+    if (
+        session.session_type == "web"
+        and session.last_seen_at
+        and (now - session.last_seen_at).total_seconds()
+        > WEB_INACTIVITY_TIMEOUT_SECONDS
+    ):
+        session.revoked_at = now
+        session.revoked_reason = "inactive"
+        db.commit()
+        return {"status": "invalid", "reason": "inactive"}
+
+    return {"status": "active"}
 
 
 @router.post("/pos-login", response_model=schemas.AuthLoginResponse)
@@ -82,13 +150,24 @@ def pos_login(
             station.bound_device_label = payload.device_label
 
     crud.register_pos_station_login_success(db, station)
-    token = create_access_token(user.id, user.role)
+    crud.revoke_user_sessions(db, user.id, reason="replaced")
+    token = create_access_token(user.id, user.role, POS_TOKEN_TTL_SECONDS)
+    expires_at = datetime.utcnow() + timedelta(seconds=POS_TOKEN_TTL_SECONDS)
+    crud.create_pos_session(
+        db,
+        user_id=user.id,
+        token=token,
+        session_type="pos",
+        expires_at=expires_at,
+        station_id=station.id,
+        device_id=payload.device_id,
+    )
     user.last_login = datetime.utcnow()
     db.commit()
     db.refresh(user)
 
     user_read = schemas.PosUserRead.model_validate(user)
-    return schemas.AuthLoginResponse(token=token, user=user_read)
+    return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
 
 
 @router.post("/forgot-password")

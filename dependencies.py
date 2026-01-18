@@ -1,4 +1,5 @@
 from typing import Optional, Sequence
+from datetime import datetime, timedelta
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session
 import models
 import crud
 from database import get_db
-from security import verify_access_token
+from security import verify_access_token, WEB_INACTIVITY_TIMEOUT_SECONDS
 from services import permissions
 
 
@@ -42,6 +43,39 @@ def require_pos_auth(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario no autorizado",
         )
+
+    session = crud.get_session_by_token(db, token)
+    if not session or session.revoked_at:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión inválida o cerrada",
+        )
+
+    now = datetime.utcnow()
+    if session.expires_at < now:
+        session.revoked_at = now
+        session.revoked_reason = "expired"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión expirada",
+        )
+
+    if (
+        session.session_type == "web"
+        and session.last_seen_at
+        and now - session.last_seen_at > timedelta(seconds=WEB_INACTIVITY_TIMEOUT_SECONDS)
+    ):
+        session.revoked_at = now
+        session.revoked_reason = "inactive"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión expirada por inactividad",
+        )
+
+    session.last_seen_at = now
+    db.commit()
 
     return user
 
