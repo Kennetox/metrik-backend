@@ -741,6 +741,7 @@ class SaleRead(SaleBase):
     initial_payment_method: Optional[str] = None
     initial_payment_amount: Optional[float] = None
     balance: Optional[float] = None
+    has_cash_payment: bool = False
 
     class Config:
         from_attributes = True

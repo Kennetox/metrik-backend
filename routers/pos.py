@@ -175,6 +175,19 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
     if not order:
         updates.setdefault("total", sale_schema.total)
 
+    cash_methods = {"cash", "efectivo"}
+    has_cash_payment = False
+    for payment in getattr(sale, "payments", []) or []:
+        method = (payment.method or "").strip().lower()
+        if method in cash_methods and float(payment.amount or 0.0) > 0:
+            has_cash_payment = True
+            break
+    if not has_cash_payment:
+        method = (sale.main_payment_method or sale.payment_method or "").strip().lower()
+        if method in cash_methods and float(sale.paid_amount or 0.0) > 0:
+            has_cash_payment = True
+    updates["has_cash_payment"] = has_cash_payment
+
     return sale_schema.model_copy(update=updates)
 
 
