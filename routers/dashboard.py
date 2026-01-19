@@ -3,9 +3,12 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from io import BytesIO
 
 import models
 import schemas
@@ -235,6 +238,65 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         month_avg_ticket=month_avg_ticket,
         payment_methods=payment_methods,
         last_7_days=last_7_days,
+    )
+
+
+@router.post("/documents/export/xlsx")
+def export_documents_excel(
+    payload: schemas.DocumentExportRequest,
+    _: object = Depends(require_permission("dashboard.view")),
+):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="No hay documentos para exportar")
+
+    workbook = Workbook()
+    try:
+        workbook.calculation_properties.fullCalcOnLoad = True
+    except AttributeError:
+        pass
+    sheet = workbook.active
+    sheet.title = "Documentos"
+
+    headers = [
+        "Documento",
+        "Tipo",
+        "Detalle",
+        "Total",
+        "Metodo",
+        "Cliente",
+        "POS",
+        "Vendedor",
+        "Referencia",
+        "Estado",
+        "Fecha",
+    ]
+    sheet.append(headers)
+
+    for item in payload.items:
+        sheet.append(
+            [
+                item.document_number,
+                item.doc_type,
+                item.detail,
+                item.total,
+                item.method,
+                item.customer,
+                item.pos,
+                item.vendor,
+                item.reference,
+                item.status,
+                item.created_at,
+            ]
+        )
+
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=documentos.xlsx"},
     )
 
 

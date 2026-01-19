@@ -751,6 +751,24 @@ class SaleVoidResponse(BaseModel):
     return_document: Optional[SaleReturnRead] = None
 
 
+class DocumentExportRow(BaseModel):
+    document_number: str
+    doc_type: str
+    detail: str
+    total: float
+    method: str
+    customer: str
+    pos: str
+    vendor: str
+    reference: str
+    status: str
+    created_at: str
+
+
+class DocumentExportRequest(BaseModel):
+    items: List[DocumentExportRow]
+
+
 class NextSaleNumberResponse(BaseModel):
     next_sale_number: int
 
