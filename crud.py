@@ -1306,6 +1306,142 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
     return sale_change
 
 
+# ===================== VOID / ADJUSTMENTS =====================
+
+
+def void_sale(
+    db: Session,
+    sale: models.Sale,
+    user: models.PosUser,
+    reason: Optional[str] = None,
+) -> models.Sale:
+    if sale.status == "voided":
+        raise ValueError("La venta ya está anulada")
+    if sale.closure_id is not None:
+        raise ValueError(
+            "No se puede anular una venta cerrada; registra una devolución"
+        )
+
+    sale.status = "voided"
+    sale.voided_at = datetime.utcnow()
+    sale.voided_by_user_id = user.id
+    sale.void_reason = reason
+
+    db.commit()
+    db.refresh(sale)
+    return sale
+
+
+def void_return(
+    db: Session,
+    sale_return: models.SaleReturn,
+    user: models.PosUser,
+    reason: Optional[str] = None,
+) -> models.SaleReturn:
+    if sale_return.status != "confirmed":
+        raise ValueError("Solo se pueden anular devoluciones confirmadas")
+    if sale_return.closure_id is not None:
+        raise ValueError(
+            "No se puede anular una devolución cerrada; registra un ajuste nuevo"
+        )
+
+    sale = sale_return.sale
+    if sale:
+        sale.refunded_total = max(
+            0.0, float(sale.refunded_total or 0.0) - float(sale_return.total_refund or 0.0)
+        )
+        sale.refund_count = max(0, int(sale.refund_count or 0) - 1)
+
+    sale_return.status = "voided"
+    sale_return.voided_at = datetime.utcnow()
+    sale_return.voided_by_user_id = user.id
+    sale_return.void_reason = reason
+    sale_return.adjustment_reference = sale.document_number if sale else None
+
+    db.commit()
+    db.refresh(sale_return)
+    return sale_return
+
+
+def void_change(
+    db: Session,
+    sale_change: models.SaleChange,
+    user: models.PosUser,
+    reason: Optional[str] = None,
+) -> models.SaleChange:
+    if sale_change.status != "confirmed":
+        raise ValueError("Solo se pueden anular cambios confirmados")
+    if sale_change.closure_id is not None:
+        raise ValueError(
+            "No se puede anular un cambio cerrado; registra un ajuste nuevo"
+        )
+
+    sale_change.status = "voided"
+    sale_change.voided_at = datetime.utcnow()
+    sale_change.voided_by_user_id = user.id
+    sale_change.void_reason = reason
+    sale_change.adjustment_reference = (
+        sale_change.sale.document_number if sale_change.sale else None
+    )
+
+    db.commit()
+    db.refresh(sale_change)
+    return sale_change
+
+
+def get_separated_order_payment(
+    db: Session,
+    payment_id: int,
+) -> Optional[models.SeparatedOrderPayment]:
+    return (
+        db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.id == payment_id)
+        .first()
+    )
+
+
+def void_separated_order_payment(
+    db: Session,
+    payment: models.SeparatedOrderPayment,
+    user: models.PosUser,
+    reason: Optional[str] = None,
+    note: Optional[str] = None,
+) -> models.SeparatedOrder:
+    if payment.status == "voided":
+        raise ValueError("El abono ya está anulado")
+    order = payment.separated_order
+    if not order:
+        raise ValueError("No se encontró el separado asociado")
+
+    if payment.closure_id is None:
+        payment.status = "voided"
+        payment.voided_at = datetime.utcnow()
+        payment.voided_by_user_id = user.id
+        payment.void_reason = reason
+        payment.adjustment_reference = None
+    else:
+        adjustment_note = note or f"Ajuste por anulación del abono #{payment.id}"
+        station_id = payment.station_id or order.sale.station_id
+        adjustment = models.SeparatedOrderPayment(
+            separated_order_id=order.id,
+            method=payment.method,
+            amount=-float(payment.amount or 0.0),
+            reference=payment.reference,
+            note=adjustment_note,
+            station_id=station_id,
+            status="adjustment",
+        )
+        db.add(adjustment)
+        db.flush()
+        payment.adjustment_reference = f"SEP-ADJ-{adjustment.id}"
+
+    order.balance = float(order.balance or 0.0) + float(payment.amount or 0.0)
+    if order.balance > 0.01:
+        order.status = "reservado"
+
+    db.commit()
+    db.refresh(order)
+    return order
 # ===================== POS SETTINGS =====================
 
 
@@ -1846,7 +1982,8 @@ def create_pos_closure(
         raise ValueError("Debe seleccionar una estación para cerrar caja")
 
     pending_sales_query = db.query(models.Sale).filter(
-        models.Sale.closure_id.is_(None)
+        models.Sale.closure_id.is_(None),
+        or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
     )
     if station_id:
         pending_sales_query = pending_sales_query.filter(
@@ -1866,6 +2003,7 @@ def create_pos_closure(
         fallback_query = db.query(models.Sale).filter(
             models.Sale.closure_id.is_(None),
             models.Sale.station_id.is_(None),
+            or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
         )
         if pos_name:
             fallback_query = fallback_query.filter(
@@ -1926,7 +2064,13 @@ def create_pos_closure(
         db.query(func.min(models.SeparatedOrderPayment.paid_at))
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-        .filter(models.SeparatedOrderPayment.closure_id.is_(None))
+        .filter(
+            models.SeparatedOrderPayment.closure_id.is_(None),
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            ),
+        )
     )
     if station_id:
         sep_paid_at = sep_paid_at.filter(
@@ -2033,13 +2177,25 @@ def create_pos_closure(
         )
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-        .filter(models.SeparatedOrderPayment.closure_id.is_(None))
+        .filter(
+            models.SeparatedOrderPayment.closure_id.is_(None),
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            ),
+        )
     )
     sep_ids_query = (
         db.query(models.SeparatedOrderPayment.id)
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-        .filter(models.SeparatedOrderPayment.closure_id.is_(None))
+        .filter(
+            models.SeparatedOrderPayment.closure_id.is_(None),
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            ),
+        )
     )
     if station_id:
         sep_payment_filter = sep_payment_filter.filter(

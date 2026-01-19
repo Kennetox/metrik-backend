@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 import crud, models, schemas
 from database import get_db
-from dependencies import require_permission
+from dependencies import require_permission, require_role
 
 
 router = APIRouter(
@@ -95,6 +95,32 @@ def add_separated_payment(
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     try:
         updated = crud.add_separated_order_payment(db, order, payment_in)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return updated
+
+
+@router.post(
+    "/{order_id}/payments/{payment_id}/void",
+    response_model=schemas.SeparatedOrderRead,
+)
+def void_separated_payment(
+    order_id: int,
+    payment_id: int,
+    payload: schemas.SeparatedOrderPaymentVoidRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+):
+    order = crud.get_separated_order(db, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Separado no encontrado")
+    payment = crud.get_separated_order_payment(db, payment_id)
+    if not payment or payment.separated_order_id != order.id:
+        raise HTTPException(status_code=404, detail="Abono no encontrado")
+    try:
+        updated = crud.void_separated_order_payment(
+            db, payment, current_user, payload.reason, payload.note
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated

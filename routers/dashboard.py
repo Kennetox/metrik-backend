@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import models
@@ -72,6 +73,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
 
     sales_month = (
         db.query(models.Sale)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
         .filter(models.Sale.created_at >= month_start_utc)
         .all()
     )
@@ -79,6 +81,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         db.query(models.SaleReturn)
         .filter(models.SaleReturn.created_at >= month_start_utc)
         .filter(models.SaleReturn.status == "confirmed")
+        .filter(models.SaleReturn.adjustment_reference.is_(None))
         .all()
     )
     changes_month = (
@@ -89,6 +92,12 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     )
     separated_payments_month = (
         db.query(models.SeparatedOrderPayment)
+        .filter(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
         .filter(models.SeparatedOrderPayment.paid_at >= month_start_utc)
         .all()
     )
@@ -249,6 +258,7 @@ def get_monthly_sales(
 
     sales_year = (
         db.query(models.Sale)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
         .filter(models.Sale.created_at >= year_start)
         .filter(models.Sale.created_at < year_end)
         .all()
@@ -269,6 +279,12 @@ def get_monthly_sales(
     )
     separated_payments_year = (
         db.query(models.SeparatedOrderPayment)
+        .filter(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
         .filter(models.SeparatedOrderPayment.paid_at >= year_start)
         .filter(models.SeparatedOrderPayment.paid_at < year_end)
         .all()

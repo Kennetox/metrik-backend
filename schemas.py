@@ -450,6 +450,10 @@ class SaleReturnRead(BaseModel):
     document_number: Optional[str] = None
     sale_document_number: Optional[str] = None
     status: str
+    voided_at: Optional[datetime] = None
+    voided_by_user_id: Optional[int] = None
+    void_reason: Optional[str] = None
+    adjustment_reference: Optional[str] = None
     total_refund: float
     notes: Optional[str] = None
     created_by: Optional[str] = None
@@ -536,6 +540,10 @@ class SaleChangeRead(BaseModel):
     closure_id: Optional[int] = None
     document_number: Optional[str] = None
     status: str
+    voided_at: Optional[datetime] = None
+    voided_by_user_id: Optional[int] = None
+    void_reason: Optional[str] = None
+    adjustment_reference: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
@@ -553,6 +561,15 @@ class SaleChangeRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class VoidRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class SeparatedOrderPaymentVoidRequest(BaseModel):
+    reason: Optional[str] = None
+    note: Optional[str] = None
 
 
 class SaleBase(BaseModel):
@@ -703,6 +720,11 @@ class SaleRead(SaleBase):
     # número de documento tipo V-000001
     document_number: Optional[str] = None
     created_at: datetime
+    status: str
+    voided_at: Optional[datetime] = None
+    voided_by_user_id: Optional[int] = None
+    void_reason: Optional[str] = None
+    adjustment_reference: Optional[str] = None
 
     refunded_total: float
     refund_count: int
@@ -722,6 +744,11 @@ class SaleRead(SaleBase):
 
     class Config:
         from_attributes = True
+
+
+class SaleVoidResponse(BaseModel):
+    sale: SaleRead
+    return_document: Optional[SaleReturnRead] = None
 
 
 class NextSaleNumberResponse(BaseModel):
@@ -824,6 +851,11 @@ class SeparatedOrderPaymentRead(SeparatedOrderPaymentBase):
     id: int
     paid_at: datetime
     closure_id: Optional[int] = None
+    status: str
+    voided_at: Optional[datetime] = None
+    voided_by_user_id: Optional[int] = None
+    void_reason: Optional[str] = None
+    adjustment_reference: Optional[str] = None
 
     class Config:
         from_attributes = True

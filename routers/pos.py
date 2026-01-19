@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 import schemas, crud, models
 from database import get_db
-from dependencies import require_permission
+from dependencies import require_permission, require_role
 from services import email as email_service
 from services import ticket_renderer
 from services import storage
@@ -356,6 +356,30 @@ def get_sale(
     return _serialize_sale_response(sale)
 
 
+@router.post(
+    "/sales/{sale_id}/void",
+    response_model=schemas.SaleVoidResponse,
+)
+def void_sale(
+    sale_id: int,
+    payload: schemas.VoidRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+):
+    sale = crud.get_sale(db, sale_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+    try:
+        sale = crud.void_sale(db, sale, current_user, payload.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.refresh(sale)
+    return schemas.SaleVoidResponse(
+        sale=_serialize_sale_response(sale),
+        return_document=None,
+    )
+
+
 @router.post("/returns", response_model=schemas.SaleReturnRead, status_code=201)
 def create_return(
     return_in: schemas.SaleReturnCreate,
@@ -492,6 +516,26 @@ def get_return(
     return sale_return
 
 
+@router.post(
+    "/returns/{return_id}/void",
+    response_model=schemas.SaleReturnRead,
+)
+def void_return(
+    return_id: int,
+    payload: schemas.VoidRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+):
+    sale_return = crud.get_sale_return(db, return_id)
+    if not sale_return:
+        raise HTTPException(status_code=404, detail="Devolución no encontrada")
+    try:
+        updated = crud.void_return(db, sale_return, current_user, payload.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return updated
+
+
 @router.get("/changes/{change_id}", response_model=schemas.SaleChangeRead)
 def get_change(
     change_id: int,
@@ -502,6 +546,26 @@ def get_change(
     if not sale_change:
         raise HTTPException(status_code=404, detail="Cambio no encontrado")
     return sale_change
+
+
+@router.post(
+    "/changes/{change_id}/void",
+    response_model=schemas.SaleChangeRead,
+)
+def void_change(
+    change_id: int,
+    payload: schemas.VoidRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+):
+    sale_change = crud.get_sale_change(db, change_id)
+    if not sale_change:
+        raise HTTPException(status_code=404, detail="Cambio no encontrado")
+    try:
+        updated = crud.void_change(db, sale_change, current_user, payload.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return updated
 
 
 @router.get("/settings", response_model=schemas.PosSettingsRead)
@@ -1043,7 +1107,7 @@ def delete_pos_closure(
     db: Session = Depends(get_db),
     _: models.PosUser = Depends(require_permission("pos.closures")),
 ):
-    closure = crud.get_pos_closure(db, closure_id)
-    if not closure:
-        raise HTTPException(status_code=404, detail="Cierre no encontrado")
-    crud.delete_pos_closure(db, closure)
+    raise HTTPException(
+        status_code=403,
+        detail="Los cierres no se pueden eliminar.",
+    )

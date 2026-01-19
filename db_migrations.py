@@ -70,6 +70,36 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_column_postgres(
                     connection,
+                    "sales",
+                    "status",
+                    "TEXT DEFAULT 'active'",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sales",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sales",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sales",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sales",
+                    "adjustment_reference",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
                     "pos_closures",
                     "change_extra_total",
                     "FLOAT DEFAULT 0",
@@ -164,8 +194,116 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "closure_id",
                     "INTEGER",
                 )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_returns",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_returns",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_returns",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_returns",
+                    "adjustment_reference",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_changes",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_changes",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_changes",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "sale_changes",
+                    "adjustment_reference",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "separated_order_payments",
+                    "status",
+                    "TEXT DEFAULT 'active'",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "separated_order_payments",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "separated_order_payments",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "separated_order_payments",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "separated_order_payments",
+                    "adjustment_reference",
+                    "TEXT",
+                )
                 return
             if backend == "sqlite":
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "status",
+                    "TEXT DEFAULT 'active'",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sales",
+                    "adjustment_reference",
+                    "TEXT",
+                )
                 _ensure_column(
                     connection,
                     "sales",
@@ -207,6 +345,30 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "sale_returns",
                     "closure_id",
                     "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "sale_returns",
+                    "voided_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column(
+                    connection,
+                    "sale_returns",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "sale_returns",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "sale_returns",
+                    "adjustment_reference",
+                    "TEXT",
                 )
                 _ensure_column(
                     connection,
@@ -268,6 +430,40 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_table_pos_stations(connection)
                 _ensure_table_sale_changes(connection)
+                _ensure_column(connection, "sale_changes", "voided_at", "DATETIME")
+                _ensure_column(connection, "sale_changes", "voided_by_user_id", "INTEGER")
+                _ensure_column(connection, "sale_changes", "void_reason", "TEXT")
+                _ensure_column(connection, "sale_changes", "adjustment_reference", "TEXT")
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "status",
+                    "TEXT DEFAULT 'active'",
+                )
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "voided_at",
+                    "DATETIME",
+                )
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "voided_by_user_id",
+                    "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "void_reason",
+                    "TEXT",
+                )
+                _ensure_column(
+                    connection,
+                    "separated_order_payments",
+                    "adjustment_reference",
+                    "TEXT",
+                )
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
                 _ensure_column(connection, "pos_users", "notes", "TEXT")
