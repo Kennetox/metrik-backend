@@ -33,7 +33,7 @@ def _to_bogota_date(dt: datetime, bogota_tz: ZoneInfo) -> datetime.date:
 def _sale_cash_total(sale: models.Sale) -> float:
     if sale.is_separated:
         return float(sale.paid_amount or 0.0)
-    return float(sale.paid_amount or sale.total or 0.0)
+    return float(sale.total or 0.0)
 
 
 def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: datetime.date):
@@ -167,7 +167,11 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             continue
         for payment in sale.payments:
             method = payment.method or "DESCONOCIDO"
-            payment_totals[method] += float(payment.amount or 0.0)
+            payment_amount = float(payment.amount or 0.0)
+            if payment_amount <= 0:
+                continue
+            capped_amount = min(payment_amount, sale_total)
+            payment_totals[method] += capped_amount
             payment_ticket_sets[method].add(sale.id)
 
     for payment in separated_payments_month:
