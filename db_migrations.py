@@ -68,6 +68,7 @@ def run_schema_upgrades(engine: Engine) -> None:
             if backend == "postgresql":
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
+                _ensure_table_user_documents_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -116,6 +117,15 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "change_count",
                     "INTEGER DEFAULT 0",
                 )
+                _ensure_column_postgres(connection, "pos_users", "phone", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "position", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "notes", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "avatar_url", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "birth_date", "DATE")
+                _ensure_column_postgres(connection, "pos_users", "location", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "bio", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "invited_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "pos_users", "accepted_at", "TIMESTAMP")
                 _ensure_column_postgres(
                     connection,
                     "pos_settings",
@@ -378,6 +388,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
+                _ensure_table_user_documents(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_column(
@@ -467,6 +478,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
                 _ensure_column(connection, "pos_users", "notes", "TEXT")
+                _ensure_column(connection, "pos_users", "avatar_url", "TEXT")
+                _ensure_column(connection, "pos_users", "birth_date", "DATE")
+                _ensure_column(connection, "pos_users", "location", "TEXT")
+                _ensure_column(connection, "pos_users", "bio", "TEXT")
                 _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
                 _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
                 if _table_exists(connection, "pos_closures"):
@@ -1056,6 +1071,33 @@ def _ensure_table_pos_sessions(connection) -> None:
         _ensure_column(connection, "pos_sessions", "revoked_reason", "TEXT")
 
 
+def _ensure_table_user_documents(connection) -> None:
+    if not _table_exists(connection, "pos_user_documents"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE pos_user_documents (
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_url TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    note TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "pos_user_documents", "user_id", "INTEGER")
+        _ensure_column(connection, "pos_user_documents", "file_name", "TEXT")
+        _ensure_column(connection, "pos_user_documents", "file_url", "TEXT")
+        _ensure_column(connection, "pos_user_documents", "file_size", "INTEGER")
+        _ensure_column(connection, "pos_user_documents", "note", "TEXT")
+        _ensure_column(connection, "pos_user_documents", "created_at", "DATETIME")
+
+
 def _ensure_table_payment_methods(connection) -> None:
     if not _table_exists(connection, "payment_methods"):
         connection.execute(
@@ -1351,6 +1393,24 @@ def _ensure_table_pos_sessions_postgres(connection) -> None:
                 expires_at TIMESTAMP NOT NULL,
                 revoked_at TIMESTAMP,
                 revoked_reason TEXT
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_user_documents_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS pos_user_documents (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES pos_users(id),
+                file_name TEXT NOT NULL,
+                file_url TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                note TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )

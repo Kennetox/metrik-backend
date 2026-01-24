@@ -265,6 +265,10 @@ class PosUserBase(BaseModel):
     phone: Optional[str] = None
     position: Optional[str] = None
     notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
 
 
 class PosUserCreate(PosUserBase):
@@ -288,6 +292,48 @@ class PosUserRead(PosUserBase):
     created_at: datetime
     invited_at: Optional[datetime] = None
     accepted_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PosUserProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+
+
+class PosUserProfileRead(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    status: Literal["Activo", "Inactivo"]
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PosUserDocumentRead(BaseModel):
+    id: int
+    user_id: int
+    file_name: str
+    file_url: str
+    file_size: int
+    note: Optional[str] = None
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -679,6 +725,10 @@ class UploadProductImageResponse(BaseModel):
 
 
 class UploadLogoResponse(BaseModel):
+    url: str
+
+
+class UploadAvatarResponse(BaseModel):
     url: str
 
 

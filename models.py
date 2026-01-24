@@ -7,6 +7,7 @@ from sqlalchemy import (
     String,
     Float,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     JSON,
@@ -337,6 +338,10 @@ class PosUser(Base):
     phone = Column(String, nullable=True)
     position = Column(String, nullable=True)
     notes = Column(Text, nullable=True)
+    avatar_url = Column(String(512), nullable=True)
+    birth_date = Column(Date, nullable=True)
+    location = Column(String, nullable=True)
+    bio = Column(Text, nullable=True)
     invited_at = Column(DateTime, nullable=True)
     accepted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -346,6 +351,7 @@ class PosUser(Base):
         foreign_keys="PosStation.pos_user_id",
     )
     sessions = relationship("PosSession", back_populates="user")
+    documents = relationship("PosUserDocument", back_populates="user")
 
 
 class PosSession(Base):
@@ -364,6 +370,20 @@ class PosSession(Base):
     revoked_reason = Column(String, nullable=True)
 
     user = relationship("PosUser", back_populates="sessions")
+
+
+class PosUserDocument(Base):
+    __tablename__ = "pos_user_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    file_name = Column(String, nullable=False)
+    file_url = Column(String(512), nullable=False)
+    file_size = Column(Integer, nullable=False, default=0)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("PosUser", back_populates="documents")
 
 
 class PasswordReset(Base):

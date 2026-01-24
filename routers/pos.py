@@ -10,6 +10,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     File,
+    Form,
     Response,
 )
 from sqlalchemy.orm import Session
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 import schemas, crud, models
 from database import get_db
-from dependencies import require_permission, require_role
+from dependencies import get_current_active_user, require_permission, require_role
 from services import email as email_service
 from services import ticket_renderer
 from services import storage
@@ -704,6 +705,101 @@ def update_role_permissions(
     modules_payload = [module.model_dump() for module in payload.modules]
     modules = crud.update_role_permissions(db, modules_payload)
     return schemas.RolePermissionMatrix(modules=modules)
+
+
+@router.get("/profile", response_model=schemas.PosUserProfileRead)
+def get_profile(
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    return schemas.PosUserProfileRead.model_validate(current_user)
+
+
+@router.patch("/profile", response_model=schemas.PosUserProfileRead)
+def update_profile(
+    payload: schemas.PosUserProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data:
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="El nombre es obligatorio.")
+        data["name"] = name
+
+    for field, value in data.items():
+        setattr(current_user, field, value)
+
+    db.commit()
+    db.refresh(current_user)
+    return schemas.PosUserProfileRead.model_validate(current_user)
+
+
+@router.post("/profile/avatar", response_model=schemas.UploadAvatarResponse)
+async def upload_profile_avatar(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    try:
+        result = await storage.save_user_avatar(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        raise HTTPException(500, detail=f"No se pudo guardar la imagen: {exc}") from exc
+
+    current_user.avatar_url = result.url
+    db.commit()
+    db.refresh(current_user)
+    return schemas.UploadAvatarResponse(url=result.url)
+
+
+@router.get("/profile/documents", response_model=List[schemas.PosUserDocumentRead])
+def list_profile_documents(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    return crud.list_user_documents(db, current_user.id)
+
+
+@router.post("/profile/documents", response_model=schemas.PosUserDocumentRead, status_code=201)
+async def upload_profile_document(
+    file: UploadFile = File(...),
+    note: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    existing = crud.list_user_documents(db, current_user.id)
+    if len(existing) >= 10:
+        raise HTTPException(status_code=400, detail="Se alcanzó el límite de 10 documentos.")
+    try:
+        result = await storage.save_user_document(file, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        raise HTTPException(500, detail=f"No se pudo guardar el documento: {exc}") from exc
+
+    doc = crud.create_user_document(
+        db,
+        user_id=current_user.id,
+        file_name=result.filename,
+        file_url=result.url,
+        file_size=result.size,
+        note=note.strip() if note else None,
+    )
+    return doc
+
+
+@router.delete("/profile/documents/{doc_id}", status_code=204)
+def delete_profile_document(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    deleted = crud.delete_user_document(db, current_user.id, doc_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    return Response(status_code=204)
 
 
 @router.get("/users", response_model=List[schemas.PosUserRead])

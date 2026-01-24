@@ -1602,6 +1602,57 @@ def update_pos_user(
     return user
 
 
+def list_user_documents(
+    db: Session,
+    user_id: int,
+) -> list[models.PosUserDocument]:
+    return (
+        db.query(models.PosUserDocument)
+        .filter(models.PosUserDocument.user_id == user_id)
+        .order_by(models.PosUserDocument.created_at.desc())
+        .all()
+    )
+
+
+def create_user_document(
+    db: Session,
+    user_id: int,
+    file_name: str,
+    file_url: str,
+    file_size: int,
+    note: str | None,
+) -> models.PosUserDocument:
+    doc = models.PosUserDocument(
+        user_id=user_id,
+        file_name=file_name,
+        file_url=file_url,
+        file_size=file_size,
+        note=note,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def delete_user_document(
+    db: Session,
+    user_id: int,
+    doc_id: int,
+) -> bool:
+    doc = (
+        db.query(models.PosUserDocument)
+        .filter(models.PosUserDocument.user_id == user_id)
+        .filter(models.PosUserDocument.id == doc_id)
+        .first()
+    )
+    if not doc:
+        return False
+    db.delete(doc)
+    db.commit()
+    return True
+
+
 # ===================== POS STATIONS =====================
 
 

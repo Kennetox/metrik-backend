@@ -10,6 +10,10 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 2 * 1024 * 1024  # 2MB
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
+AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
+DOC_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx"}
+MAX_DOC_SIZE = 5 * 1024 * 1024  # 5MB
 
 
 @dataclass
@@ -23,6 +27,19 @@ class StoredProductImage:
 class StoredLogo:
     filename: str
     url: str
+
+
+@dataclass
+class StoredAvatar:
+    filename: str
+    url: str
+
+
+@dataclass
+class StoredUserDocument:
+    filename: str
+    url: str
+    size: int
 
 
 def _get_base_dir(tenant_id: Optional[int] = None) -> Path:
@@ -68,6 +85,31 @@ def _build_logo_url(filename: str) -> str:
         return f"{base_url.rstrip('/')}/{filename}"
     storage_path = os.getenv("POS_LOGO_PUBLIC_PATH", "/uploads/pos-logos")
     return f"{storage_path.rstrip('/')}/{filename}"
+
+
+def _get_avatar_dir() -> Path:
+    return Path(os.getenv("USER_AVATAR_UPLOAD_DIR", "uploads/user-avatars"))
+
+
+def _build_avatar_url(filename: str) -> str:
+    base_url = os.getenv("USER_AVATAR_BASE_URL")
+    if base_url:
+        return f"{base_url.rstrip('/')}/{filename}"
+    storage_path = os.getenv("USER_AVATAR_PUBLIC_PATH", "/uploads/user-avatars")
+    return f"{storage_path.rstrip('/')}/{filename}"
+
+
+def _get_user_documents_dir(user_id: int) -> Path:
+    base = Path(os.getenv("USER_DOC_UPLOAD_DIR", "uploads/user-documents"))
+    return base / str(user_id)
+
+
+def _build_user_document_url(filename: str, user_id: int) -> str:
+    base_url = os.getenv("USER_DOC_BASE_URL")
+    if base_url:
+        return f"{base_url.rstrip('/')}/{user_id}/{filename}"
+    storage_path = os.getenv("USER_DOC_PUBLIC_PATH", "/uploads/user-documents")
+    return f"{storage_path.rstrip('/')}/{user_id}/{filename}"
 
 
 async def save_product_image(
@@ -118,3 +160,47 @@ async def save_pos_logo(file: UploadFile) -> StoredLogo:
 
     url = _build_logo_url(filename)
     return StoredLogo(filename=filename, url=url)
+
+
+async def save_user_avatar(file: UploadFile) -> StoredAvatar:
+    original_name = file.filename or ""
+    extension = Path(original_name).suffix.lower()
+    if extension not in AVATAR_ALLOWED_EXTENSIONS:
+        raise ValueError("Formato no soportado. Usa JPG, PNG o WEBP.")
+
+    contents = await file.read()
+    if len(contents) > MAX_AVATAR_SIZE:
+        raise ValueError("La imagen supera los 2MB permitidos")
+
+    filename = f"user-avatar-{uuid4().hex}{extension}"
+    base_dir = _get_avatar_dir()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    file_path = base_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    url = _build_avatar_url(filename)
+    return StoredAvatar(filename=filename, url=url)
+
+
+async def save_user_document(file: UploadFile, user_id: int) -> StoredUserDocument:
+    original_name = file.filename or ""
+    extension = Path(original_name).suffix.lower()
+    if extension not in DOC_ALLOWED_EXTENSIONS:
+        raise ValueError("Formato no soportado. Usa PDF, JPG, PNG, WEBP o DOC/DOCX.")
+
+    contents = await file.read()
+    if len(contents) > MAX_DOC_SIZE:
+        raise ValueError("El archivo supera los 5MB permitidos")
+
+    filename = f"user-doc-{uuid4().hex}{extension}"
+    base_dir = _get_user_documents_dir(user_id)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    file_path = base_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    url = _build_user_document_url(filename, user_id)
+    return StoredUserDocument(filename=original_name, url=url, size=len(contents))
