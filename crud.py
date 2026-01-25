@@ -393,7 +393,11 @@ def update_product_group(
 # ===================== SALES =====================
 
 
-def create_sale(db: Session, sale_in: schemas.SaleCreate) -> models.Sale:
+def create_sale(
+    db: Session,
+    sale_in: schemas.SaleCreate,
+    created_by_user_id: int | None = None,
+) -> models.Sale:
     """
     Crea una venta con sus ítems y pagos.
 
@@ -590,6 +594,16 @@ def create_sale(db: Session, sale_in: schemas.SaleCreate) -> models.Sale:
         sale.document_number = f"V-{sale.id:06d}"
 
     # 4) Crear ítems (ya conocemos sale.id)
+    product_ids = [item_data["product_id"] for item_data in items_calc]
+    product_flags = {}
+    if product_ids:
+        products = (
+            db.query(models.Product)
+            .filter(models.Product.id.in_(product_ids))
+            .all()
+        )
+        product_flags = {product.id: product.service for product in products}
+
     for item_data in items_calc:
         db_item = models.SaleItem(
             sale_id=sale.id,
@@ -605,6 +619,17 @@ def create_sale(db: Session, sale_in: schemas.SaleCreate) -> models.Sale:
             total=item_data["total"],
         )
         db.add(db_item)
+
+        if not product_flags.get(item_data["product_id"], False):
+            movement = models.InventoryMovement(
+                product_id=item_data["product_id"],
+                qty_delta=-abs(float(item_data["quantity"])),
+                reason="sale",
+                reference_type="sale",
+                reference_id=sale.id,
+                created_by_user_id=created_by_user_id,
+            )
+            db.add(movement)
 
     # 5) Crear registros de pagos
     #    Dejamos el PRIMERO como is_primary=True por ahora.

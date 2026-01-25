@@ -117,6 +117,108 @@ class ProductRead(ProductBase):
         from_attributes = True
 
 
+# ===================== INVENTORY =====================
+
+
+InventoryReason = Literal[
+    "sale",
+    "purchase",
+    "adjustment",
+    "count",
+    "loss",
+    "damage",
+    "transfer_in",
+    "transfer_out",
+]
+
+
+class InventoryMovementBase(BaseModel):
+    product_id: int
+    qty_delta: float
+    reason: InventoryReason
+    notes: Optional[str] = None
+    reference_type: Optional[str] = None
+    reference_id: Optional[int] = None
+
+
+class InventoryMovementCreate(InventoryMovementBase):
+    pass
+
+
+class InventoryMovementRead(InventoryMovementBase):
+    id: int
+    product_name: str
+    created_at: datetime
+    created_by_user_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class InventorySummary(BaseModel):
+    total_qty: float
+    low_stock_count: int
+    critical_count: int
+    anomaly_count: int
+    reorder_count: int
+
+
+class InventoryStatusRow(BaseModel):
+    product_id: int
+    product_name: str
+    qty_on_hand: float
+    status: Literal["ok", "low", "critical"]
+
+
+class InventoryProductRow(BaseModel):
+    product_id: int
+    product_name: str
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    qty_on_hand: float
+    status: Literal["ok", "low", "critical"]
+    cost: float
+    price: float
+
+
+class InventoryProductPage(BaseModel):
+    items: List[InventoryProductRow]
+    total: int
+    skip: int
+    limit: int
+    total_cost_value: float
+    total_price_value: float
+
+
+class InventoryProductMovement(BaseModel):
+    id: int
+    reason: InventoryReason
+    qty_delta: float
+    notes: Optional[str] = None
+    reference_type: Optional[str] = None
+    reference_id: Optional[int] = None
+    created_at: datetime
+
+
+class InventoryProductHistory(BaseModel):
+    product_id: int
+    product_name: str
+    qty_on_hand: float
+    total_in: float
+    total_out: float
+    net: float
+    movements: List[InventoryProductMovement]
+    total_movements: int
+    skip: int
+    limit: int
+
+
+class InventoryOverview(BaseModel):
+    summary: InventorySummary
+    recent_movements: List[InventoryMovementRead]
+    status_rows: List[InventoryStatusRow]
+
+
 class LabelExportItem(BaseModel):
     product_id: int
     sku: Optional[str] = None

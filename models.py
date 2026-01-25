@@ -69,6 +69,23 @@ class ProductGroup(Base):
     )
 
 
+class InventoryMovement(Base):
+    __tablename__ = "inventory_movements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    qty_delta = Column(Float, nullable=False, default=0)
+    reason = Column(String, nullable=False)
+    notes = Column(Text, nullable=True)
+    reference_type = Column(String, nullable=True)
+    reference_id = Column(Integer, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    product = relationship("Product")
+    created_by = relationship("PosUser")
+
+
 class Sale(Base):
     __tablename__ = "sales"
 

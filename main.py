@@ -19,6 +19,7 @@ from routers import (
     product_groups as product_groups_router,
     reports as reports_router,
     separated_orders as separated_orders_router,
+    inventory as inventory_router,
 )
 
 app = FastAPI(
@@ -95,3 +96,4 @@ app.include_router(separated_orders_router.router)
 app.include_router(pos_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(auth_router.router)
+app.include_router(inventory_router.router)

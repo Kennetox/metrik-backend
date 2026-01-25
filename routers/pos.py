@@ -311,7 +311,7 @@ def get_next_sale_number(
 def create_sale(
     sale_in: schemas.SaleCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
     """
     Crea una venta en el POS.
@@ -334,7 +334,7 @@ def create_sale(
         )
 
     try:
-        sale = crud.create_sale(db, sale_in)
+        sale = crud.create_sale(db, sale_in, created_by_user_id=current_user.id)
     except ValueError as exc:
         message = str(exc)
         status_code = 409 if "ticket" in message.lower() and "existe" in message.lower() else 400
