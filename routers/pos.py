@@ -94,13 +94,11 @@ def _sign_qz_payload(payload: str) -> str:
 
 
 def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
-    email = ""
-    if station and station.user:
-        email = station.user.email
+    email = station.station_email if station else None
     return schemas.PosStationRead(
         id=station.id,
         label=station.label,
-        pos_user_email=email,
+        station_email=email,
         is_active=bool(station.is_active),
         last_login_at=station.last_login_at,
         bound_device_id=station.bound_device_id,

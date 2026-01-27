@@ -123,16 +123,18 @@ def pos_login(
     payload: schemas.AuthPosLoginRequest,
     db: Session = Depends(get_db),
 ):
+    if not payload.pin:
+        raise HTTPException(status_code=400, detail="PIN requerido")
     station = crud.get_pos_station(db, payload.station_id)
     if not station or not station.is_active:
         raise HTTPException(status_code=400, detail="Estación inválida o inactiva")
-    user = station.user
+    try:
+        user = crud.get_pos_user_by_pin(db, payload.pin)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not user or not user.is_active or user.status != "Activo":
-        raise HTTPException(status_code=400, detail="Usuario no disponible para esta estación")
-
-    if not verify_password(payload.pin, station.pin_hash):
         crud.register_pos_station_login_failure(db, station)
-        raise HTTPException(status_code=401, detail="PIN inválido o expirado")
+        raise HTTPException(status_code=401, detail="PIN inválido o usuario inactivo")
 
     if payload.device_id:
         if station.bound_device_id and station.bound_device_id != payload.device_id:
@@ -168,6 +170,50 @@ def pos_login(
 
     user_read = schemas.PosUserRead.model_validate(user)
     return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
+
+
+@router.post(
+    "/pos-station-login",
+    response_model=schemas.AuthPosStationLoginResponse,
+)
+def pos_station_login(
+    payload: schemas.AuthPosStationLoginRequest,
+    db: Session = Depends(get_db),
+):
+    station = crud.get_pos_station_by_email(db, payload.station_email)
+    if not station or not station.is_active:
+        raise HTTPException(status_code=400, detail="Estación inválida o inactiva")
+
+    if not station.station_password_hash or not verify_password(
+        payload.station_password, station.station_password_hash
+    ):
+        crud.register_pos_station_login_failure(db, station)
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    if payload.device_id:
+        if station.bound_device_id and station.bound_device_id != payload.device_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Esta estación ya está vinculada a otro equipo. Solicita al administrador que la libere.",
+            )
+        if not station.bound_device_id:
+            station.bound_device_id = payload.device_id
+            station.bound_device_label = payload.device_label
+            station.bound_at = datetime.utcnow()
+            station.bound_by_user_id = None
+            station.bound_by_user_name = None
+        elif payload.device_label and not station.bound_device_label:
+            station.bound_device_label = payload.device_label
+
+    crud.register_pos_station_login_success(db, station)
+    db.commit()
+    db.refresh(station)
+
+    return schemas.AuthPosStationLoginResponse(
+        station_id=station.id,
+        station_label=station.label,
+        station_email=station.station_email or payload.station_email,
+    )
 
 
 @router.post("/forgot-password")

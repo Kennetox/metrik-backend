@@ -118,6 +118,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "INTEGER DEFAULT 0",
                 )
                 _ensure_column_postgres(connection, "pos_users", "phone", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "pin_hash", "TEXT")
                 _ensure_column_postgres(connection, "pos_users", "position", "TEXT")
                 _ensure_column_postgres(connection, "pos_users", "notes", "TEXT")
                 _ensure_column_postgres(connection, "pos_users", "avatar_url", "TEXT")
@@ -126,6 +127,33 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "pos_users", "bio", "TEXT")
                 _ensure_column_postgres(connection, "pos_users", "invited_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "pos_users", "accepted_at", "TIMESTAMP")
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "station_email",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "station_password_hash",
+                    "TEXT",
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE IF EXISTS pos_stations ALTER COLUMN pos_user_id DROP NOT NULL"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE IF EXISTS pos_stations ALTER COLUMN pin_hash DROP NOT NULL"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS pos_stations_station_email_idx ON pos_stations (station_email)"
+                    )
+                )
                 _ensure_column_postgres(
                     connection,
                     "pos_settings",
@@ -440,6 +468,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "TEXT",
                 )
                 _ensure_table_pos_stations(connection)
+                _relax_pos_station_schema_sqlite(connection)
                 _ensure_table_sale_changes(connection)
                 _ensure_column(connection, "sale_changes", "voided_at", "DATETIME")
                 _ensure_column(connection, "sale_changes", "voided_by_user_id", "INTEGER")
@@ -476,6 +505,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "TEXT",
                 )
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
+                _ensure_column(connection, "pos_users", "pin_hash", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
                 _ensure_column(connection, "pos_users", "notes", "TEXT")
                 _ensure_column(connection, "pos_users", "avatar_url", "TEXT")
@@ -1151,12 +1181,19 @@ def _ensure_table_pos_stations(connection) -> None:
                 CREATE TABLE pos_stations (
                     id TEXT PRIMARY KEY,
                     label TEXT NOT NULL,
-                    pos_user_id INTEGER NOT NULL,
-                    pin_hash TEXT NOT NULL,
+                    pos_user_id INTEGER,
+                    station_email TEXT,
+                    station_password_hash TEXT,
+                    pin_hash TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     failed_attempts INTEGER NOT NULL DEFAULT 0,
                     last_login_at DATETIME,
                     last_failed_at DATETIME,
+                    bound_device_id TEXT,
+                    bound_device_label TEXT,
+                    bound_at DATETIME,
+                    bound_by_user_id INTEGER,
+                    bound_by_user_name TEXT,
                     printer_mode TEXT,
                     printer_name TEXT,
                     printer_width TEXT,
@@ -1164,7 +1201,8 @@ def _ensure_table_pos_stations(connection) -> None:
                     printer_show_drawer_button BOOLEAN,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(pos_user_id) REFERENCES pos_users(id)
+                    FOREIGN KEY(pos_user_id) REFERENCES pos_users(id),
+                    FOREIGN KEY(bound_by_user_id) REFERENCES pos_users(id)
                 )
                 """
             )
@@ -1172,6 +1210,8 @@ def _ensure_table_pos_stations(connection) -> None:
     else:
         _ensure_column(connection, "pos_stations", "label", "TEXT")
         _ensure_column(connection, "pos_stations", "pos_user_id", "INTEGER")
+        _ensure_column(connection, "pos_stations", "station_email", "TEXT")
+        _ensure_column(connection, "pos_stations", "station_password_hash", "TEXT")
         _ensure_column(connection, "pos_stations", "pin_hash", "TEXT")
         _ensure_column(connection, "pos_stations", "is_active", "BOOLEAN NOT NULL DEFAULT 1")
         _ensure_column(connection, "pos_stations", "failed_attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -1189,6 +1229,94 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "printer_show_drawer_button", "BOOLEAN")
         _ensure_column(connection, "pos_stations", "created_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "updated_at", "DATETIME")
+
+
+def _relax_pos_station_schema_sqlite(connection) -> None:
+    if not _table_exists(connection, "pos_stations"):
+        return
+
+    info = list(connection.execute(text("PRAGMA table_info(pos_stations)")).mappings())
+    pos_user_info = next((row for row in info if row.get("name") == "pos_user_id"), None)
+    pin_info = next((row for row in info if row.get("name") == "pin_hash"), None)
+    email_exists = any(row.get("name") == "station_email" for row in info)
+    password_exists = any(row.get("name") == "station_password_hash" for row in info)
+    needs_relax = bool(pos_user_info and pos_user_info.get("notnull"))
+    needs_relax = needs_relax or bool(pin_info and pin_info.get("notnull"))
+    needs_relax = needs_relax or not email_exists or not password_exists
+    if not needs_relax:
+        return
+
+    existing_cols = [row.get("name") for row in info if row.get("name")]
+    desired_cols = [
+        "id",
+        "label",
+        "pos_user_id",
+        "station_email",
+        "station_password_hash",
+        "pin_hash",
+        "is_active",
+        "failed_attempts",
+        "last_login_at",
+        "last_failed_at",
+        "bound_device_id",
+        "bound_device_label",
+        "bound_at",
+        "bound_by_user_id",
+        "bound_by_user_name",
+        "printer_mode",
+        "printer_name",
+        "printer_width",
+        "printer_auto_open_drawer",
+        "printer_show_drawer_button",
+        "created_at",
+        "updated_at",
+    ]
+    copy_cols = [col for col in desired_cols if col in existing_cols]
+    column_list = ", ".join(copy_cols)
+
+    connection.execute(text("ALTER TABLE pos_stations RENAME TO pos_stations_old"))
+    connection.execute(
+        text(
+            """
+            CREATE TABLE pos_stations (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                pos_user_id INTEGER,
+                station_email TEXT,
+                station_password_hash TEXT,
+                pin_hash TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                last_login_at DATETIME,
+                last_failed_at DATETIME,
+                bound_device_id TEXT,
+                bound_device_label TEXT,
+                bound_at DATETIME,
+                bound_by_user_id INTEGER,
+                bound_by_user_name TEXT,
+                printer_mode TEXT,
+                printer_name TEXT,
+                printer_width TEXT,
+                printer_auto_open_drawer BOOLEAN,
+                printer_show_drawer_button BOOLEAN,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(pos_user_id) REFERENCES pos_users(id),
+                FOREIGN KEY(bound_by_user_id) REFERENCES pos_users(id)
+            )
+            """
+        )
+    )
+    if column_list:
+        connection.execute(
+            text(
+                f"""
+                INSERT INTO pos_stations ({column_list})
+                SELECT {column_list} FROM pos_stations_old
+                """
+            )
+        )
+    connection.execute(text("DROP TABLE pos_stations_old"))
 
 
 def _ensure_table_sale_changes(connection) -> None:

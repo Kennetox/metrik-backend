@@ -375,6 +375,7 @@ class PosUserBase(BaseModel):
 
 class PosUserCreate(PosUserBase):
     password: Optional[str] = None
+    pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
 
 
 class PosUserUpdate(BaseModel):
@@ -383,6 +384,7 @@ class PosUserUpdate(BaseModel):
     role: Optional[Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]] = None
     status: Optional[Literal["Activo", "Inactivo"]] = None
     password: Optional[str] = None
+    pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
     phone: Optional[str] = None
     position: Optional[str] = None
     notes: Optional[str] = None
@@ -443,8 +445,8 @@ class PosUserDocumentRead(BaseModel):
 
 class PosStationCreate(BaseModel):
     label: str
-    pos_user_email: EmailStr
-    pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
+    station_email: EmailStr
+    station_password: Annotated[str, Field(min_length=6)]
 
 
 class PosStationUpdate(BaseModel):
@@ -452,6 +454,8 @@ class PosStationUpdate(BaseModel):
     is_active: Optional[bool] = None
     reset_pin: bool = False
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
+    station_email: Optional[EmailStr] = None
+    station_password: Optional[Annotated[str, Field(min_length=6)]] = None
 
 
 class PosStationPrinterConfigBase(BaseModel):
@@ -474,7 +478,7 @@ class PosStationPrinterConfigRead(PosStationPrinterConfigBase):
 class PosStationRead(BaseModel):
     id: str
     label: str
-    pos_user_email: EmailStr
+    station_email: Optional[EmailStr] = None
     is_active: bool
     last_login_at: Optional[datetime] = None
     bound_device_id: Optional[str] = None
@@ -960,6 +964,19 @@ class AuthPosLoginRequest(BaseModel):
     pin: str
     device_id: Optional[str] = None
     device_label: Optional[str] = None
+
+
+class AuthPosStationLoginRequest(BaseModel):
+    station_email: EmailStr
+    station_password: str
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
+
+
+class AuthPosStationLoginResponse(BaseModel):
+    station_id: str
+    station_label: str
+    station_email: EmailStr
 
 
 class RolePermissionAction(BaseModel):

@@ -1557,6 +1557,23 @@ def get_pos_user_by_email(db: Session, email: str) -> Optional[models.PosUser]:
     )
 
 
+def get_pos_user_by_pin(
+    db: Session,
+    pin: str,
+    exclude_user_id: Optional[int] = None,
+) -> Optional[models.PosUser]:
+    users = db.query(models.PosUser).filter(models.PosUser.pin_hash.isnot(None)).all()
+    matches: list[models.PosUser] = []
+    for user in users:
+        if exclude_user_id and user.id == exclude_user_id:
+            continue
+        if user.pin_hash and verify_password(pin, user.pin_hash):
+            matches.append(user)
+            if len(matches) > 1:
+                raise ValueError("PIN duplicado entre usuarios")
+    return matches[0] if matches else None
+
+
 def _count_active_admins(db: Session) -> int:
     return (
         db.query(models.PosUser)
@@ -1572,6 +1589,11 @@ def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUs
         raise ValueError("Ya existe un usuario con ese email")
 
     raw_password = user_in.password or secrets.token_urlsafe(16)
+    pin_plain = user_in.pin_plain
+    if pin_plain:
+        existing_pin = get_pos_user_by_pin(db, pin_plain)
+        if existing_pin:
+            raise ValueError("Ya existe un usuario con ese PIN")
 
     user = models.PosUser(
         name=user_in.name,
@@ -1580,6 +1602,7 @@ def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUs
         status="Activo",
         is_active=True,
         password_hash=hash_password(raw_password),
+        pin_hash=hash_password(pin_plain) if pin_plain else None,
         phone=user_in.phone,
         position=user_in.position,
         notes=user_in.notes,
@@ -1617,6 +1640,15 @@ def update_pos_user(
     for field, value in data.items():
         if field == "password":
             user.password_hash = hash_password(value)
+            continue
+        if field == "pin_plain":
+            if value:
+                existing_pin = get_pos_user_by_pin(db, value, exclude_user_id=user.id)
+                if existing_pin:
+                    raise ValueError("Ya existe un usuario con ese PIN")
+                user.pin_hash = hash_password(value)
+            else:
+                user.pin_hash = None
             continue
         if field == "status":
             user.is_active = value == "Activo"
@@ -1765,26 +1797,37 @@ def get_pos_station(db: Session, station_id: str) -> Optional[models.PosStation]
     )
 
 
+def get_pos_station_by_email(
+    db: Session,
+    station_email: str,
+) -> Optional[models.PosStation]:
+    return (
+        db.query(models.PosStation)
+        .filter(func.lower(models.PosStation.station_email) == station_email.lower())
+        .first()
+    )
+
+
 def create_pos_station(
     db: Session,
     payload: schemas.PosStationCreate,
 ) -> tuple[models.PosStation, str]:
-    user = get_pos_user_by_email(db, payload.pos_user_email)
-    if not user:
-        raise ValueError("Usuario POS no encontrado")
+    existing = get_pos_station_by_email(db, payload.station_email)
+    if existing:
+        raise ValueError("Ya existe una estación con ese correo")
 
-    pin_plain = payload.pin_plain or _generate_station_pin()
     station = models.PosStation(
         id=str(uuid4()),
         label=payload.label,
-        pos_user_id=user.id,
-        pin_hash=hash_password(pin_plain),
+        station_email=payload.station_email,
+        station_password_hash=hash_password(payload.station_password),
+        pin_hash=None,
         is_active=True,
     )
     db.add(station)
     db.commit()
     db.refresh(station)
-    return station, pin_plain
+    return station, ""
 
 
 def update_pos_station(
@@ -1798,6 +1841,13 @@ def update_pos_station(
         station.label = data["label"]
     if "is_active" in data and data["is_active"] is not None:
         station.is_active = data["is_active"]
+    if "station_email" in data and data["station_email"]:
+        existing = get_pos_station_by_email(db, data["station_email"])
+        if existing and existing.id != station.id:
+            raise ValueError("Ya existe una estación con ese correo")
+        station.station_email = data["station_email"]
+    if "station_password" in data and data["station_password"]:
+        station.station_password_hash = hash_password(data["station_password"])
     if payload.pin_plain:
         pin_plain = payload.pin_plain
         station.pin_hash = hash_password(pin_plain)
