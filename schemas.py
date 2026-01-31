@@ -961,7 +961,9 @@ class AuthValidateResetTokenResponse(BaseModel):
 
 class AuthPosLoginRequest(BaseModel):
     station_id: str
-    pin: str
+    pin: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
     device_id: Optional[str] = None
     device_label: Optional[str] = None
 

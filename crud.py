@@ -25,21 +25,21 @@ def revoke_user_sessions(
     db: Session,
     user_id: int,
     reason: str = "replaced",
+    session_type: str | None = None,
 ) -> None:
     now = datetime.utcnow()
-    (
-        db.query(models.PosSession)
-        .filter(
-            models.PosSession.user_id == user_id,
-            models.PosSession.revoked_at.is_(None),
-        )
-        .update(
-            {
-                models.PosSession.revoked_at: now,
-                models.PosSession.revoked_reason: reason,
-            },
-            synchronize_session=False,
-        )
+    query = db.query(models.PosSession).filter(
+        models.PosSession.user_id == user_id,
+        models.PosSession.revoked_at.is_(None),
+    )
+    if session_type:
+        query = query.filter(models.PosSession.session_type == session_type)
+    query.update(
+        {
+            models.PosSession.revoked_at: now,
+            models.PosSession.revoked_reason: reason,
+        },
+        synchronize_session=False,
     )
     db.commit()
 
@@ -1898,11 +1898,6 @@ def register_pos_station_login_success(db: Session, station: models.PosStation):
 def register_pos_station_login_failure(db: Session, station: models.PosStation):
     station.failed_attempts = int(station.failed_attempts or 0) + 1
     station.last_failed_at = datetime.utcnow()
-    if station.failed_attempts >= 5:
-        station.is_active = False
-        _station_logger.warning(
-            "POS station %s desactivada por múltiples intentos fallidos", station.id
-        )
     db.commit()
 
 

@@ -43,7 +43,7 @@ def login(
             detail="Credenciales inválidas",
         )
 
-    crud.revoke_user_sessions(db, user.id, reason="replaced")
+    crud.revoke_user_sessions(db, user.id, reason="replaced", session_type="web")
     token = create_access_token(user.id, user.role, WEB_TOKEN_TTL_SECONDS)
     expires_at = datetime.utcnow() + timedelta(seconds=WEB_TOKEN_TTL_SECONDS)
     crud.create_pos_session(
@@ -123,18 +123,29 @@ def pos_login(
     payload: schemas.AuthPosLoginRequest,
     db: Session = Depends(get_db),
 ):
-    if not payload.pin:
-        raise HTTPException(status_code=400, detail="PIN requerido")
     station = crud.get_pos_station(db, payload.station_id)
     if not station or not station.is_active:
         raise HTTPException(status_code=400, detail="Estación inválida o inactiva")
-    try:
-        user = crud.get_pos_user_by_pin(db, payload.pin)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user = None
+    if payload.pin:
+        try:
+            user = crud.get_pos_user_by_pin(db, payload.pin)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif payload.email and payload.password:
+        user = crud.get_pos_user_by_email(db, payload.email)
+        if not user or not verify_password(payload.password, user.password_hash):
+            user = None
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes ingresar PIN o correo y contraseña.",
+        )
     if not user or not user.is_active or user.status != "Activo":
         crud.register_pos_station_login_failure(db, station)
-        raise HTTPException(status_code=401, detail="PIN inválido o usuario inactivo")
+        raise HTTPException(
+            status_code=401, detail="Credenciales inválidas o usuario inactivo"
+        )
 
     if payload.device_id:
         if station.bound_device_id and station.bound_device_id != payload.device_id:
@@ -152,7 +163,7 @@ def pos_login(
             station.bound_device_label = payload.device_label
 
     crud.register_pos_station_login_success(db, station)
-    crud.revoke_user_sessions(db, user.id, reason="replaced")
+    crud.revoke_user_sessions(db, user.id, reason="replaced", session_type="pos")
     token = create_access_token(user.id, user.role, POS_TOKEN_TTL_SECONDS)
     expires_at = datetime.utcnow() + timedelta(seconds=POS_TOKEN_TTL_SECONDS)
     crud.create_pos_session(
