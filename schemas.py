@@ -117,6 +117,14 @@ class ProductRead(ProductBase):
         from_attributes = True
 
 
+class CatalogVersion(BaseModel):
+    products_updated_at: Optional[datetime] = None
+    groups_updated_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    products_count: Optional[int] = None
+    groups_count: Optional[int] = None
+
+
 # ===================== INVENTORY =====================
 
 

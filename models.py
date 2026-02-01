@@ -48,6 +48,12 @@ class Product(Base):
     brand = Column(String, nullable=True)        # 'marca'
     supplier = Column(String, nullable=True)
     group_meta = None  # runtime attribute for schemas
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
 
 
 class ProductGroup(Base):

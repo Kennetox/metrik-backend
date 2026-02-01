@@ -105,6 +105,18 @@ def get_products(db: Session, skip: int = 0, limit: int = 100):
     return products
 
 
+def get_catalog_version(db: Session):
+    products_ts = db.query(func.max(models.Product.updated_at)).scalar()
+    groups_ts = db.query(func.max(models.ProductGroup.updated_at)).scalar()
+    products_count = db.query(func.count(models.Product.id)).scalar()
+    groups_count = db.query(func.count(models.ProductGroup.id)).scalar()
+    updated_at = max(
+        [ts for ts in [products_ts, groups_ts] if ts is not None],
+        default=None,
+    )
+    return products_ts, groups_ts, updated_at, products_count, groups_count
+
+
 def get_product_by_sku(db: Session, sku: str):
     return db.query(models.Product).filter(models.Product.sku == sku).first()
 

@@ -414,6 +414,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "tile_color",
                     "VARCHAR(7)",
                 )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "updated_at",
+                    "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                )
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
                 _ensure_table_user_documents(connection)

@@ -24,6 +24,21 @@ def list_products(skip: int = 0, limit: int = 10000, db: Session = Depends(get_d
     return products
 
 
+@router.get("/catalog-version", response_model=schemas.CatalogVersion)
+def get_catalog_version(
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("products.view")),
+):
+    products_ts, groups_ts, updated_at, products_count, groups_count = crud.get_catalog_version(db)
+    return {
+        "products_updated_at": products_ts,
+        "groups_updated_at": groups_ts,
+        "updated_at": updated_at,
+        "products_count": products_count,
+        "groups_count": groups_count,
+    }
+
+
 @router.post("/", response_model=schemas.ProductRead)
 def create_product(
     product_in: schemas.ProductCreate,
