@@ -305,6 +305,56 @@ def get_next_sale_number(
     return schemas.NextSaleNumberResponse(next_sale_number=next_number)
 
 
+@router.post(
+    "/sales/reserve-number",
+    response_model=schemas.SaleNumberReservationResponse,
+    status_code=201,
+)
+def reserve_sale_number(
+    payload: schemas.SaleNumberReservationRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    """Reserva un consecutivo para una venta nueva."""
+    try:
+        reservation = crud.reserve_sale_number(
+            db,
+            pos_name=payload.pos_name,
+            station_id=payload.station_id,
+            reserved_by_user_id=current_user.id,
+            min_sale_number=payload.min_sale_number,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.SaleNumberReservationResponse(
+        reservation_id=reservation.id,
+        sale_number=reservation.sale_number,
+        document_number=reservation.document_number,
+        status=reservation.status,
+    )
+
+
+@router.post(
+    "/sales/reservations/{reservation_id}/cancel",
+    response_model=schemas.SaleNumberReservationResponse,
+)
+def cancel_sale_reservation(
+    reservation_id: int,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    try:
+        reservation = crud.cancel_sale_reservation(db, reservation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.SaleNumberReservationResponse(
+        reservation_id=reservation.id,
+        sale_number=reservation.sale_number,
+        document_number=reservation.document_number,
+        status=reservation.status,
+    )
+
+
 @router.post("/sales", response_model=schemas.SaleRead, status_code=201)
 def create_sale(
     sale_in: schemas.SaleCreate,

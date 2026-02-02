@@ -69,6 +69,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
+                _ensure_table_sale_number_reservations_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -425,6 +426,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_user_documents(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
+                _ensure_table_sale_number_reservations(connection)
                 _ensure_column(
                     connection,
                     "sales",
@@ -1433,6 +1435,31 @@ def _ensure_table_sale_changes(connection) -> None:
         )
 
 
+def _ensure_table_sale_number_reservations(connection) -> None:
+    if _table_exists(connection, "sale_number_reservations"):
+        return
+    connection.execute(
+        text(
+            """
+            CREATE TABLE sale_number_reservations (
+                id INTEGER PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                sale_number INTEGER NOT NULL UNIQUE,
+                document_number TEXT NOT NULL UNIQUE,
+                pos_name TEXT,
+                station_id TEXT,
+                reserved_by_user_id INTEGER,
+                sale_id INTEGER,
+                FOREIGN KEY(reserved_by_user_id) REFERENCES pos_users(id),
+                FOREIGN KEY(sale_id) REFERENCES sales(id),
+                FOREIGN KEY(station_id) REFERENCES pos_stations(id)
+            )
+            """
+        )
+    )
+
+
 def _ensure_table_sale_changes_postgres(connection) -> None:
     connection.execute(
         text(
@@ -1505,6 +1532,26 @@ def _ensure_table_sale_changes_postgres(connection) -> None:
                 change_id INTEGER NOT NULL REFERENCES sale_changes(id),
                 method TEXT NOT NULL,
                 amount FLOAT NOT NULL DEFAULT 0
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_sale_number_reservations_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS sale_number_reservations (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'reserved',
+                sale_number INTEGER NOT NULL UNIQUE,
+                document_number TEXT NOT NULL UNIQUE,
+                pos_name TEXT,
+                station_id TEXT REFERENCES pos_stations(id),
+                reserved_by_user_id INTEGER REFERENCES pos_users(id),
+                sale_id INTEGER REFERENCES sales(id)
             )
             """
         )

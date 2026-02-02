@@ -223,6 +223,23 @@ class Sale(Base):
         return None
 
 
+class SaleNumberReservation(Base):
+    __tablename__ = "sale_number_reservations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status = Column(String, nullable=False, default="reserved")
+    sale_number = Column(Integer, unique=True, index=True, nullable=False)
+    document_number = Column(String, unique=True, index=True, nullable=False)
+    pos_name = Column(String, nullable=True)
+    station_id = Column(String, nullable=True)
+    reserved_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
+
+    reserved_by = relationship("PosUser")
+    sale = relationship("Sale")
+
+
 class SaleItem(Base):
     __tablename__ = "sale_items"
 

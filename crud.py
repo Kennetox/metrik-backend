@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import logging
 import re
@@ -9,12 +9,21 @@ from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
 
 import models, schemas
 from services import permissions
 from security import hash_password, verify_password
+
+
+def _clean_field(value):
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+    return value
 
 
 def _session_token_hash(token: str) -> str:
@@ -491,13 +500,6 @@ def create_sale(
             }
         )
 
-    def _clean_field(value):
-        if isinstance(value, str):
-            value = value.strip()
-            if value == "":
-                return None
-        return value
-
     customer_payload = {
         "customer_id": getattr(sale_in, "customer_id", None),
         "customer_name": getattr(sale_in, "customer_name", None),
@@ -546,7 +548,24 @@ def create_sale(
     else:
         main_method = "mixed"
 
-    sale_number_preassigned = getattr(sale_in, "sale_number_preassigned", None)
+    reservation_id = getattr(sale_in, "reservation_id", None)
+    reservation: Optional[models.SaleNumberReservation] = None
+    reserved_document_number: Optional[str] = None
+    if reservation_id is not None:
+        reservation = (
+            db.query(models.SaleNumberReservation)
+            .filter(
+                models.SaleNumberReservation.id == reservation_id,
+                models.SaleNumberReservation.status == "reserved",
+            )
+            .first()
+        )
+        if not reservation:
+            raise ValueError("La reserva de número de venta no es válida")
+        sale_number_preassigned = reservation.sale_number
+        reserved_document_number = reservation.document_number
+    else:
+        sale_number_preassigned = getattr(sale_in, "sale_number_preassigned", None)
     if sale_number_preassigned is not None:
         existing_sale_number = (
             db.query(models.Sale)
@@ -557,9 +576,21 @@ def create_sale(
             raise ValueError(
                 f"El número de ticket {sale_number_preassigned} ya existe en otra venta"
             )
+        if reservation is None:
+            existing_reservation = (
+                db.query(models.SaleNumberReservation)
+                .filter(
+                    models.SaleNumberReservation.sale_number == sale_number_preassigned,
+                    models.SaleNumberReservation.status == "reserved",
+                )
+                .first()
+            )
+            if existing_reservation:
+                raise ValueError(
+                    f"El número de ticket {sale_number_preassigned} está reservado"
+                )
 
     # 3) Crear la venta (aún sin sale_number / document_number)
-
     pos_name = _clean_field(getattr(sale_in, "pos_name", None))
     station_id = _resolve_station_id(db, getattr(sale_in, "station_id", None))
     is_pos_web = _is_pos_web_name(pos_name)
@@ -570,6 +601,13 @@ def create_sale(
         station_id = _resolve_station_id_from_pos_name(db, pos_name)
     if not station_id and not is_pos_web:
         raise ValueError("Debe seleccionar una estación para registrar la venta")
+    if reservation is None:
+        raise ValueError("Debe reservar el número de venta antes de registrar.")
+    if reservation:
+        if reservation.station_id != station_id:
+            raise ValueError("La reserva no corresponde a esta estación")
+        if reservation.pos_name and pos_name and reservation.pos_name != pos_name:
+            raise ValueError("La reserva no corresponde a este POS")
 
     sale = models.Sale(
         total=sale_total,
@@ -591,6 +629,7 @@ def create_sale(
         station_id=station_id,
         vendor_name=sale_in.vendor_name,
         sale_number=sale_number_preassigned,
+        document_number=reserved_document_number,
         surcharge_amount=surcharge_amount,
         surcharge_label=surcharge_label,
     )
@@ -603,7 +642,8 @@ def create_sale(
         sale.sale_number = sale.id
 
     if not sale.document_number:
-        sale.document_number = f"V-{sale.id:06d}"
+        doc_number_source = sale.sale_number or sale.id
+        sale.document_number = f"V-{doc_number_source:06d}"
 
     # 4) Crear ítems (ya conocemos sale.id)
     product_ids = [item_data["product_id"] for item_data in items_calc]
@@ -653,6 +693,11 @@ def create_sale(
             is_primary=(idx == 0),
         )
         db.add(db_payment)
+
+    if reservation:
+        reservation.status = "used"
+        reservation.sale_id = sale.id
+        db.add(reservation)
 
     db.commit()
     db.refresh(sale)
@@ -853,11 +898,165 @@ def get_next_sale_number(db: Session, pos_id: Optional[str] = None) -> int:
 
     max_sale_number = db.query(func.max(models.Sale.sale_number)).scalar()
     max_sale_id = db.query(func.max(models.Sale.id)).scalar()
+    max_reserved_number = (
+        db.query(func.max(models.SaleNumberReservation.sale_number))
+        .filter(models.SaleNumberReservation.status == "reserved")
+        .scalar()
+    )
 
-    candidates = [value for value in [max_sale_number, max_sale_id] if value is not None]
+    candidates = [
+        value
+        for value in [max_sale_number, max_sale_id, max_reserved_number]
+        if value is not None
+    ]
     current = int(max(candidates)) if candidates else 0
     return current + 1
 
+
+def reserve_sale_number(
+    db: Session,
+    pos_name: Optional[str] = None,
+    station_id: Optional[str] = None,
+    reserved_by_user_id: Optional[int] = None,
+    min_sale_number: Optional[int] = None,
+) -> models.SaleNumberReservation:
+    pos_name_clean = _clean_field(pos_name)
+    station_id = _resolve_station_id(db, station_id)
+    is_pos_web = _is_pos_web_name(pos_name_clean)
+
+    if station_id and is_pos_web:
+        raise ValueError("POS Web no puede registrar estación")
+    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name_clean)
+    if not station_id and not is_pos_web:
+        raise ValueError("Debe seleccionar una estación para registrar la venta")
+
+    # Cancelar reservas antiguas para evitar saltos por reservas fantasma.
+    cutoff = datetime.utcnow() - timedelta(minutes=30)
+    cleanup_query = db.query(models.SaleNumberReservation).filter(
+        models.SaleNumberReservation.status == "reserved",
+        models.SaleNumberReservation.created_at < cutoff,
+    )
+    if station_id:
+        cleanup_query = cleanup_query.filter(
+            models.SaleNumberReservation.station_id == station_id
+        )
+    elif pos_name_clean:
+        cleanup_query = cleanup_query.filter(
+            models.SaleNumberReservation.pos_name == pos_name_clean
+        )
+    if cleanup_query.count() > 0:
+        cleanup_query.update(
+            {models.SaleNumberReservation.status: "cancelled"},
+            synchronize_session=False,
+        )
+        db.commit()
+
+    min_value = min_sale_number or 0
+    base_next = get_next_sale_number(db, pos_id=station_id)
+    candidate = min_value if min_value > 0 else base_next
+
+    for _ in range(50):
+        next_number = candidate
+        existing_sale = (
+            db.query(models.Sale)
+            .filter(models.Sale.sale_number == next_number)
+            .first()
+        )
+        if existing_sale:
+            candidate += 1
+            continue
+        existing_reserved = (
+            db.query(models.SaleNumberReservation)
+            .filter(
+                models.SaleNumberReservation.sale_number == next_number,
+                models.SaleNumberReservation.status == "reserved",
+            )
+            .first()
+        )
+        if existing_reserved:
+            same_station = (
+                station_id and existing_reserved.station_id == station_id
+            )
+            same_pos = (
+                not station_id
+                and pos_name_clean
+                and existing_reserved.pos_name == pos_name_clean
+            )
+            if same_station or same_pos:
+                existing_reserved.created_at = datetime.utcnow()
+                existing_reserved.pos_name = pos_name_clean
+                existing_reserved.station_id = station_id
+                existing_reserved.reserved_by_user_id = reserved_by_user_id
+                try:
+                    db.commit()
+                    db.refresh(existing_reserved)
+                    return existing_reserved
+                except IntegrityError:
+                    db.rollback()
+            candidate += 1
+            continue
+
+        existing_cancelled = (
+            db.query(models.SaleNumberReservation)
+            .filter(models.SaleNumberReservation.sale_number == next_number)
+            .first()
+        )
+        if existing_cancelled and existing_cancelled.status == "cancelled":
+            existing_cancelled.status = "reserved"
+            existing_cancelled.created_at = datetime.utcnow()
+            existing_cancelled.pos_name = pos_name_clean
+            existing_cancelled.station_id = station_id
+            existing_cancelled.reserved_by_user_id = reserved_by_user_id
+            existing_cancelled.sale_id = None
+            try:
+                db.commit()
+                db.refresh(existing_cancelled)
+                return existing_cancelled
+            except IntegrityError:
+                db.rollback()
+                candidate += 1
+                continue
+
+        document_number = f"V-{next_number:06d}"
+        reservation = models.SaleNumberReservation(
+            sale_number=next_number,
+            document_number=document_number,
+            pos_name=pos_name_clean,
+            station_id=station_id,
+            reserved_by_user_id=reserved_by_user_id,
+            status="reserved",
+        )
+        db.add(reservation)
+        try:
+            db.commit()
+            db.refresh(reservation)
+            return reservation
+        except IntegrityError:
+            db.rollback()
+            candidate += 1
+            continue
+
+    raise ValueError("No se pudo reservar el número de venta")
+
+
+def cancel_sale_reservation(
+    db: Session,
+    reservation_id: int,
+) -> models.SaleNumberReservation:
+    reservation = (
+        db.query(models.SaleNumberReservation)
+        .filter(models.SaleNumberReservation.id == reservation_id)
+        .first()
+    )
+    if not reservation:
+        raise ValueError("Reserva no encontrada")
+    if reservation.status != "reserved":
+        raise ValueError("La reserva ya no está disponible")
+    reservation.status = "cancelled"
+    db.commit()
+    db.refresh(reservation)
+    return reservation
 
 def get_sale(db: Session, sale_id: int) -> Optional[models.Sale]:
     return db.query(models.Sale).filter(models.Sale.id == sale_id).first()

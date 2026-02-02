@@ -757,6 +757,7 @@ class SaleCreate(SaleBase):
     items: List[SaleItemCreate]
     payments: Optional[List[SalePaymentCreate]] = None
     sale_number_preassigned: Optional[int] = None
+    reservation_id: Optional[int] = None
 
 
 class PaymentMethodSummary(BaseModel):
@@ -936,6 +937,20 @@ class DocumentExportRequest(BaseModel):
 
 class NextSaleNumberResponse(BaseModel):
     next_sale_number: int
+
+
+class SaleNumberReservationRequest(BaseModel):
+    pos_name: Optional[str] = None
+    station_id: Optional[str] = None
+    vendor_name: Optional[str] = None
+    min_sale_number: Optional[int] = None
+
+
+class SaleNumberReservationResponse(BaseModel):
+    reservation_id: int
+    sale_number: int
+    document_number: str
+    status: str
 
 
 class AuthLoginRequest(BaseModel):
