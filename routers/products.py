@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
 import io
 import csv
 import pandas as pd
+from pydantic import BaseModel
 
 import schemas, crud, models
 from database import get_db
@@ -16,6 +17,112 @@ router = APIRouter(
     prefix="/products",
     tags=["products"]
 )
+
+
+class ExportProductsRequest(BaseModel):
+    scope: str = "all"
+    search: Optional[str] = None
+    show_only_active: bool = False
+    group: Optional[str] = None
+    brand: Optional[str] = None
+    supplier: Optional[str] = None
+    price_min: Optional[str] = None
+    price_max: Optional[str] = None
+    columns: List[str] = []
+    file_name: Optional[str] = None
+
+
+def _parse_price(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace(".", "").replace(",", ".")
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
+
+def _filter_products(products: List[models.Product], payload: ExportProductsRequest):
+    if payload.scope != "filtered":
+        return products
+    term = (payload.search or "").strip().lower()
+    min_price = _parse_price(payload.price_min)
+    max_price = _parse_price(payload.price_max)
+    group_filter = (payload.group or "").strip()
+    brand_filter = (payload.brand or "").strip()
+    supplier_filter = (payload.supplier or "").strip()
+
+    filtered: List[models.Product] = []
+    for p in products:
+        if term:
+            haystack = " ".join(
+                [
+                    p.name or "",
+                    p.sku or "",
+                    p.barcode or "",
+                    p.group_name or "",
+                    p.brand or "",
+                    p.supplier or "",
+                ]
+            ).lower()
+            if term not in haystack:
+                continue
+
+        if payload.show_only_active and not p.active:
+            continue
+        if group_filter and (p.group_name or "") != group_filter:
+            continue
+        if brand_filter and (p.brand or "") != brand_filter:
+            continue
+        if supplier_filter and (p.supplier or "") != supplier_filter:
+            continue
+        if min_price is not None and p.price < min_price:
+            continue
+        if max_price is not None and p.price > max_price:
+            continue
+
+        filtered.append(p)
+
+    return filtered
+
+
+def _build_export_rows(products: List[models.Product], columns: List[str]):
+    column_map = {
+        "id": ("ID", lambda p: p.id),
+        "sku": ("SKU", lambda p: p.sku or ""),
+        "name": ("Nombre", lambda p: p.name),
+        "group_name": ("Grupo", lambda p: p.group_name or ""),
+        "brand": ("Marca", lambda p: p.brand or ""),
+        "supplier": ("Proveedor", lambda p: p.supplier or ""),
+        "price": ("Precio", lambda p: p.price),
+        "cost": ("Costo", lambda p: p.cost),
+        "barcode": ("Código barras", lambda p: p.barcode or ""),
+        "unit": ("Unidad", lambda p: p.unit or ""),
+        "preferred_qty": ("Cant. preferida", lambda p: p.preferred_qty),
+        "reorder_point": ("Punto pedido", lambda p: p.reorder_point),
+        "stock_min": ("Stock mínimo", lambda p: p.stock_min),
+        "low_stock_alert": ("Alerta stock", lambda p: 1 if p.low_stock_alert else 0),
+        "allow_price_change": ("Cambio $ permitido", lambda p: 1 if p.allow_price_change else 0),
+        "active": ("Activo", lambda p: 1 if p.active else 0),
+        "service": ("Servicio", lambda p: 1 if p.service else 0),
+        "includes_tax": ("IVA incl.", lambda p: 1 if p.includes_tax else 0),
+    }
+
+    final_columns = list(columns) if columns else []
+    if "sku" not in final_columns:
+        final_columns.insert(0, "sku")
+    if "name" not in final_columns:
+        final_columns.insert(1, "name")
+
+    header = [column_map[key][0] for key in final_columns if key in column_map]
+    rows = [
+        [column_map[key][1](p) for key in final_columns if key in column_map]
+        for p in products
+    ]
+    return header, rows
 
 
 @router.get("/", response_model=List[schemas.ProductRead])
@@ -189,6 +296,58 @@ def export_products_xlsx(db: Session = Depends(get_db)):
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=products.xlsx"},
+    )
+
+
+@router.post("/export/xlsx")
+def export_products_xlsx_custom(
+    payload: ExportProductsRequest,
+    db: Session = Depends(get_db),
+):
+    products = crud.get_products(db, skip=0, limit=100000)
+    filtered = _filter_products(products, payload)
+    header, rows = _build_export_rows(filtered, payload.columns)
+
+    df = pd.DataFrame(rows, columns=header)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Productos")
+    output.seek(0)
+
+    file_name = payload.file_name or "productos"
+    safe_name = file_name.strip() or "productos"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename={safe_name}.xlsx"
+        },
+    )
+
+
+@router.post("/export/csv")
+def export_products_csv_custom(
+    payload: ExportProductsRequest,
+    db: Session = Depends(get_db),
+):
+    products = crud.get_products(db, skip=0, limit=100000)
+    filtered = _filter_products(products, payload)
+    header, rows = _build_export_rows(filtered, payload.columns)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow(row)
+    output.seek(0)
+
+    file_name = payload.file_name or "productos"
+    safe_name = file_name.strip() or "productos"
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={safe_name}.csv"},
     )
 
 @router.post("/import/xlsx")
