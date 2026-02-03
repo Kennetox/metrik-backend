@@ -39,6 +39,18 @@ def _sale_cash_total(sale: models.Sale) -> float:
     return float(sale.total or 0.0)
 
 
+def _is_cash_method(method: str | None) -> bool:
+    if not method:
+        return False
+    normalized = method.lower()
+    return (
+        normalized == "cash"
+        or normalized == "efectivo"
+        or "cash" in normalized
+        or "efectivo" in normalized
+    )
+
+
 def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: datetime.date):
     total_net = totals_by_day.get(start_date, 0.0)
     tickets = tickets_by_day.get(start_date, 0)
@@ -168,13 +180,23 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         cash_total = _sale_cash_total(sale)
         if sale_total <= 0 or cash_total <= 0:
             continue
+        paid_amount = float(sale.paid_amount or 0.0)
+        change_amount = float(sale.change_amount or 0.0)
+        if change_amount <= 0 and paid_amount > 0:
+            change_amount = max(0.0, paid_amount - sale_total)
+        change_remaining = change_amount
         for payment in sale.payments:
             method = payment.method or "DESCONOCIDO"
             payment_amount = float(payment.amount or 0.0)
             if payment_amount <= 0:
                 continue
-            capped_amount = min(payment_amount, sale_total)
-            payment_totals[method] += capped_amount
+            if change_remaining > 0 and _is_cash_method(method):
+                applied = min(change_remaining, payment_amount)
+                payment_amount = max(0.0, payment_amount - applied)
+                change_remaining -= applied
+            if payment_amount <= 0:
+                continue
+            payment_totals[method] += payment_amount
             payment_ticket_sets[method].add(sale.id)
 
     for payment in separated_payments_month:
