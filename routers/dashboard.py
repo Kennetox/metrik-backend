@@ -225,10 +225,11 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             )
         )
 
-    # --- Últimos 7 días (incluye hoy) ---
+    # --- Últimos 14 días (incluye hoy) ---
     trend_map = {}
-    for offset in range(7):
-        day = (today_start_bogota.date() - timedelta(days=offset))
+    trend_days_count = 14
+    for offset in range(trend_days_count):
+        day = today_start_bogota.date() - timedelta(days=offset)
         trend_map[day] = {"total": 0.0, "tickets": tickets_by_day.get(day, 0)}
         trend_map[day]["total"] = (
             totals_by_day.get(day, 0.0)
@@ -237,17 +238,18 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             - change_refund_by_day.get(day, 0.0)
         )
 
-    last_7_days: List[schemas.SalesTrendPoint] = []
+    trend_days: List[schemas.SalesTrendPoint] = []
     for day in sorted(trend_map.keys()):
         stats = trend_map[day]
         day_dt = datetime(day.year, day.month, day.day, tzinfo=bogota_tz)
-        last_7_days.append(
+        trend_days.append(
             schemas.SalesTrendPoint(
                 date=day_dt,
                 total=float(stats["total"]),
                 tickets=int(stats["tickets"]),
             )
         )
+    last_7_days = trend_days[-7:]
 
 
 
@@ -260,6 +262,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         month_avg_ticket=month_avg_ticket,
         payment_methods=payment_methods,
         last_7_days=last_7_days,
+        trend_days=trend_days,
     )
 
 

@@ -876,6 +876,7 @@ class DashboardSummary(BaseModel):
 
     payment_methods: List[PaymentMethodSummary]
     last_7_days: List[SalesTrendPoint]
+    trend_days: List[SalesTrendPoint] = []
 
 
 class SaleRead(SaleBase):
