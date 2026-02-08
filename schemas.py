@@ -879,6 +879,10 @@ class DashboardSummary(BaseModel):
     trend_days: List[SalesTrendPoint] = []
 
 
+class PaymentMethodsSummary(BaseModel):
+    methods: List[PaymentMethodSummary]
+
+
 class SaleRead(SaleBase):
     id: int
     # número de ticket POS

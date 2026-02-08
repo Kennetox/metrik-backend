@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
@@ -49,6 +49,151 @@ def _is_cash_method(method: str | None) -> bool:
         or "cash" in normalized
         or "efectivo" in normalized
     )
+
+
+def _resolve_range_bounds(
+    range_key: str,
+    bogota_tz: ZoneInfo,
+    start_date: date | None = None,
+) -> tuple[datetime, datetime]:
+    now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now_bogota = now_utc.astimezone(bogota_tz)
+    if start_date is None:
+        start_date = now_bogota.date()
+        if range_key == "week":
+            diff_to_monday = (start_date.weekday()) % 7
+            start_date = start_date - timedelta(days=diff_to_monday)
+        elif range_key == "month":
+            start_date = start_date.replace(day=1)
+
+    start_dt = datetime(
+        start_date.year, start_date.month, start_date.day, tzinfo=bogota_tz
+    )
+    if range_key == "day":
+        end_dt = start_dt + timedelta(days=1) - timedelta(milliseconds=1)
+    elif range_key == "week":
+        end_dt = start_dt + timedelta(days=7) - timedelta(milliseconds=1)
+    elif range_key == "month":
+        year = start_date.year + (1 if start_date.month == 12 else 0)
+        month = 1 if start_date.month == 12 else start_date.month + 1
+        end_dt = datetime(year, month, 1, tzinfo=bogota_tz) - timedelta(
+            milliseconds=1
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Rango inválido")
+    return start_dt, end_dt
+
+
+@router.get("/payment-methods", response_model=schemas.PaymentMethodsSummary)
+def get_payment_methods_summary(
+    range: str = "day",
+    start_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    bogota_tz = ZoneInfo("America/Bogota")
+    parsed_start: date | None = None
+    if start_date:
+        try:
+            parsed_start = date.fromisoformat(start_date)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="start_date debe ser YYYY-MM-DD"
+            ) from exc
+    range_key = range.lower().strip()
+    start_dt, end_dt = _resolve_range_bounds(range_key, bogota_tz, parsed_start)
+    start_utc = start_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    sales = (
+        db.query(models.Sale)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.created_at >= start_utc)
+        .filter(models.Sale.created_at <= end_utc)
+        .all()
+    )
+    returns = (
+        db.query(models.SaleReturn)
+        .filter(models.SaleReturn.created_at >= start_utc)
+        .filter(models.SaleReturn.created_at <= end_utc)
+        .filter(models.SaleReturn.status == "confirmed")
+        .filter(models.SaleReturn.adjustment_reference.is_(None))
+        .all()
+    )
+    changes = (
+        db.query(models.SaleChange)
+        .filter(models.SaleChange.created_at >= start_utc)
+        .filter(models.SaleChange.created_at <= end_utc)
+        .filter(models.SaleChange.status == "confirmed")
+        .all()
+    )
+    separated_payments = (
+        db.query(models.SeparatedOrderPayment)
+        .filter(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
+        .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
+        .filter(models.SeparatedOrderPayment.paid_at <= end_utc)
+        .all()
+    )
+
+    payment_totals = defaultdict(float)
+    payment_ticket_sets = defaultdict(set)
+
+    for sale in sales:
+        sale_total = float(sale.total or 0.0)
+        cash_total = _sale_cash_total(sale)
+        if sale_total <= 0 or cash_total <= 0:
+            continue
+        paid_amount = float(sale.paid_amount or 0.0)
+        change_amount = float(sale.change_amount or 0.0)
+        if change_amount <= 0 and paid_amount > 0:
+            change_amount = max(0.0, paid_amount - sale_total)
+        change_remaining = change_amount
+        for payment in sale.payments:
+            method = payment.method or "DESCONOCIDO"
+            payment_amount = float(payment.amount or 0.0)
+            if payment_amount <= 0:
+                continue
+            if change_remaining > 0 and _is_cash_method(method):
+                applied = min(change_remaining, payment_amount)
+                payment_amount = max(0.0, payment_amount - applied)
+                change_remaining -= applied
+            if payment_amount <= 0:
+                continue
+            payment_totals[method] += payment_amount
+            payment_ticket_sets[method].add(sale.id)
+
+    for payment in separated_payments:
+        method = payment.method or "DESCONOCIDO"
+        payment_totals[method] += float(payment.amount or 0.0)
+
+    for ret in returns:
+        for payment in ret.payments:
+            method = payment.method or "DESCONOCIDO"
+            payment_totals[method] -= float(payment.amount or 0.0)
+
+    for change in changes:
+        for payment in change.payments:
+            method = payment.method or "DESCONOCIDO"
+            payment_totals[method] += float(payment.amount or 0.0)
+        if float(change.refund_due or 0.0) > 0:
+            payment_totals["cash"] -= float(change.refund_due or 0.0)
+
+    payment_methods: List[schemas.PaymentMethodSummary] = []
+    for method, total in payment_totals.items():
+        payment_methods.append(
+            schemas.PaymentMethodSummary(
+                method=method,
+                total=float(total),
+                tickets=len(payment_ticket_sets.get(method, set())),
+            )
+        )
+
+    payment_methods.sort(key=lambda entry: entry.total, reverse=True)
+    return schemas.PaymentMethodsSummary(methods=payment_methods)
 
 
 def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: datetime.date):
