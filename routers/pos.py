@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 from typing import List, Optional
 import base64
 import os
+from zoneinfo import ZoneInfo
 
 from fastapi import (
     APIRouter,
@@ -91,6 +92,13 @@ def _sign_qz_payload(payload: str) -> str:
             detail=f"No se pudo firmar el reto de QZ: {exc}",
         ) from exc
     return base64.b64encode(signature).decode("utf-8")
+
+
+def _to_bogota_date(dt: datetime) -> datetime.date:
+    bogota_tz = ZoneInfo("America/Bogota")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(bogota_tz).date()
 
 
 def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
@@ -440,6 +448,87 @@ def void_sale(
         sale=_serialize_sale_response(sale),
         return_document=None,
     )
+
+
+@router.post(
+    "/documents/{doc_type}/{doc_id}/adjust",
+    response_model=schemas.DocumentAdjustmentRead,
+    status_code=201,
+)
+def create_document_adjustment(
+    doc_type: str,
+    doc_id: int,
+    payload: schemas.DocumentAdjustmentCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+):
+    if doc_type != "sale":
+        raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
+
+    sale = crud.get_sale(db, doc_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+    if sale.status == "voided":
+        raise HTTPException(status_code=400, detail="La venta está anulada")
+
+    if _to_bogota_date(sale.created_at) != _to_bogota_date(
+        datetime.utcnow().replace(tzinfo=timezone.utc)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Los ajustes solo se permiten el mismo día de la venta",
+        )
+
+    total_delta = float(payload.total_delta or 0.0)
+    payment_delta = float(payload.payment_delta or 0.0)
+    adjustment_type = payload.adjustment_type
+
+    if adjustment_type == "note":
+        if abs(total_delta) > 0.01 or abs(payment_delta) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail="Las notas no pueden modificar valores de pago o total",
+            )
+    elif adjustment_type == "discount":
+        if abs(total_delta - payment_delta) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail="El descuento debe cuadrar con el ajuste de pagos",
+            )
+
+    is_post_closure = sale.closure_id is not None
+    adjustment = crud.create_document_adjustment(
+        db,
+        doc_type=doc_type,
+        doc_id=doc_id,
+        adjustment_type=adjustment_type,
+        reason=payload.reason,
+        payload=payload.payload or {},
+        total_delta=total_delta,
+        payment_delta=payment_delta,
+        is_post_closure=is_post_closure,
+        original_closure_id=sale.closure_id,
+        user=current_user,
+    )
+    return adjustment
+
+
+@router.get(
+    "/documents/{doc_type}/{doc_id}/adjustments",
+    response_model=List[schemas.DocumentAdjustmentRead],
+)
+def list_document_adjustments(
+    doc_type: str,
+    doc_id: int,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    if doc_type != "sale":
+        raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
+    sale = crud.get_sale(db, doc_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+    return crud.list_document_adjustments(db, doc_type=doc_type, doc_id=doc_id)
 
 
 @router.post("/returns", response_model=schemas.SaleReturnRead, status_code=201)

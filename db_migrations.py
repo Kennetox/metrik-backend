@@ -66,6 +66,7 @@ def run_schema_upgrades(engine: Engine) -> None:
     with engine.connect() as connection:
         with connection.begin():
             if backend == "postgresql":
+                _ensure_table_document_adjustments_postgres(connection)
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
@@ -426,6 +427,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_user_documents(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
+                _ensure_table_document_adjustments(connection)
                 _ensure_table_sale_number_reservations(connection)
                 _ensure_column(
                     connection,
@@ -1181,6 +1183,87 @@ def _ensure_table_payment_methods(connection) -> None:
         _ensure_column(connection, "payment_methods", "deleted_at", "DATETIME")
 
 
+def _ensure_table_document_adjustments(connection) -> None:
+    if not _table_exists(connection, "document_adjustments"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE document_adjustments (
+                    id INTEGER PRIMARY KEY,
+                    doc_type TEXT NOT NULL,
+                    doc_id INTEGER NOT NULL,
+                    adjustment_type TEXT NOT NULL,
+                    reason TEXT,
+                    payload JSON,
+                    total_delta FLOAT NOT NULL DEFAULT 0,
+                    payment_delta FLOAT NOT NULL DEFAULT 0,
+                    is_post_closure BOOLEAN NOT NULL DEFAULT 0,
+                    original_closure_id INTEGER,
+                    created_by_user_id INTEGER,
+                    created_by_user_name TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(original_closure_id) REFERENCES pos_closures(id),
+                    FOREIGN KEY(created_by_user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX document_adjustments_doc_idx "
+                "ON document_adjustments (doc_type, doc_id)"
+            )
+        )
+    else:
+        _ensure_column(connection, "document_adjustments", "doc_type", "TEXT")
+        _ensure_column(connection, "document_adjustments", "doc_id", "INTEGER")
+        _ensure_column(connection, "document_adjustments", "adjustment_type", "TEXT")
+        _ensure_column(connection, "document_adjustments", "reason", "TEXT")
+        _ensure_column(connection, "document_adjustments", "payload", "JSON")
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "total_delta",
+            "FLOAT DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "payment_delta",
+            "FLOAT DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "is_post_closure",
+            "BOOLEAN DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "original_closure_id",
+            "INTEGER",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "created_by_user_id",
+            "INTEGER",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "created_by_user_name",
+            "TEXT",
+        )
+        _ensure_column(
+            connection,
+            "document_adjustments",
+            "created_at",
+            "DATETIME",
+        )
+
+
 def _ensure_table_pos_stations(connection) -> None:
     if not _table_exists(connection, "pos_stations"):
         connection.execute(
@@ -1533,6 +1616,38 @@ def _ensure_table_sale_changes_postgres(connection) -> None:
                 method TEXT NOT NULL,
                 amount FLOAT NOT NULL DEFAULT 0
             )
+            """
+        )
+    )
+
+
+def _ensure_table_document_adjustments_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS document_adjustments (
+                id SERIAL PRIMARY KEY,
+                doc_type TEXT NOT NULL,
+                doc_id INTEGER NOT NULL,
+                adjustment_type TEXT NOT NULL,
+                reason TEXT,
+                payload JSONB,
+                total_delta FLOAT NOT NULL DEFAULT 0,
+                payment_delta FLOAT NOT NULL DEFAULT 0,
+                is_post_closure BOOLEAN NOT NULL DEFAULT FALSE,
+                original_closure_id INTEGER REFERENCES pos_closures(id),
+                created_by_user_id INTEGER REFERENCES pos_users(id),
+                created_by_user_name TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS document_adjustments_doc_idx
+            ON document_adjustments (doc_type, doc_id)
             """
         )
     )

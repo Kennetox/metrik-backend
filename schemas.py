@@ -732,6 +732,36 @@ class SeparatedOrderPaymentVoidRequest(BaseModel):
     note: Optional[str] = None
 
 
+DocumentAdjustmentType = Literal["payment", "discount", "note"]
+
+
+class DocumentAdjustmentCreate(BaseModel):
+    adjustment_type: DocumentAdjustmentType
+    reason: NonEmptyStr
+    total_delta: float = 0.0
+    payment_delta: float = 0.0
+    payload: Dict[str, object] = Field(default_factory=dict)
+
+
+class DocumentAdjustmentRead(BaseModel):
+    id: int
+    doc_type: str
+    doc_id: int
+    adjustment_type: DocumentAdjustmentType
+    reason: Optional[str] = None
+    payload: Dict[str, object] = Field(default_factory=dict)
+    total_delta: float
+    payment_delta: float
+    is_post_closure: bool = False
+    original_closure_id: Optional[int] = None
+    created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class SaleBase(BaseModel):
     payment_method: str = "cash"
     total: float

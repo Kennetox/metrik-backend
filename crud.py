@@ -1625,6 +1625,52 @@ def void_change(
     return sale_change
 
 
+def create_document_adjustment(
+    db: Session,
+    doc_type: str,
+    doc_id: int,
+    adjustment_type: str,
+    reason: Optional[str],
+    payload: dict,
+    total_delta: float,
+    payment_delta: float,
+    is_post_closure: bool,
+    original_closure_id: Optional[int],
+    user: models.PosUser,
+) -> models.DocumentAdjustment:
+    adjustment = models.DocumentAdjustment(
+        doc_type=doc_type,
+        doc_id=doc_id,
+        adjustment_type=adjustment_type,
+        reason=reason,
+        payload=payload,
+        total_delta=total_delta,
+        payment_delta=payment_delta,
+        is_post_closure=is_post_closure,
+        original_closure_id=original_closure_id,
+        created_by_user_id=user.id,
+        created_by_user_name=user.name,
+    )
+    db.add(adjustment)
+    db.commit()
+    db.refresh(adjustment)
+    return adjustment
+
+
+def list_document_adjustments(
+    db: Session,
+    doc_type: str,
+    doc_id: int,
+) -> List[models.DocumentAdjustment]:
+    return (
+        db.query(models.DocumentAdjustment)
+        .filter(models.DocumentAdjustment.doc_type == doc_type)
+        .filter(models.DocumentAdjustment.doc_id == doc_id)
+        .order_by(models.DocumentAdjustment.created_at.desc())
+        .all()
+    )
+
+
 def get_separated_order_payment(
     db: Session,
     payment_id: int,

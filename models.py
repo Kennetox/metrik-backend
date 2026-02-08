@@ -223,6 +223,27 @@ class Sale(Base):
         return None
 
 
+class DocumentAdjustment(Base):
+    __tablename__ = "document_adjustments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    doc_type = Column(String, nullable=False, index=True)
+    doc_id = Column(Integer, nullable=False, index=True)
+    adjustment_type = Column(String, nullable=False)
+    reason = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    total_delta = Column(Float, nullable=False, default=0)
+    payment_delta = Column(Float, nullable=False, default=0)
+    is_post_closure = Column(Boolean, nullable=False, default=False)
+    original_closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_by_user_name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    created_by = relationship("PosUser")
+    original_closure = relationship("PosClosure")
+
+
 class SaleNumberReservation(Base):
     __tablename__ = "sale_number_reservations"
 
