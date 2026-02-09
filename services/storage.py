@@ -76,7 +76,8 @@ def _build_public_url(filename: str, tenant_id: Optional[int] = None) -> str:
 
 
 def _get_logo_dir() -> Path:
-    return Path(os.getenv("POS_LOGO_UPLOAD_DIR", "uploads/pos-logos"))
+    default_dir = get_uploads_root_dir() / "pos-logos"
+    return Path(os.getenv("POS_LOGO_UPLOAD_DIR", str(default_dir)))
 
 
 def _build_logo_url(filename: str) -> str:
@@ -88,7 +89,8 @@ def _build_logo_url(filename: str) -> str:
 
 
 def _get_avatar_dir() -> Path:
-    return Path(os.getenv("USER_AVATAR_UPLOAD_DIR", "uploads/user-avatars"))
+    default_dir = get_uploads_root_dir() / "user-avatars"
+    return Path(os.getenv("USER_AVATAR_UPLOAD_DIR", str(default_dir)))
 
 
 def _build_avatar_url(filename: str) -> str:
@@ -100,7 +102,8 @@ def _build_avatar_url(filename: str) -> str:
 
 
 def _get_user_documents_dir(user_id: int) -> Path:
-    base = Path(os.getenv("USER_DOC_UPLOAD_DIR", "uploads/user-documents"))
+    default_root = get_uploads_root_dir() / "user-documents"
+    base = Path(os.getenv("USER_DOC_UPLOAD_DIR", str(default_root)))
     return base / str(user_id)
 
 
