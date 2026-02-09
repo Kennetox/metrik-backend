@@ -1671,6 +1671,22 @@ def list_document_adjustments(
     )
 
 
+def list_document_adjustments_for_docs(
+    db: Session,
+    doc_type: str,
+    doc_ids: List[int],
+) -> List[models.DocumentAdjustment]:
+    if not doc_ids:
+        return []
+    return (
+        db.query(models.DocumentAdjustment)
+        .filter(models.DocumentAdjustment.doc_type == doc_type)
+        .filter(models.DocumentAdjustment.doc_id.in_(doc_ids))
+        .order_by(models.DocumentAdjustment.created_at.desc())
+        .all()
+    )
+
+
 def get_separated_order_payment(
     db: Session,
     payment_id: int,

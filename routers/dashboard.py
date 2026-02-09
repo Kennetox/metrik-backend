@@ -51,6 +51,49 @@ def _is_cash_method(method: str | None) -> bool:
     )
 
 
+def _parse_adjustment_payments(payload: object) -> list[tuple[str, float]]:
+    if not isinstance(payload, dict):
+        return []
+    payments = payload.get("payments")
+    if not isinstance(payments, list):
+        return []
+    results: list[tuple[str, float]] = []
+    for entry in payments:
+        if not isinstance(entry, dict):
+            continue
+        method = entry.get("method")
+        amount = entry.get("amount")
+        if not isinstance(method, str) or not method:
+            continue
+        try:
+            numeric = float(amount or 0.0)
+        except (TypeError, ValueError):
+            continue
+        results.append((method, numeric))
+    return results
+
+
+def _collect_sale_adjustments(db: Session, sale_ids: list[int]):
+    if not sale_ids:
+        return {}, {}
+    adjustments = (
+        db.query(models.DocumentAdjustment)
+        .filter(models.DocumentAdjustment.doc_type == "sale")
+        .filter(models.DocumentAdjustment.doc_id.in_(sale_ids))
+        .order_by(models.DocumentAdjustment.created_at.desc())
+        .all()
+    )
+    latest_payment_adjustment: dict[int, models.DocumentAdjustment] = {}
+    total_delta: dict[int, float] = defaultdict(float)
+    for adjustment in adjustments:
+        total_delta[adjustment.doc_id] += float(adjustment.total_delta or 0.0)
+        if adjustment.doc_id not in latest_payment_adjustment:
+            payload_payments = _parse_adjustment_payments(adjustment.payload)
+            if payload_payments:
+                latest_payment_adjustment[adjustment.doc_id] = adjustment
+    return latest_payment_adjustment, total_delta
+
+
 def _resolve_range_bounds(
     range_key: str,
     bogota_tz: ZoneInfo,
@@ -141,6 +184,9 @@ def get_payment_methods_summary(
 
     payment_totals = defaultdict(float)
     payment_ticket_sets = defaultdict(set)
+    payment_adjustments, _ = _collect_sale_adjustments(
+        db, [sale.id for sale in sales]
+    )
 
     for sale in sales:
         sale_total = float(sale.total or 0.0)
@@ -151,10 +197,20 @@ def get_payment_methods_summary(
         change_amount = float(sale.change_amount or 0.0)
         if change_amount <= 0 and paid_amount > 0:
             change_amount = max(0.0, paid_amount - sale_total)
-        change_remaining = change_amount
-        for payment in sale.payments:
-            method = payment.method or "DESCONOCIDO"
-            payment_amount = float(payment.amount or 0.0)
+        adjustment = payment_adjustments.get(sale.id)
+        adjusted_payments = (
+            _parse_adjustment_payments(adjustment.payload)
+            if adjustment
+            else []
+        )
+        change_remaining = 0.0 if adjusted_payments else change_amount
+        payment_iter = (
+            adjusted_payments
+            if adjusted_payments
+            else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
+        )
+        for method, payment_amount in payment_iter:
+            method = method or "DESCONOCIDO"
             if payment_amount <= 0:
                 continue
             if change_remaining > 0 and _is_cash_method(method):
@@ -267,6 +323,9 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     refunds_by_day = defaultdict(float)
     change_extra_by_day = defaultdict(float)
     change_refund_by_day = defaultdict(float)
+    payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
+        db, [sale.id for sale in sales_month]
+    )
 
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
@@ -274,6 +333,9 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         if cash_total > 0:
             totals_by_day[day] += cash_total
             tickets_by_day[day] += 1
+        delta = total_delta_by_sale.get(sale.id, 0.0)
+        if delta:
+            totals_by_day[day] += float(delta)
 
     for payment in separated_payments_month:
         day = _to_bogota_date(payment.paid_at, bogota_tz)
@@ -329,10 +391,20 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         change_amount = float(sale.change_amount or 0.0)
         if change_amount <= 0 and paid_amount > 0:
             change_amount = max(0.0, paid_amount - sale_total)
-        change_remaining = change_amount
-        for payment in sale.payments:
-            method = payment.method or "DESCONOCIDO"
-            payment_amount = float(payment.amount or 0.0)
+        adjustment = payment_adjustments.get(sale.id)
+        adjusted_payments = (
+            _parse_adjustment_payments(adjustment.payload)
+            if adjustment
+            else []
+        )
+        change_remaining = 0.0 if adjusted_payments else change_amount
+        payment_iter = (
+            adjusted_payments
+            if adjusted_payments
+            else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
+        )
+        for method, payment_amount in payment_iter:
+            method = method or "DESCONOCIDO"
             if payment_amount <= 0:
                 continue
             if change_remaining > 0 and _is_cash_method(method):
@@ -527,6 +599,9 @@ def get_monthly_sales(
     )
 
     monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
+    _, total_delta_by_sale = _collect_sale_adjustments(
+        db, [sale.id for sale in sales_year]
+    )
 
     for sale in sales_year:
         net_total = _sale_cash_total(sale)
@@ -535,6 +610,9 @@ def get_monthly_sales(
         month = _to_bogota_date(sale.created_at, bogota_tz).month
         monthly[month]["total"] += net_total
         monthly[month]["tickets"] += 1
+        delta = total_delta_by_sale.get(sale.id, 0.0)
+        if delta:
+            monthly[month]["total"] += float(delta)
 
     for payment in separated_payments_year:
         month = _to_bogota_date(payment.paid_at, bogota_tz).month

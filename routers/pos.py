@@ -101,6 +101,10 @@ def _to_bogota_date(dt: datetime) -> datetime.date:
     return dt.astimezone(bogota_tz).date()
 
 
+def _sum_payments(payments: list[tuple[str, float]]) -> float:
+    return sum(amount for _, amount in payments)
+
+
 def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
     email = station.station_email if station else None
     return schemas.PosStationRead(
@@ -482,6 +486,21 @@ def create_document_adjustment(
     total_delta = float(payload.total_delta or 0.0)
     payment_delta = float(payload.payment_delta or 0.0)
     adjustment_type = payload.adjustment_type
+    payload_payments = payload.payload.get("payments") if payload.payload else None
+    payments_list: list[tuple[str, float]] = []
+    if isinstance(payload_payments, list):
+        for entry in payload_payments:
+            if not isinstance(entry, dict):
+                continue
+            method = entry.get("method")
+            amount = entry.get("amount")
+            if not isinstance(method, str) or not method:
+                continue
+            try:
+                numeric = float(amount or 0.0)
+            except (TypeError, ValueError):
+                continue
+            payments_list.append((method, numeric))
 
     if adjustment_type == "note":
         if abs(total_delta) > 0.01 or abs(payment_delta) > 0.01:
@@ -489,11 +508,32 @@ def create_document_adjustment(
                 status_code=400,
                 detail="Las notas no pueden modificar valores de pago o total",
             )
+        if not payload.payload or not payload.payload.get("note"):
+            raise HTTPException(
+                status_code=400,
+                detail="La nota es obligatoria para este ajuste",
+            )
     elif adjustment_type == "discount":
         if abs(total_delta - payment_delta) > 0.01:
             raise HTTPException(
                 status_code=400,
                 detail="El descuento debe cuadrar con el ajuste de pagos",
+            )
+        if not payments_list:
+            raise HTTPException(
+                status_code=400,
+                detail="Debes ajustar los pagos junto con el descuento",
+            )
+    if payments_list:
+        original_total = sum(float(p.amount or 0.0) for p in sale.payments)
+        if original_total <= 0:
+            original_total = float(sale.paid_amount or sale.total or 0.0)
+        expected_total = original_total + payment_delta
+        adjusted_total = _sum_payments(payments_list)
+        if abs(adjusted_total - expected_total) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail="El total de pagos ajustados no cuadra con el ajuste",
             )
 
     is_post_closure = sale.closure_id is not None
@@ -529,6 +569,27 @@ def list_document_adjustments(
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
     return crud.list_document_adjustments(db, doc_type=doc_type, doc_id=doc_id)
+
+
+@router.get(
+    "/documents/adjustments",
+    response_model=List[schemas.DocumentAdjustmentRead],
+)
+def list_document_adjustments_bulk(
+    doc_type: str,
+    doc_ids: str,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    if doc_type != "sale":
+        raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
+    try:
+        ids = [int(item) for item in doc_ids.split(",") if item.strip()]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="doc_ids inválidos") from exc
+    if not ids:
+        return []
+    return crud.list_document_adjustments_for_docs(db, doc_type=doc_type, doc_ids=ids)
 
 
 @router.post("/returns", response_model=schemas.SaleReturnRead, status_code=201)
