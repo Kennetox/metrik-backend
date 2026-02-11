@@ -1136,6 +1136,20 @@ def update_pos_station(
     return _station_to_response(station, pin_plain)
 
 
+def _station_notice_to_read(
+    notice: models.PosStationNotice,
+) -> schemas.PosStationNoticeRead:
+    return schemas.PosStationNoticeRead(
+        id=notice.id,
+        station_id=notice.station_id,
+        message=notice.message,
+        created_at=notice.created_at,
+        created_by_user_name=(
+            notice.created_by_user.name if notice.created_by_user else None
+        ),
+    )
+
+
 @router.post(
     "/stations/{station_id}/notice",
     response_model=schemas.PosStationNoticeRead,
@@ -1155,7 +1169,7 @@ def create_pos_station_notice(
         message=payload.message,
         user=current_user,
     )
-    return notice
+    return _station_notice_to_read(notice)
 
 
 @router.get(
@@ -1170,7 +1184,10 @@ def get_pos_station_notice(
     station = crud.get_pos_station(db, station_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
-    return crud.get_active_pos_station_notice(db, station_id)
+    notice = crud.get_active_pos_station_notice(db, station_id)
+    if not notice:
+        return None
+    return _station_notice_to_read(notice)
 
 
 @router.delete("/stations/{station_id}/notice/{notice_id}", status_code=204)

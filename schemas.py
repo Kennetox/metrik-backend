@@ -519,6 +519,7 @@ class PosStationNoticeRead(BaseModel):
     station_id: str
     message: str
     created_at: datetime
+    created_by_user_name: Optional[str] = None
 
     class Config:
         from_attributes = True
