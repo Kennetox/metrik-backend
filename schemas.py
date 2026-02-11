@@ -510,6 +510,20 @@ class PosStationResponse(PosStationRead):
     pin_plain: Optional[str] = None
 
 
+class PosStationNoticeCreate(BaseModel):
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class PosStationNoticeRead(BaseModel):
+    id: int
+    station_id: str
+    message: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class PosCustomerBase(BaseModel):
     name: str
     phone: Optional[str] = None

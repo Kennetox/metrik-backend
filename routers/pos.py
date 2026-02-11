@@ -1136,6 +1136,60 @@ def update_pos_station(
     return _station_to_response(station, pin_plain)
 
 
+@router.post(
+    "/stations/{station_id}/notice",
+    response_model=schemas.PosStationNoticeRead,
+)
+def create_pos_station_notice(
+    station_id: str,
+    payload: schemas.PosStationNoticeCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    notice = crud.create_pos_station_notice(
+        db,
+        station=station,
+        message=payload.message,
+        user=current_user,
+    )
+    return notice
+
+
+@router.get(
+    "/stations/{station_id}/notice",
+    response_model=Optional[schemas.PosStationNoticeRead],
+)
+def get_pos_station_notice(
+    station_id: str,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    return crud.get_active_pos_station_notice(db, station_id)
+
+
+@router.delete("/stations/{station_id}/notice/{notice_id}", status_code=204)
+def dismiss_pos_station_notice(
+    station_id: str,
+    notice_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    station = crud.get_pos_station(db, station_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    notice = crud.get_pos_station_notice(db, station_id, notice_id)
+    if not notice:
+        raise HTTPException(status_code=404, detail="Aviso no encontrado")
+    crud.dismiss_pos_station_notice(db, notice, current_user)
+    return Response(status_code=204)
+
+
 @router.get(
     "/stations/{station_id}/printer-config",
     response_model=schemas.PosStationPrinterConfigRead,

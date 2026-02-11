@@ -71,6 +71,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
                 _ensure_table_sale_number_reservations_postgres(connection)
+                _ensure_table_pos_station_notices_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -478,6 +479,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "TEXT",
                 )
                 _ensure_table_pos_stations(connection)
+                _ensure_table_pos_station_notices(connection)
                 _relax_pos_station_schema_sqlite(connection)
                 _ensure_table_sale_changes(connection)
                 _ensure_column(connection, "sale_changes", "voided_at", "DATETIME")
@@ -1322,6 +1324,28 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "updated_at", "DATETIME")
 
 
+def _ensure_table_pos_station_notices(connection) -> None:
+    if not _table_exists(connection, "pos_station_notices"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE pos_station_notices (
+                    id INTEGER PRIMARY KEY,
+                    station_id TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_by_user_id INTEGER,
+                    dismissed_at DATETIME,
+                    dismissed_by_user_id INTEGER,
+                    FOREIGN KEY(station_id) REFERENCES pos_stations(id),
+                    FOREIGN KEY(created_by_user_id) REFERENCES pos_users(id),
+                    FOREIGN KEY(dismissed_by_user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+
+
 def _relax_pos_station_schema_sqlite(connection) -> None:
     if not _table_exists(connection, "pos_stations"):
         return
@@ -1690,6 +1714,32 @@ def _ensure_table_pos_sessions_postgres(connection) -> None:
                 revoked_at TIMESTAMP,
                 revoked_reason TEXT
             )
+            """
+        )
+    )
+
+
+def _ensure_table_pos_station_notices_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS pos_station_notices (
+                id SERIAL PRIMARY KEY,
+                station_id TEXT NOT NULL REFERENCES pos_stations(id),
+                message TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by_user_id INTEGER REFERENCES pos_users(id),
+                dismissed_at TIMESTAMP,
+                dismissed_by_user_id INTEGER REFERENCES pos_users(id)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS pos_station_notices_station_idx
+            ON pos_station_notices (station_id)
             """
         )
     )

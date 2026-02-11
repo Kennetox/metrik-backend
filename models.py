@@ -499,6 +499,22 @@ class PosStation(Base):
     )
 
 
+class PosStationNotice(Base):
+    __tablename__ = "pos_station_notices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=False, index=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    dismissed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+
+    station = relationship("PosStation")
+    created_by_user = relationship("PosUser", foreign_keys=[created_by_user_id])
+    dismissed_by_user = relationship("PosUser", foreign_keys=[dismissed_by_user_id])
+
+
 class PosClosure(Base):
     __tablename__ = "pos_closures"
 

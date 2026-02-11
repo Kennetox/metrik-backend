@@ -2174,6 +2174,78 @@ def register_pos_station_login_failure(db: Session, station: models.PosStation):
     db.commit()
 
 
+def get_active_pos_station_notice(
+    db: Session,
+    station_id: str,
+) -> Optional[models.PosStationNotice]:
+    return (
+        db.query(models.PosStationNotice)
+        .filter(
+            models.PosStationNotice.station_id == station_id,
+            models.PosStationNotice.dismissed_at.is_(None),
+        )
+        .order_by(models.PosStationNotice.created_at.desc())
+        .first()
+    )
+
+
+def get_pos_station_notice(
+    db: Session,
+    station_id: str,
+    notice_id: int,
+) -> Optional[models.PosStationNotice]:
+    return (
+        db.query(models.PosStationNotice)
+        .filter(
+            models.PosStationNotice.station_id == station_id,
+            models.PosStationNotice.id == notice_id,
+        )
+        .first()
+    )
+
+
+def create_pos_station_notice(
+    db: Session,
+    station: models.PosStation,
+    message: str,
+    user: models.PosUser,
+) -> models.PosStationNotice:
+    now = datetime.utcnow()
+    (
+        db.query(models.PosStationNotice)
+        .filter(
+            models.PosStationNotice.station_id == station.id,
+            models.PosStationNotice.dismissed_at.is_(None),
+        )
+        .update(
+            {
+                models.PosStationNotice.dismissed_at: now,
+                models.PosStationNotice.dismissed_by_user_id: user.id,
+            },
+            synchronize_session=False,
+        )
+    )
+    notice = models.PosStationNotice(
+        station_id=station.id,
+        message=message,
+        created_by_user_id=user.id,
+    )
+    db.add(notice)
+    db.commit()
+    db.refresh(notice)
+    return notice
+
+
+def dismiss_pos_station_notice(
+    db: Session,
+    notice: models.PosStationNotice,
+    user: models.PosUser,
+) -> None:
+    notice.dismissed_at = datetime.utcnow()
+    notice.dismissed_by_user_id = user.id
+    db.commit()
+
+
 # ===================== PASSWORD RESET TOKENS =====================
 
 
