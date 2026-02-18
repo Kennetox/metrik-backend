@@ -1,4 +1,6 @@
 from typing import List, Optional
+import unicodedata
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -13,6 +15,40 @@ router = APIRouter(
     tags=["separated-orders"],
 )
 
+FREE_SALE_NAME_FRAGMENT = "venta libre"
+FREE_SALE_REASON_LABEL = "motivo venta libre"
+FREE_SALE_REASON_REQUIRED = (
+    os.getenv("FREE_SALE_REASON_REQUIRED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+
+def _normalize_text(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFD", value)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
+
+
+def _sale_contains_free_sale(separated_in: schemas.SeparatedOrderCreate) -> bool:
+    for item in separated_in.items or []:
+        name = _normalize_text(getattr(item, "product_name", ""))
+        sku = _normalize_text(getattr(item, "product_sku", ""))
+        if FREE_SALE_NAME_FRAGMENT in name or "venta-libre" in sku or "venta libre" in sku:
+            return True
+    return False
+
+
+def _has_required_free_sale_reason(notes: Optional[str]) -> bool:
+    normalized_notes = _normalize_text(notes)
+    if not normalized_notes:
+        return False
+    label_index = normalized_notes.find(FREE_SALE_REASON_LABEL)
+    if label_index < 0:
+        return False
+    tail = normalized_notes[label_index + len(FREE_SALE_REASON_LABEL) :].strip(" :\n\t\r-")
+    return bool(tail)
+
 
 @router.post(
     "",
@@ -26,6 +62,17 @@ def create_separated_order(
         require_permission("documents.separated_orders")
     ),
 ):
+    if (
+        FREE_SALE_REASON_REQUIRED
+        and _sale_contains_free_sale(separated_in)
+        and not _has_required_free_sale_reason(separated_in.notes)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "La nota debe incluir el motivo de venta libre cuando se use este producto."
+            ),
+        )
     try:
         sale = crud.create_sale(db, separated_in, created_by_user_id=current_user.id)
     except ValueError as exc:

@@ -3,6 +3,7 @@ from html import escape
 from typing import List, Optional
 import base64
 import os
+import unicodedata
 from zoneinfo import ZoneInfo
 
 from fastapi import (
@@ -22,6 +23,7 @@ import schemas, crud, models
 from database import get_db
 from dependencies import get_current_active_user, require_permission, require_role
 from services import email as email_service
+from services import pdf_utils
 from services import ticket_renderer
 from services import storage
 from services.password_reset import (
@@ -35,6 +37,40 @@ router = APIRouter(
     prefix="/pos",
     tags=["pos"],
 )
+
+FREE_SALE_NAME_FRAGMENT = "venta libre"
+FREE_SALE_REASON_LABEL = "motivo venta libre"
+FREE_SALE_REASON_REQUIRED = (
+    os.getenv("FREE_SALE_REASON_REQUIRED", "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+
+def _normalize_text(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFD", value)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
+
+
+def _sale_contains_free_sale(sale_in: schemas.SaleCreate) -> bool:
+    for item in sale_in.items or []:
+        name = _normalize_text(getattr(item, "product_name", ""))
+        sku = _normalize_text(getattr(item, "product_sku", ""))
+        if FREE_SALE_NAME_FRAGMENT in name or "venta-libre" in sku or "venta libre" in sku:
+            return True
+    return False
+
+
+def _has_required_free_sale_reason(notes: Optional[str]) -> bool:
+    normalized_notes = _normalize_text(notes)
+    if not normalized_notes:
+        return False
+    label_index = normalized_notes.find(FREE_SALE_REASON_LABEL)
+    if label_index < 0:
+        return False
+    tail = normalized_notes[label_index + len(FREE_SALE_REASON_LABEL) :].strip(" :\n\t\r-")
+    return bool(tail)
 
 
 def _load_qz_env(name: str) -> str:
@@ -391,6 +427,19 @@ def create_sale(
         raise HTTPException(
             status_code=400,
             detail="paid_amount no puede ser negativo",
+        )
+    if (
+        FREE_SALE_REASON_REQUIRED
+        and _sale_contains_free_sale(sale_in)
+        and not _has_required_free_sale_reason(
+        sale_in.notes
+        )
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "La nota debe incluir el motivo de venta libre cuando se use este producto."
+            ),
         )
 
     try:
@@ -1410,10 +1459,48 @@ def email_closure_report(
                 "application/pdf",
             )
         )
+        if email_in.extra_html_attachments:
+            for html_attachment in email_in.extra_html_attachments:
+                if not html_attachment.document_html.strip():
+                    continue
+                filename = (html_attachment.filename or "").strip()
+                if not filename:
+                    continue
+                if not filename.lower().endswith(".pdf"):
+                    filename = f"{filename}.pdf"
+                pdf_bytes_extra = pdf_utils.build_pdf_from_html(
+                    html_attachment.title or filename,
+                    html_attachment.document_html,
+                )
+                attachments.append((filename, pdf_bytes_extra, "application/pdf"))
+        else:
+            products_pdf = ticket_renderer.render_closure_products_detail_pdf(
+                closure, settings=settings
+            )
+            attachments.append(
+                (
+                    f"productos_vendidos_detalle_{closure.consecutive or closure.id}.pdf",
+                    products_pdf,
+                    "application/pdf",
+                )
+            )
+            hourly_pdf = ticket_renderer.render_closure_hourly_sales_pdf(
+                closure, settings=settings
+            )
+            attachments.append(
+                (
+                    f"ventas_por_hora_{closure.consecutive or closure.id}.pdf",
+                    hourly_pdf,
+                    "application/pdf",
+                )
+            )
 
     subject = (
         email_in.subject
-        or f"Reporte Z {closure.consecutive or f'CL-{closure.id:06d}'}"
+        or (
+            f"Cierre del dia {closure.closed_at.strftime('%d/%m/%Y')} - "
+            f"{closure.consecutive or f'CL-{closure.id:06d}'}"
+        )
     )
 
     try:
