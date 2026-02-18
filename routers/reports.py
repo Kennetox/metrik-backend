@@ -37,6 +37,14 @@ def send_report_email(
 
     attachments = []
     if payload.attach_pdf:
+        if not pdf_utils.can_render_html_pdf():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "El servidor no tiene habilitada la generacion de PDF HTML "
+                    "(dependencias de WeasyPrint faltantes)."
+                ),
+            )
         pdf_bytes = pdf_utils.build_pdf_from_html(payload.subject or "Reporte Kensar", payload.document_html)
         attachments.append(
             (

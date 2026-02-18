@@ -1451,6 +1451,14 @@ def email_closure_report(
 
     attachments = []
     if email_in.attach_pdf:
+        if not pdf_utils.can_render_html_pdf():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "El servidor no tiene habilitada la generacion de PDF HTML "
+                    "(dependencias de WeasyPrint faltantes)."
+                ),
+            )
         pdf_bytes = ticket_renderer.render_closure_pdf(closure, settings=settings)
         attachments.append(
             (

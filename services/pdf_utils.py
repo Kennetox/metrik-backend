@@ -1,4 +1,5 @@
 import re
+from html import unescape
 from typing import List
 
 try:  # pragma: no cover - optional dependency
@@ -13,6 +14,10 @@ def _escape_pdf_text(text: str) -> str:
         .replace("(", "\\(")
         .replace(")", "\\)")
     )
+
+
+def can_render_html_pdf() -> bool:
+    return HTML is not None
 
 
 def build_simple_pdf(title: str, lines: List[str]) -> bytes:
@@ -139,8 +144,22 @@ def build_pdf_from_html(title: str, html_content: str) -> bytes:
         document = HTML(string=html_with_patch)
         return document.write_pdf(stylesheets=None)
 
-    plain_text = re.sub(r"<[^>]+>", "", html_content or "")
-    plain_text = plain_text.replace("&nbsp;", " ")
+    fallback_source = html_content or ""
+    fallback_source = re.sub(
+        r"<style\b[^>]*>[\s\S]*?</style>",
+        " ",
+        fallback_source,
+        flags=re.IGNORECASE,
+    )
+    fallback_source = re.sub(
+        r"<script\b[^>]*>[\s\S]*?</script>",
+        " ",
+        fallback_source,
+        flags=re.IGNORECASE,
+    )
+    plain_text = re.sub(r"<[^>]+>", " ", fallback_source)
+    plain_text = unescape(plain_text).replace("\xa0", " ")
+    plain_text = re.sub(r"[ \t]+", " ", plain_text)
     lines = [line.strip() for line in plain_text.splitlines()]
     lines = [line for line in lines if line]
     if not lines:
