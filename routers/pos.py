@@ -879,7 +879,7 @@ def send_settings_test_email(
         email_service.send_email(
             recipients=recipients,
             subject=subject,
-            body=f"<p>{escape(message)}</p>",
+            html_body=f"<p>{escape(message)}</p>",
             smtp_config=smtp_config,
         )
     except email_service.EmailDeliveryError as exc:

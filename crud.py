@@ -30,6 +30,54 @@ def _session_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _build_proportional_payments(
+    total_amount: float,
+    source_payments: list[tuple[str, float]],
+) -> list[tuple[str, float]]:
+    if total_amount <= 0:
+        return []
+
+    normalized: list[tuple[str, float]] = []
+    for method, amount in source_payments:
+        method_name = (method or "").strip()
+        numeric = float(amount or 0.0)
+        if not method_name or numeric <= 0:
+            continue
+        normalized.append((method_name, numeric))
+
+    if not normalized:
+        return [("cash", total_amount)]
+
+    if len(normalized) == 1:
+        return [(normalized[0][0], total_amount)]
+
+    source_total = sum(amount for _, amount in normalized)
+    if source_total <= 0:
+        return [(normalized[0][0], total_amount)]
+
+    distributed: list[tuple[str, float]] = []
+    allocated = 0.0
+    for method, amount in normalized[:-1]:
+        proportional = round((amount / source_total) * total_amount, 2)
+        distributed.append((method, proportional))
+        allocated += proportional
+
+    tail = round(total_amount - allocated, 2)
+    if tail < 0:
+        tail = 0.0
+    distributed.append((normalized[-1][0], tail))
+
+    # Ajuste final para evitar desfaces por redondeo.
+    diff = round(total_amount - sum(amount for _, amount in distributed), 2)
+    if abs(diff) > 0.001:
+        method, amount = distributed[-1]
+        distributed[-1] = (method, round(max(0.0, amount + diff), 2))
+
+    # Si algun renglón quedó en 0 por redondeo, lo excluimos.
+    filtered = [(method, amount) for method, amount in distributed if amount > 0]
+    return filtered if filtered else [(normalized[0][0], total_amount)]
+
+
 def revoke_user_sessions(
     db: Session,
     user_id: int,
@@ -1252,16 +1300,34 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
         if projected_total_refunded - float(sale.total or 0.0) > 0.01:
             raise ValueError("El total devuelto supera el total cobrado en la venta")
 
-    payments_payload = (
-        list(return_in.payments)
-        if return_in.payments and len(return_in.payments) > 0
-        else [
-            schemas.ReturnPaymentCreate(
-                method=sale.main_payment_method,
-                amount=total_refund,
-            )
+    if return_in.payments and len(return_in.payments) > 0:
+        payments_payload = list(return_in.payments)
+    else:
+        source_payments: list[tuple[str, float]] = []
+        payment_adjustments, _ = _collect_sale_adjustments(db, [sale.id])
+        latest_payment_adjustment = payment_adjustments.get(sale.id)
+        adjusted_payments = (
+            _parse_adjustment_payments(latest_payment_adjustment.payload)
+            if latest_payment_adjustment
+            else []
+        )
+        if adjusted_payments:
+            source_payments = adjusted_payments
+        elif sale.payments and len(sale.payments) > 0:
+            source_payments = [
+                (payment.method, float(payment.amount or 0.0))
+                for payment in sale.payments
+            ]
+        else:
+            fallback_method = sale.main_payment_method or sale.payment_method or "cash"
+            fallback_amount = float(sale.paid_amount or sale.total or total_refund)
+            source_payments = [(fallback_method, fallback_amount)]
+
+        proportional = _build_proportional_payments(total_refund, source_payments)
+        payments_payload = [
+            schemas.ReturnPaymentCreate(method=method, amount=amount)
+            for method, amount in proportional
         ]
-    )
 
     payments_total = sum(float(p.amount) for p in payments_payload)
     if abs(payments_total - total_refund) > 0.01:
@@ -1685,6 +1751,57 @@ def list_document_adjustments_for_docs(
         .order_by(models.DocumentAdjustment.created_at.desc())
         .all()
     )
+
+
+def _parse_adjustment_payments(payload: object) -> list[tuple[str, float]]:
+    if not isinstance(payload, dict):
+        return []
+    payments = payload.get("payments")
+    if not isinstance(payments, list):
+        return []
+    results: list[tuple[str, float]] = []
+    for entry in payments:
+        if not isinstance(entry, dict):
+            continue
+        method = entry.get("method")
+        amount = entry.get("amount")
+        if not isinstance(method, str) or not method:
+            continue
+        try:
+            numeric = float(amount or 0.0)
+        except (TypeError, ValueError):
+            continue
+        results.append((method, numeric))
+    return results
+
+
+def _collect_sale_adjustments(
+    db: Session,
+    sale_ids: list[int],
+    range_end: datetime | None = None,
+) -> tuple[dict[int, models.DocumentAdjustment], dict[int, float]]:
+    if not sale_ids:
+        return {}, {}
+    query = (
+        db.query(models.DocumentAdjustment)
+        .filter(models.DocumentAdjustment.doc_type == "sale")
+        .filter(models.DocumentAdjustment.doc_id.in_(sale_ids))
+    )
+    if range_end is not None:
+        query = query.filter(models.DocumentAdjustment.created_at <= range_end)
+    adjustments = query.order_by(models.DocumentAdjustment.created_at.desc()).all()
+
+    latest_payment_adjustment: dict[int, models.DocumentAdjustment] = {}
+    total_delta: dict[int, float] = defaultdict(float)
+    for adjustment in adjustments:
+        doc_id = adjustment.doc_id
+        total_delta[doc_id] += float(adjustment.total_delta or 0.0)
+        if doc_id in latest_payment_adjustment:
+            continue
+        payload_payments = _parse_adjustment_payments(adjustment.payload)
+        if payload_payments:
+            latest_payment_adjustment[doc_id] = adjustment
+    return latest_payment_adjustment, total_delta
 
 
 def get_separated_order_payment(
@@ -2592,7 +2709,15 @@ def create_pos_closure(
     )
 
     sale_ids = [sale.id for sale in pending_sales]
-    total_amount = sum(float(sale.total or 0.0) for sale in pending_sales)
+    payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
+        db,
+        sale_ids,
+        range_end=range_end,
+    )
+    total_amount = sum(
+        float(sale.total or 0.0) + float(total_delta_by_sale.get(sale.id, 0.0))
+        for sale in pending_sales
+    )
     total_refunds = sum(float(ret.total_refund or 0.0) for ret in pending_returns)
     sales_count = len(pending_sales)
 
@@ -2604,12 +2729,6 @@ def create_pos_closure(
         "daviplata": 0.0,
         "credit": 0.0,
     }
-    rows = (
-        db.query(models.SalePayment.method, func.sum(models.SalePayment.amount))
-        .filter(models.SalePayment.sale_id.in_(sale_ids))
-        .group_by(models.SalePayment.method)
-        .all()
-    )
     method_map = {
         "cash": "cash",
         "card": "card",
@@ -2618,10 +2737,28 @@ def create_pos_closure(
         "daviplata": "daviplata",
         "credit": "credit",
     }
-    for method, amount in rows:
-        key = method_map.get((method or "").lower())
-        if key:
-            payment_totals[key] += float(amount or 0.0)
+    for sale in pending_sales:
+        adjustment = payment_adjustments.get(sale.id)
+        adjusted_payments = (
+            _parse_adjustment_payments(adjustment.payload) if adjustment else []
+        )
+        payment_entries: list[tuple[str, float]] = (
+            adjusted_payments
+            if adjusted_payments
+            else [
+                (payment.method, float(payment.amount or 0.0))
+                for payment in (sale.payments or [])
+            ]
+        )
+        if not payment_entries:
+            fallback_method = sale.main_payment_method or sale.payment_method
+            fallback_amount = float(sale.paid_amount or sale.total or 0.0)
+            if fallback_method and fallback_amount > 0:
+                payment_entries = [(fallback_method, fallback_amount)]
+        for method, amount in payment_entries:
+            key = method_map.get((method or "").lower())
+            if key:
+                payment_totals[key] += float(amount or 0.0)
 
     if pending_returns:
         return_ids = [ret.id for ret in pending_returns]
