@@ -240,6 +240,20 @@ class LabelExportRequest(BaseModel):
     items: List[LabelExportItem]
 
 
+class LabelCloudPrintPayload(BaseModel):
+    CODIGO: str
+    BARRAS: str
+    NOMBRE: str
+    PRECIO: str
+    format: str
+    copies: int = Field(ge=1)
+
+
+class LabelCloudPrintRequest(BaseModel):
+    payload: LabelCloudPrintPayload
+    fire_and_forget: bool = False
+
+
 # ===================== SALES / ITEMS / PAYMENTS =====================
 
 
@@ -1074,11 +1088,17 @@ class RolePermissionMatrix(BaseModel):
 
 
 class EmailSendRequest(BaseModel):
+    class HtmlAttachment(BaseModel):
+        filename: str
+        title: Optional[str] = None
+        document_html: str
+
     recipients: List[EmailStr] = Field(default_factory=list)
     subject: Optional[str] = None
     message: Optional[str] = None
     attach_pdf: bool = False
     document_type: Literal["ticket", "invoice"] = "ticket"
+    extra_html_attachments: List[HtmlAttachment] = Field(default_factory=list)
 
 
 class EmailSendResponse(BaseModel):
