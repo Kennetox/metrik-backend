@@ -518,7 +518,7 @@ def void_sale(
     sale_id: int,
     payload: schemas.VoidRequest,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+    current_user: models.PosUser = Depends(require_permission("documents.sales.void")),
 ):
     sale = crud.get_sale(db, sale_id)
     if not sale:
@@ -544,7 +544,7 @@ def create_document_adjustment(
     doc_id: int,
     payload: schemas.DocumentAdjustmentCreate,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+    current_user: models.PosUser = Depends(require_permission("documents.sales.adjust")),
 ):
     if doc_type != "sale":
         raise HTTPException(status_code=400, detail="Tipo de documento no soportado")

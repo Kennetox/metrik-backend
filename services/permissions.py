@@ -123,6 +123,18 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
             },
             {
+                "id": "documents.sales.adjust",
+                "label": "Ajustar ventas",
+                "description": "Permite registrar ajustes sobre ventas.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "documents.sales.void",
+                "label": "Anular ventas",
+                "description": "Permite anular ventas (si aplica).",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
                 "id": "documents.separated_orders.void_payment",
                 "label": "Anular abonos",
                 "description": "Permite anular pagos de separados.",
