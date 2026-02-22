@@ -8,7 +8,7 @@ import string
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import func, or_
+from sqlalchemy import String, cast, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
@@ -987,6 +987,80 @@ def get_sales(
         .limit(limit)
         .all()
     )
+
+
+def get_sales_history_page(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    term: Optional[str] = None,
+    customer: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    pos_name: Optional[str] = None,
+) -> tuple[list[models.Sale], int]:
+    query = db.query(models.Sale)
+
+    if date_from is not None:
+        query = query.filter(models.Sale.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.Sale.created_at < date_to)
+
+    cleaned_term = (term or "").strip()
+    if cleaned_term:
+        like_term = f"%{cleaned_term}%"
+        digits_only = "".join(ch for ch in cleaned_term if ch.isdigit())
+        sale_number_filters = []
+        if digits_only:
+            try:
+                sale_number_filters.append(models.Sale.sale_number == int(digits_only))
+            except ValueError:
+                pass
+        sale_number_filters.append(cast(models.Sale.sale_number, String).ilike(like_term))
+        query = query.outerjoin(
+            models.SaleItem, models.SaleItem.sale_id == models.Sale.id
+        ).filter(
+            or_(
+                models.Sale.document_number.ilike(like_term),
+                *sale_number_filters,
+                models.SaleItem.product_name.ilike(like_term),
+                models.SaleItem.product_sku.ilike(like_term),
+            )
+        )
+
+    cleaned_customer = (customer or "").strip()
+    if cleaned_customer:
+        query = query.filter(models.Sale.customer_name.ilike(f"%{cleaned_customer}%"))
+
+    cleaned_payment = (payment_method or "").strip().lower()
+    if cleaned_payment:
+        if cleaned_payment == "separado":
+            query = query.filter(models.Sale.separated_order.has())
+        else:
+            query = query.filter(
+                or_(
+                    func.lower(models.Sale.payment_method) == cleaned_payment,
+                    func.lower(models.Sale.main_payment_method) == cleaned_payment,
+                    models.Sale.payments.any(
+                        func.lower(models.SalePayment.method) == cleaned_payment
+                    ),
+                )
+            )
+
+    cleaned_pos = (pos_name or "").strip()
+    if cleaned_pos:
+        query = query.filter(models.Sale.pos_name.ilike(f"%{cleaned_pos}%"))
+
+    total = query.with_entities(func.count(func.distinct(models.Sale.id))).scalar() or 0
+    rows = (
+        query.distinct()
+        .order_by(models.Sale.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return rows, int(total)
 
 
 def get_next_sale_number(db: Session, pos_id: Optional[str] = None) -> int:

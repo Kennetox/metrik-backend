@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from typing import List, Optional
 import base64
@@ -13,6 +13,7 @@ from fastapi import (
     UploadFile,
     File,
     Form,
+    Query,
     Response,
 )
 from sqlalchemy.orm import Session
@@ -147,6 +148,15 @@ def _bogota_today_utc_bounds_naive() -> tuple[datetime, datetime]:
         now_bogota.day,
         tzinfo=bogota_tz,
     )
+    end_bogota = start_bogota + timedelta(days=1)
+    start_utc = start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_utc, end_utc
+
+
+def _bogota_date_utc_bounds_naive(value: date) -> tuple[datetime, datetime]:
+    bogota_tz = ZoneInfo("America/Bogota")
+    start_bogota = datetime(value.year, value.month, value.day, tzinfo=bogota_tz)
     end_bogota = start_bogota + timedelta(days=1)
     start_utc = start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = end_bogota.astimezone(timezone.utc).replace(tzinfo=None)
@@ -496,6 +506,52 @@ def list_sales(
         date_to=date_to,
     )
     return [_serialize_sale_response(sale) for sale in sales]
+
+
+@router.get("/sales/history", response_model=schemas.SalesHistoryPage)
+def list_sales_history(
+    skip: int = 0,
+    limit: int = Query(default=100, ge=1, le=500),
+    from_date: Optional[date] = Query(default=None, alias="date_from"),
+    to_date: Optional[date] = Query(default=None, alias="date_to"),
+    term: Optional[str] = None,
+    customer: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    pos: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    date_from = None
+    date_to = None
+    matrix = crud.get_role_permissions(db)
+    can_view_history_range = permission_service.role_has_permission(
+        matrix, "sales_history.history", current_user.role
+    )
+    if can_view_history_range:
+        if from_date is not None:
+            date_from, _ = _bogota_date_utc_bounds_naive(from_date)
+        if to_date is not None:
+            _, date_to = _bogota_date_utc_bounds_naive(to_date)
+    else:
+        date_from, date_to = _bogota_today_utc_bounds_naive()
+
+    sales, total = crud.get_sales_history_page(
+        db,
+        skip=skip,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        term=term,
+        customer=customer,
+        payment_method=payment_method,
+        pos_name=pos,
+    )
+    return schemas.SalesHistoryPage(
+        total=total,
+        skip=skip,
+        limit=limit,
+        items=[_serialize_sale_response(sale) for sale in sales],
+    )
 
 
 @router.get("/sales/{sale_id}", response_model=schemas.SaleRead)

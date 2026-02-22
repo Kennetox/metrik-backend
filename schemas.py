@@ -1139,6 +1139,13 @@ class SaleVoidResponse(BaseModel):
     return_document: Optional[SaleReturnRead] = None
 
 
+class SalesHistoryPage(BaseModel):
+    total: int
+    skip: int
+    limit: int
+    items: List[SaleRead]
+
+
 class DocumentExportRow(BaseModel):
     document_number: str
     doc_type: str
