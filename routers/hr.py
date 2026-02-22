@@ -200,7 +200,41 @@ def list_hr_employee_documents(
     employee = crud.get_hr_employee(db, employee_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    return crud.list_hr_employee_documents(db, employee_id)
+    hr_docs = crud.list_hr_employee_documents(db, employee_id)
+    merged: list[schemas.HREmployeeDocumentRead] = [
+        schemas.HREmployeeDocumentRead(
+            id=doc.id,
+            employee_id=doc.employee_id,
+            file_name=doc.file_name,
+            file_url=doc.file_url,
+            file_size=doc.file_size,
+            note=doc.note,
+            created_at=doc.created_at,
+            source="hr",
+            can_delete=True,
+        )
+        for doc in hr_docs
+    ]
+
+    if employee.system_user:
+        profile_docs = crud.list_user_documents(db, employee.system_user.id)
+        merged.extend(
+            schemas.HREmployeeDocumentRead(
+                id=doc.id,
+                employee_id=employee_id,
+                file_name=doc.file_name,
+                file_url=doc.file_url,
+                file_size=doc.file_size,
+                note=doc.note,
+                created_at=doc.created_at,
+                source="profile",
+                can_delete=True,
+            )
+            for doc in profile_docs
+        )
+
+    merged.sort(key=lambda row: row.created_at, reverse=True)
+    return merged
 
 
 @router.post(
@@ -243,13 +277,19 @@ async def upload_hr_employee_document(
 def delete_hr_employee_document(
     employee_id: int,
     doc_id: int,
+    source: str = "hr",
     db: Session = Depends(get_db),
     _: models.PosUser = Depends(require_permission("hr.manage")),
 ):
     employee = crud.get_hr_employee(db, employee_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    deleted = crud.delete_hr_employee_document(db, employee_id, doc_id)
+    if source == "profile":
+        if not employee.system_user:
+            raise HTTPException(status_code=400, detail="El empleado no tiene usuario vinculado")
+        deleted = crud.delete_user_document(db, employee.system_user.id, doc_id)
+    else:
+        deleted = crud.delete_hr_employee_document(db, employee_id, doc_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     return Response(status_code=204)

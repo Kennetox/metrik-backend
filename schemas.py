@@ -561,6 +561,8 @@ class HREmployeeDocumentRead(BaseModel):
     file_size: int
     note: Optional[str] = None
     created_at: datetime
+    source: Literal["hr", "profile"] = "hr"
+    can_delete: bool = True
 
     class Config:
         from_attributes = True
