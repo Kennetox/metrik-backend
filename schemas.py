@@ -938,6 +938,41 @@ class ReportEmailRequest(BaseModel):
     attach_pdf: bool = True
 
 
+class ReportExportCompanyInfo(BaseModel):
+    name: str
+    address: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class ReportExportFilterMeta(BaseModel):
+    from_date: str
+    to_date: str
+    pos_filter: str
+    method_filter: str
+    seller_filter: str
+
+
+class ReportExportSummaryItem(BaseModel):
+    label: str
+    value: str
+
+
+class ReportExportTable(BaseModel):
+    columns: List[str]
+    rows: List[List[str]] = []
+    empty_message: Optional[str] = None
+
+
+class ReportExportRequest(BaseModel):
+    preset_id: str
+    title: str
+    company: ReportExportCompanyInfo
+    filters: ReportExportFilterMeta
+    summary: List[ReportExportSummaryItem] = []
+    table: ReportExportTable
+
+
 class DashboardSummary(BaseModel):
     today_sales_total: float
     today_tickets: int

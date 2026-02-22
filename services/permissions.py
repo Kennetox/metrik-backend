@@ -316,6 +316,20 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
             },
         ],
     },
+    {
+        "id": "hr",
+        "label": "Recursos Humanos",
+        "description": "Gestión de empleados y datos laborales.",
+        "roles": _role_flags(Administrador=True, Supervisor=True),
+        "actions": [
+            {
+                "id": "hr.view",
+                "label": "Ver empleados",
+                "description": "Permite consultar la plantilla de colaboradores.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+        ],
+    },
 ]
 
 
