@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import List, Optional
 import base64
@@ -24,6 +24,7 @@ from database import get_db
 from dependencies import get_current_active_user, require_permission, require_role
 from services import email as email_service
 from services import pdf_utils
+from services import permissions as permission_service
 from services import ticket_renderer
 from services import storage
 from services.password_reset import (
@@ -135,6 +136,21 @@ def _to_bogota_date(dt: datetime) -> datetime.date:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(bogota_tz).date()
+
+
+def _bogota_today_utc_bounds_naive() -> tuple[datetime, datetime]:
+    bogota_tz = ZoneInfo("America/Bogota")
+    now_bogota = datetime.now(bogota_tz)
+    start_bogota = datetime(
+        now_bogota.year,
+        now_bogota.month,
+        now_bogota.day,
+        tzinfo=bogota_tz,
+    )
+    end_bogota = start_bogota + timedelta(days=1)
+    start_utc = start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_utc, end_utc
 
 
 def _sum_payments(payments: list[tuple[str, float]]) -> float:
@@ -457,13 +473,28 @@ def list_sales(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
     """
     Lista las ventas registradas en el POS.
     Más adelante se puede ampliar con filtros, paginación real, etc.
     """
-    sales = crud.get_sales(db, skip=skip, limit=limit)
+    date_from = None
+    date_to = None
+    matrix = crud.get_role_permissions(db)
+    can_view_history_range = permission_service.role_has_permission(
+        matrix, "sales_history.history", current_user.role
+    )
+    if not can_view_history_range:
+        date_from, date_to = _bogota_today_utc_bounds_naive()
+
+    sales = crud.get_sales(
+        db,
+        skip=skip,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+    )
     return [_serialize_sale_response(sale) for sale in sales]
 
 
@@ -785,7 +816,7 @@ def void_return(
     return_id: int,
     payload: schemas.VoidRequest,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+    current_user: models.PosUser = Depends(require_permission("pos.returns.void")),
 ):
     sale_return = crud.get_sale_return(db, return_id)
     if not sale_return:
@@ -817,7 +848,7 @@ def void_change(
     change_id: int,
     payload: schemas.VoidRequest,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+    current_user: models.PosUser = Depends(require_permission("pos.changes.void")),
 ):
     sale_change = crud.get_sale_change(db, change_id)
     if not sale_change:

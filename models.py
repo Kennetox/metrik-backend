@@ -56,6 +56,21 @@ class Product(Base):
     )
 
 
+class ProductAuditLog(Base):
+    __tablename__ = "product_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, nullable=False, index=True)
+    action = Column(String, nullable=False)  # create | update | delete
+    actor_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    actor_name = Column(String, nullable=True)
+    actor_email = Column(String, nullable=True)
+    changes = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    actor = relationship("PosUser")
+
+
 class ProductGroup(Base):
     __tablename__ = "product_groups"
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from sqlalchemy import case, func
+from typing import Any, Dict, List, Optional
 from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
 import io
@@ -89,7 +90,54 @@ def _filter_products(products: List[models.Product], payload: ExportProductsRequ
     return filtered
 
 
-def _build_export_rows(products: List[models.Product], columns: List[str]):
+def _build_export_rows(
+    db: Session,
+    products: List[models.Product],
+    columns: List[str],
+):
+    history_map: Dict[int, Dict[str, Optional[str]]] = {}
+    include_history = "history" in columns if columns else False
+    if include_history and products:
+        product_ids = [p.id for p in products]
+        history_rows = (
+            db.query(
+                models.ProductAuditLog.product_id.label("product_id"),
+                func.min(
+                    case(
+                        (
+                            models.ProductAuditLog.action.in_(["create", "snapshot"]),
+                            models.ProductAuditLog.created_at,
+                        ),
+                        else_=None,
+                    )
+                ).label("created_or_imported_at"),
+                func.max(
+                    case(
+                        (models.ProductAuditLog.action == "update", models.ProductAuditLog.created_at),
+                        else_=None,
+                    )
+                ).label("last_modified_at"),
+            )
+            .filter(models.ProductAuditLog.product_id.in_(product_ids))
+            .group_by(models.ProductAuditLog.product_id)
+            .all()
+        )
+        history_map = {
+            int(row.product_id): {
+                "created_or_imported_at": (
+                    row.created_or_imported_at.isoformat(sep=" ", timespec="seconds")
+                    if row.created_or_imported_at
+                    else ""
+                ),
+                "last_modified_at": (
+                    row.last_modified_at.isoformat(sep=" ", timespec="seconds")
+                    if row.last_modified_at
+                    else ""
+                ),
+            }
+            for row in history_rows
+        }
+
     column_map = {
         "id": ("ID", lambda p: p.id),
         "sku": ("SKU", lambda p: p.sku or ""),
@@ -109,9 +157,24 @@ def _build_export_rows(products: List[models.Product], columns: List[str]):
         "active": ("Activo", lambda p: 1 if p.active else 0),
         "service": ("Servicio", lambda p: 1 if p.service else 0),
         "includes_tax": ("IVA incl.", lambda p: 1 if p.includes_tax else 0),
+        "history_created_at": (
+            "Fecha creación/importación",
+            lambda p: history_map.get(p.id, {}).get("created_or_imported_at", ""),
+        ),
+        "history_last_modified_at": (
+            "Fecha última modificación",
+            lambda p: history_map.get(p.id, {}).get("last_modified_at", ""),
+        ),
     }
 
     final_columns = list(columns) if columns else []
+    expanded_columns: List[str] = []
+    for key in final_columns:
+        if key == "history":
+            expanded_columns.extend(["history_created_at", "history_last_modified_at"])
+        else:
+            expanded_columns.append(key)
+    final_columns = expanded_columns
     if "sku" not in final_columns:
         final_columns.insert(0, "sku")
     if "name" not in final_columns:
@@ -123,6 +186,25 @@ def _build_export_rows(products: List[models.Product], columns: List[str]):
         for p in products
     ]
     return header, rows
+
+
+def _model_dump(payload: Any) -> Dict[str, Any]:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(exclude_unset=True)
+    return payload.dict(exclude_unset=True)
+
+
+def _build_product_changes(
+    current_product: models.Product,
+    update_payload: schemas.ProductUpdate,
+) -> Dict[str, Dict[str, Any]]:
+    incoming = _model_dump(update_payload)
+    changes: Dict[str, Dict[str, Any]] = {}
+    for field, new_value in incoming.items():
+        old_value = getattr(current_product, field, None)
+        if old_value != new_value:
+            changes[field] = {"before": old_value, "after": new_value}
+    return changes
 
 
 @router.get("/", response_model=List[schemas.ProductRead])
@@ -150,7 +232,7 @@ def get_catalog_version(
 def create_product(
     product_in: schemas.ProductCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.manage")),
+    actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
     # Si quieres evitar SKUs duplicados:
     if product_in.sku:
@@ -159,6 +241,13 @@ def create_product(
             raise HTTPException(status_code=400, detail="SKU already registered")
 
     product = crud.create_product(db, product_in)
+    crud.create_product_audit_log(
+        db,
+        product_id=product.id,
+        action="create",
+        actor_user=actor,
+        changes={"after": _model_dump(product_in)},
+    )
     return product
 
 def get_product(product_id: int, db: Session = Depends(get_db)):
@@ -174,7 +263,7 @@ def update_product(
     product_id: int,
     product_in: schemas.ProductUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.manage")),
+    actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
     db_product = crud.get_product(db, product_id)
     if not db_product:
@@ -186,7 +275,15 @@ def update_product(
         if existing:
             raise HTTPException(status_code=400, detail="SKU already registered")
 
+    changes = _build_product_changes(db_product, product_in)
     updated = crud.update_product(db, db_product, product_in)
+    crud.create_product_audit_log(
+        db,
+        product_id=updated.id,
+        action="update",
+        actor_user=actor,
+        changes=changes or None,
+    )
     return updated
 
 
@@ -195,14 +292,41 @@ def update_product(
 def delete_product(
     product_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.manage")),
+    actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
     db_product = crud.get_product(db, product_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    crud.create_product_audit_log(
+        db,
+        product_id=db_product.id,
+        action="delete",
+        actor_user=actor,
+        changes={
+            "before": {
+                "id": db_product.id,
+                "sku": db_product.sku,
+                "name": db_product.name,
+                "active": db_product.active,
+            }
+        },
+    )
     crud.delete_product(db, db_product)
     return Response(status_code=204)
+
+
+@router.get("/{product_id}/audit", response_model=List[schemas.ProductAuditLogRead])
+def get_product_audit_log(
+    product_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("products.view")),
+):
+    db_product = crud.get_product(db, product_id)
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return crud.list_product_audit_logs(db, product_id=product_id, limit=limit)
 
 @router.get("/export/csv")
 def export_products_csv(db: Session = Depends(get_db)):
@@ -306,7 +430,7 @@ def export_products_xlsx_custom(
 ):
     products = crud.get_products(db, skip=0, limit=100000)
     filtered = _filter_products(products, payload)
-    header, rows = _build_export_rows(filtered, payload.columns)
+    header, rows = _build_export_rows(db, filtered, payload.columns)
 
     df = pd.DataFrame(rows, columns=header)
 
@@ -333,7 +457,7 @@ def export_products_csv_custom(
 ):
     products = crud.get_products(db, skip=0, limit=100000)
     filtered = _filter_products(products, payload)
-    header, rows = _build_export_rows(filtered, payload.columns)
+    header, rows = _build_export_rows(db, filtered, payload.columns)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -354,6 +478,7 @@ def export_products_csv_custom(
 async def import_products_xlsx(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("products.import")),
 ):
     """
     Importa productos desde un Excel con columnas:

@@ -117,6 +117,20 @@ class ProductRead(ProductBase):
         from_attributes = True
 
 
+class ProductAuditLogRead(BaseModel):
+    id: int
+    product_id: int
+    action: str
+    actor_user_id: Optional[int] = None
+    actor_name: Optional[str] = None
+    actor_email: Optional[str] = None
+    changes: Optional[Dict[str, object]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class CatalogVersion(BaseModel):
     products_updated_at: Optional[datetime] = None
     groups_updated_at: Optional[datetime] = None
@@ -1073,6 +1087,7 @@ class RolePermissionAction(BaseModel):
     label: str
     description: Optional[str] = None
     roles: Dict[str, bool]
+    editable: Optional[bool] = None
 
 
 class RolePermissionModule(BaseModel):
@@ -1081,6 +1096,7 @@ class RolePermissionModule(BaseModel):
     description: Optional[str] = None
     roles: Dict[str, bool]
     actions: List[RolePermissionAction] = Field(default_factory=list)
+    editable: Optional[bool] = None
 
 
 class RolePermissionMatrix(BaseModel):

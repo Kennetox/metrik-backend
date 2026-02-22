@@ -67,6 +67,7 @@ def run_schema_upgrades(engine: Engine) -> None:
         with connection.begin():
             if backend == "postgresql":
                 _ensure_table_document_adjustments_postgres(connection)
+                _ensure_table_product_audit_logs_postgres(connection)
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
@@ -429,6 +430,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_table_document_adjustments(connection)
+                _ensure_table_product_audit_logs(connection)
                 _ensure_table_sale_number_reservations(connection)
                 _ensure_column(
                     connection,
@@ -1266,6 +1268,41 @@ def _ensure_table_document_adjustments(connection) -> None:
         )
 
 
+def _ensure_table_product_audit_logs(connection) -> None:
+    if not _table_exists(connection, "product_audit_logs"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE product_audit_logs (
+                    id INTEGER PRIMARY KEY,
+                    product_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    actor_user_id INTEGER,
+                    actor_name TEXT,
+                    actor_email TEXT,
+                    changes JSON,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(actor_user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX product_audit_logs_product_idx "
+                "ON product_audit_logs (product_id, created_at)"
+            )
+        )
+    else:
+        _ensure_column(connection, "product_audit_logs", "product_id", "INTEGER")
+        _ensure_column(connection, "product_audit_logs", "action", "TEXT")
+        _ensure_column(connection, "product_audit_logs", "actor_user_id", "INTEGER")
+        _ensure_column(connection, "product_audit_logs", "actor_name", "TEXT")
+        _ensure_column(connection, "product_audit_logs", "actor_email", "TEXT")
+        _ensure_column(connection, "product_audit_logs", "changes", "JSON")
+        _ensure_column(connection, "product_audit_logs", "created_at", "DATETIME")
+
+
 def _ensure_table_pos_stations(connection) -> None:
     if not _table_exists(connection, "pos_stations"):
         connection.execute(
@@ -1672,6 +1709,33 @@ def _ensure_table_document_adjustments_postgres(connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS document_adjustments_doc_idx
             ON document_adjustments (doc_type, doc_id)
+            """
+        )
+    )
+
+
+def _ensure_table_product_audit_logs_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS product_audit_logs (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                actor_user_id INTEGER REFERENCES pos_users(id),
+                actor_name TEXT,
+                actor_email TEXT,
+                changes JSONB,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS product_audit_logs_product_idx
+            ON product_audit_logs (product_id, created_at)
             """
         )
     )

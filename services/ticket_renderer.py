@@ -1360,8 +1360,6 @@ def render_closure_html(
     closure: models.PosClosure,
     settings: Optional[models.PosSettings] = None,
 ) -> str:
-    profile = _company_profile(settings)
-    company_name = html_escape(profile.get("name") or "Metrik POS")
     formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
         str(closure.closed_at)
     )
@@ -1399,15 +1397,15 @@ def render_closure_html(
 
     return f"""
     <div style="font-family: Arial, sans-serif; color:#111827;">
-      <h2 style="margin:0 0 8px;">Reporte Z {closure_label}</h2>
-      <p style="margin:0 0 12px; color:#374151;">{company_name}</p>
       <p style="margin:0 0 16px;">
+        <strong>Total ventas del dia:</strong> {_format_currency(closure.total_amount)}<br/>
+        <strong>Ventas incluidas:</strong> {sales_count}<br/>
         <strong>POS:</strong> {pos_name}<br/>
         <strong>Cerrado por:</strong> {closed_by}<br/>
         <strong>Fecha de cierre:</strong> {formatted_date}
         {f"<br/><strong>Periodo:</strong> {range_label}" if range_label else ""}
       </p>
-      <p style="margin:0 0 12px;"><strong>Ventas incluidas:</strong> {sales_count}</p>
+      <p style="margin:0 0 12px;"><strong>Reporte:</strong> {closure_label}</p>
       <pre style="font-family: Arial, sans-serif; margin:0 0 16px; white-space:pre-wrap;">{totals_lines}</pre>
       <p style="margin:0;"><strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}</p>
       <p style="margin:8px 0 0; color:#6b7280;">Adjunto: Reporte Z en PDF.</p>
@@ -1523,5 +1521,163 @@ def render_closure_pdf(
     """
     return build_pdf_from_html(
         f"Reporte Z {closure.consecutive or f'CL-{closure.id:06d}'}",
+        html,
+    )
+
+
+def _format_report_datetime(value: Optional[datetime]) -> str:
+    if not value:
+        return "N/A"
+    return _format_ticket_datetime(value) or html_escape(str(value))
+
+
+def _render_report_header(
+    title: str,
+    closure: models.PosClosure,
+    settings: Optional[models.PosSettings] = None,
+) -> str:
+    profile = _company_profile(settings)
+    company_name = html_escape(profile.get("name") or "Metrik POS")
+    address = html_escape(profile.get("address") or "")
+    closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
+    opened_label = _format_report_datetime(closure.opened_at)
+    closed_label = _format_report_datetime(closure.closed_at)
+    period_label = (
+        f"{opened_label} - {closed_label}" if closure.opened_at else closed_label
+    )
+    return f"""
+      <div style="border-bottom:1px solid #dbe1ec; padding-bottom:10px; margin-bottom:12px;">
+        <div style="font-size:18px; font-weight:700; color:#0f172a;">{html_escape(title)}</div>
+        <div style="font-size:13px; color:#334155;">{company_name}</div>
+        {f"<div style='font-size:11px; color:#64748b;'>{address}</div>" if address else ""}
+        <div style="font-size:11px; color:#334155; margin-top:8px;">
+          <strong>Cierre:</strong> {closure_label}<br/>
+          <strong>POS:</strong> {html_escape(closure.pos_name or "N/A")}<br/>
+          <strong>Periodo:</strong> {period_label}
+        </div>
+      </div>
+    """
+
+
+def render_closure_products_detail_pdf(
+    closure: models.PosClosure,
+    settings: Optional[models.PosSettings] = None,
+) -> bytes:
+    rows: List[str] = []
+    for sale in sorted(closure.sales or [], key=lambda value: value.created_at or datetime.min):
+        document = sale.document_number or (
+            f"V-{int(sale.sale_number):06d}" if sale.sale_number else f"#{sale.id}"
+        )
+        created_label = _format_report_datetime(sale.created_at)
+        for item in sale.items or []:
+            quantity = float(item.quantity or 0.0)
+            unit_price = float(item.unit_price or 0.0)
+            line_total = float(item.total or (quantity * unit_price))
+            rows.append(
+                "<tr>"
+                f"<td>{html_escape(created_label)}</td>"
+                f"<td>{html_escape(document)}</td>"
+                f"<td>{html_escape(item.product_name or 'Producto')}</td>"
+                f"<td>{html_escape(item.product_sku or '-')}</td>"
+                f"<td style='text-align:right;'>{_format_currency(unit_price)}</td>"
+                f"<td style='text-align:right;'>{int(quantity) if quantity.is_integer() else quantity:g}</td>"
+                f"<td style='text-align:right;'>{_format_currency(line_total)}</td>"
+                "</tr>"
+            )
+
+    if not rows:
+        rows.append(
+            "<tr><td colspan='7' style='text-align:center; color:#64748b; padding:16px;'>"
+            "No hay productos vendidos en este cierre.</td></tr>"
+        )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color:#0f172a; font-size:12px;">
+        <div style="padding:20px 24px;">
+          {_render_report_header("Productos vendidos (detalle)", closure, settings=settings)}
+          <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+            <thead>
+              <tr style="background:#f8fafc;">
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:left;">Fecha</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:left;">Ticket</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:left;">Producto</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:left;">SKU</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:right;">P. unitario</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:right;">Cant.</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:right;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(rows)}
+            </tbody>
+          </table>
+        </div>
+      </body>
+    </html>
+    """
+    return build_pdf_from_html(
+        f"Productos vendidos {closure.consecutive or f'CL-{closure.id:06d}'}",
+        html,
+    )
+
+
+def render_closure_hourly_sales_pdf(
+    closure: models.PosClosure,
+    settings: Optional[models.PosSettings] = None,
+) -> bytes:
+    hour_map: dict[int, dict[str, float]] = {}
+    for sale in closure.sales or []:
+        created_at = sale.created_at or closure.closed_at
+        if not created_at:
+            continue
+        hour = int(created_at.hour)
+        if hour not in hour_map:
+            hour_map[hour] = {"tickets": 0.0, "total": 0.0}
+        hour_map[hour]["tickets"] += 1
+        hour_map[hour]["total"] += float(sale.total or 0.0)
+
+    rows: List[str] = []
+    for hour in sorted(hour_map.keys()):
+        tickets = int(hour_map[hour]["tickets"])
+        total = float(hour_map[hour]["total"])
+        end_hour = (hour + 1) % 24
+        rows.append(
+            "<tr>"
+            f"<td>{hour:02d}:00 - {end_hour:02d}:00</td>"
+            f"<td style='text-align:right;'>{tickets}</td>"
+            f"<td style='text-align:right;'>{_format_currency(total)}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        rows.append(
+            "<tr><td colspan='3' style='text-align:center; color:#64748b; padding:16px;'>"
+            "No hay ventas en este cierre.</td></tr>"
+        )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color:#0f172a; font-size:12px;">
+        <div style="padding:20px 24px;">
+          {_render_report_header("Ventas por hora", closure, settings=settings)}
+          <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+            <thead>
+              <tr style="background:#f8fafc;">
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:left;">Hora</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:right;">Tickets</th>
+                <th style="border:1px solid #dbe1ec; padding:6px; text-align:right;">Ventas</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(rows)}
+            </tbody>
+          </table>
+        </div>
+      </body>
+    </html>
+    """
+    return build_pdf_from_html(
+        f"Ventas por hora {closure.consecutive or f'CL-{closure.id:06d}'}",
         html,
     )

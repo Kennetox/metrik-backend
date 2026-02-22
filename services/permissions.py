@@ -6,6 +6,13 @@ from typing import Any, Dict, List, Optional
 
 ROLE_KEYS = ["Administrador", "Supervisor", "Vendedor", "Auditor"]
 
+# Acciones críticas mínimas que deben quedar protegidas para operación.
+# El resto de acciones/módulos siguen siendo editables por toggles.
+LOCKED_ACTION_IDS = {
+    "settings.view",
+    "settings.payment_methods.view",
+}
+
 
 def _role_flags(**overrides: bool) -> Dict[str, bool]:
     flags = {role: False for role in ROLE_KEYS}
@@ -13,6 +20,16 @@ def _role_flags(**overrides: bool) -> Dict[str, bool]:
         if role in flags:
             flags[role] = bool(value)
     return flags
+
+
+def _apply_locked_editable_flags(modules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for module in modules:
+        actions = module.get("actions", [])
+        for action in actions:
+            action_id = action.get("id")
+            if action_id in LOCKED_ACTION_IDS:
+                action["editable"] = False
+    return modules
 
 
 DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
@@ -30,6 +47,22 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "description": "Permite acceder al panel principal.",
                 "roles": _role_flags(
                     Administrador=True, Supervisor=True, Vendedor=True, Auditor=True
+                ),
+            },
+            {
+                "id": "dashboard.today",
+                "label": "Ver métricas de hoy",
+                "description": "Muestra indicadores operativos del día actual.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Vendedor=True, Auditor=True
+                ),
+            },
+            {
+                "id": "dashboard.history",
+                "label": "Ver histórico (semana/mes)",
+                "description": "Muestra KPIs y gráficas históricas del dashboard.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Auditor=True
                 ),
             }
         ],
@@ -51,6 +84,18 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "label": "Devoluciones",
                 "description": "Registrar y consultar devoluciones.",
                 "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
+            },
+            {
+                "id": "pos.returns.void",
+                "label": "Anular devoluciones",
+                "description": "Permite anular devoluciones registradas.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "pos.changes.void",
+                "label": "Anular cambios",
+                "description": "Permite anular cambios registrados.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
             },
             {
                 "id": "pos.customers",
@@ -76,7 +121,38 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "id": "documents.separated_orders",
                 "label": "Separados",
                 "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
-            }
+            },
+            {
+                "id": "documents.separated_orders.void_payment",
+                "label": "Anular abonos",
+                "description": "Permite anular pagos de separados.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+        ],
+    },
+    {
+        "id": "sales_history",
+        "label": "Historial de ventas",
+        "description": "Consulta de ventas, reimpresión y seguimiento.",
+        "roles": _role_flags(
+            Administrador=True, Supervisor=True, Vendedor=True, Auditor=True
+        ),
+        "actions": [
+            {
+                "id": "sales_history.view",
+                "label": "Ver historial de ventas",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Vendedor=True, Auditor=True
+                ),
+            },
+            {
+                "id": "sales_history.history",
+                "label": "Ver histórico por rango",
+                "description": "Permite cambiar rangos de fecha en historial de ventas.",
+                "roles": _role_flags(
+                    Administrador=True, Supervisor=True, Auditor=True
+                ),
+            },
         ],
     },
     {
@@ -98,6 +174,32 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "label": "Administrar productos",
                 "roles": _role_flags(Administrador=True, Supervisor=True),
             },
+            {
+                "id": "products.import",
+                "label": "Importar productos",
+                "description": "Permite importar productos masivamente desde Excel.",
+                "roles": _role_flags(Administrador=True),
+            },
+        ],
+    },
+    {
+        "id": "movements",
+        "label": "Movimientos",
+        "description": "Movimientos y control de stock.",
+        "roles": _role_flags(Administrador=True, Supervisor=True),
+        "actions": [
+            {
+                "id": "movements.view",
+                "label": "Ver movimientos",
+                "description": "Consultar métricas, historial y estado del stock.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "movements.manage",
+                "label": "Registrar movimientos",
+                "description": "Crear ajustes y movimientos manuales de inventario.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
         ],
     },
     {
@@ -111,6 +213,20 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
                 "label": "Exportar etiquetas",
                 "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
             },
+        ],
+    },
+    {
+        "id": "labels_pilot",
+        "label": "Etiquetado (beta)",
+        "description": "Vista beta para flujo de etiquetado.",
+        "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
+        "actions": [
+            {
+                "id": "labels.pilot.view",
+                "label": "Ver etiquetado beta",
+                "description": "Permite acceder a la vista Etiquetado (beta).",
+                "roles": _role_flags(Administrador=True, Supervisor=True, Vendedor=True),
+            }
         ],
     },
     {
@@ -192,7 +308,8 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
 
 
 def get_default_permissions() -> List[Dict[str, Any]]:
-    return deepcopy(DEFAULT_ROLE_PERMISSION_MODULES)
+    data = deepcopy(DEFAULT_ROLE_PERMISSION_MODULES)
+    return _apply_locked_editable_flags(data)
 
 
 def _index_by_id(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -229,6 +346,33 @@ def _merge_actions(
     return merged_actions
 
 
+def _enforce_locked_action_floor(
+    merged_modules: List[Dict[str, Any]],
+    default_modules: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    default_action_roles: Dict[str, Dict[str, bool]] = {}
+    for module in default_modules:
+        for action in module.get("actions", []):
+            action_id = action.get("id")
+            if not action_id:
+                continue
+            default_action_roles[action_id] = dict(action.get("roles", {}))
+
+    for module in merged_modules:
+        for action in module.get("actions", []):
+            action_id = action.get("id")
+            if action_id not in LOCKED_ACTION_IDS:
+                continue
+            baseline_roles = default_action_roles.get(action_id, {})
+            current_roles = dict(action.get("roles", {}))
+            for role in ROLE_KEYS:
+                if baseline_roles.get(role) is True:
+                    current_roles[role] = True
+            action["roles"] = current_roles
+
+    return merged_modules
+
+
 def ensure_permissions(
     modules: Optional[List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
@@ -246,7 +390,8 @@ def ensure_permissions(
                 module["actions"], override.get("actions")
             )
         merged_modules.append(module_copy)
-    return merged_modules
+    merged_modules = _enforce_locked_action_floor(merged_modules, default_modules)
+    return _apply_locked_editable_flags(merged_modules)
 
 
 def role_has_permission(

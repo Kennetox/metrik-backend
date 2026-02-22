@@ -23,7 +23,7 @@ router = APIRouter(
 def get_inventory_overview(
     status_limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     stock_subquery = (
         db.query(
@@ -129,7 +129,7 @@ def list_inventory_movements(
     skip: int = 0,
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     movement_rows = (
         db.query(models.InventoryMovement, models.Product.name)
@@ -199,7 +199,7 @@ def list_inventory_products(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     stock_subquery = (
         db.query(
@@ -295,7 +295,7 @@ def export_inventory_products(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     stock_subquery = (
         db.query(
@@ -373,7 +373,7 @@ def export_inventory_products_xlsx(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     stock_subquery = (
         db.query(
@@ -441,7 +441,7 @@ def get_product_history(
     skip: int = 0,
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
@@ -527,7 +527,7 @@ def get_product_history(
 def create_inventory_movement(
     payload: schemas.InventoryMovementCreate,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_permission("products.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
     if payload.qty_delta == 0:
         raise HTTPException(status_code=400, detail="La cantidad no puede ser 0")

@@ -246,6 +246,44 @@ def delete_product(db: Session, db_product: models.Product):
     db.commit()
 
 
+def create_product_audit_log(
+    db: Session,
+    *,
+    product_id: int,
+    action: str,
+    actor_user: Optional[models.PosUser] = None,
+    changes: Optional[Dict[str, Any]] = None,
+) -> models.ProductAuditLog:
+    entry = models.ProductAuditLog(
+        product_id=product_id,
+        action=action,
+        actor_user_id=actor_user.id if actor_user else None,
+        actor_name=(actor_user.name if actor_user else None),
+        actor_email=(actor_user.email if actor_user else None),
+        changes=changes or None,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def list_product_audit_logs(
+    db: Session,
+    *,
+    product_id: int,
+    limit: int = 100,
+) -> List[models.ProductAuditLog]:
+    safe_limit = min(max(limit, 1), 200)
+    return (
+        db.query(models.ProductAuditLog)
+        .filter(models.ProductAuditLog.product_id == product_id)
+        .order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+
 # ===================== PAYMENT METHODS =====================
 
 
@@ -931,10 +969,20 @@ def cancel_separated_order(
     return order
 
 
-def get_sales(db: Session, skip: int = 0, limit: int = 100):
+def get_sales(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+):
+    query = db.query(models.Sale)
+    if date_from is not None:
+        query = query.filter(models.Sale.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.Sale.created_at < date_to)
     return (
-        db.query(models.Sale)
-        .order_by(models.Sale.created_at.desc())
+        query.order_by(models.Sale.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()

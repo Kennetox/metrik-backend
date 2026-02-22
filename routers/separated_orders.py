@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 import crud, models, schemas
 from database import get_db
-from dependencies import require_permission, require_role
+from dependencies import require_permission
 
 
 router = APIRouter(
@@ -156,7 +156,9 @@ def void_separated_payment(
     payment_id: int,
     payload: schemas.SeparatedOrderPaymentVoidRequest,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_role(["Administrador"])),
+    current_user: models.PosUser = Depends(
+        require_permission("documents.separated_orders.void_payment")
+    ),
 ):
     order = crud.get_separated_order(db, order_id)
     if not order:
