@@ -400,6 +400,46 @@ class PosCustomer(Base):
     sales = relationship("Sale", back_populates="customer")
 
 
+class HREmployee(Base):
+    __tablename__ = "hr_employees"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    email = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="Activo")
+    phone = Column(String, nullable=True)
+    position = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    avatar_url = Column(String(512), nullable=True)
+    birth_date = Column(Date, nullable=True)
+    location = Column(String, nullable=True)
+    bio = Column(Text, nullable=True)
+    payroll_frequency = Column(String, nullable=True)
+    payroll_amount = Column(Float, nullable=True)
+    payroll_currency = Column(String(8), nullable=True)
+    payroll_payment_method = Column(String, nullable=True)
+    payroll_day_of_week = Column(String, nullable=True)
+    payroll_day_of_month = Column(Integer, nullable=True)
+    payroll_last_paid_at = Column(Date, nullable=True)
+    payroll_next_due_at = Column(Date, nullable=True)
+    payroll_reference = Column(String, nullable=True)
+    payroll_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    system_user = relationship("PosUser", back_populates="employee", uselist=False)
+    documents = relationship(
+        "HREmployeeDocument",
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )
+
+
 class PosUser(Base):
     __tablename__ = "pos_users"
 
@@ -419,6 +459,7 @@ class PosUser(Base):
     birth_date = Column(Date, nullable=True)
     location = Column(String, nullable=True)
     bio = Column(Text, nullable=True)
+    employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=True, index=True)
     invited_at = Column(DateTime, nullable=True)
     accepted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -429,6 +470,7 @@ class PosUser(Base):
     )
     sessions = relationship("PosSession", back_populates="user")
     documents = relationship("PosUserDocument", back_populates="user")
+    employee = relationship("HREmployee", back_populates="system_user")
 
 
 class PosSession(Base):
@@ -461,6 +503,20 @@ class PosUserDocument(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("PosUser", back_populates="documents")
+
+
+class HREmployeeDocument(Base):
+    __tablename__ = "hr_employee_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
+    file_name = Column(String, nullable=False)
+    file_url = Column(String(512), nullable=False)
+    file_size = Column(Integer, nullable=False, default=0)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    employee = relationship("HREmployee", back_populates="documents")
 
 
 class PasswordReset(Base):

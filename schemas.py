@@ -411,6 +411,7 @@ class PosUserBase(BaseModel):
 
 class PosUserCreate(PosUserBase):
     password: Optional[str] = None
+    employee_id: Optional[int] = None
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
 
 
@@ -424,10 +425,16 @@ class PosUserUpdate(BaseModel):
     phone: Optional[str] = None
     position: Optional[str] = None
     notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+    employee_id: Optional[int] = None
 
 
 class PosUserRead(PosUserBase):
     id: int
+    employee_id: Optional[int] = None
     status: Literal["Activo", "Inactivo"] = "Activo"
     created_at: datetime
     invited_at: Optional[datetime] = None
@@ -477,6 +484,106 @@ class PosUserDocumentRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class HREmployeeBase(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
+    status: Literal["Activo", "Inactivo"] = "Activo"
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+    payroll_frequency: Optional[Literal["diario", "semanal", "mensual"]] = None
+    payroll_amount: Optional[float] = None
+    payroll_currency: Optional[str] = None
+    payroll_payment_method: Optional[str] = None
+    payroll_day_of_week: Optional[str] = None
+    payroll_day_of_month: Optional[int] = Field(default=None, ge=1, le=31)
+    payroll_last_paid_at: Optional[date] = None
+    payroll_next_due_at: Optional[date] = None
+    payroll_reference: Optional[str] = None
+    payroll_notes: Optional[str] = None
+
+
+class HREmployeeCreate(HREmployeeBase):
+    pass
+
+
+class HREmployeeUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    status: Optional[Literal["Activo", "Inactivo"]] = None
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    notes: Optional[str] = None
+    avatar_url: Optional[str] = None
+    birth_date: Optional[date] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+    payroll_frequency: Optional[Literal["diario", "semanal", "mensual"]] = None
+    payroll_amount: Optional[float] = None
+    payroll_currency: Optional[str] = None
+    payroll_payment_method: Optional[str] = None
+    payroll_day_of_week: Optional[str] = None
+    payroll_day_of_month: Optional[int] = Field(default=None, ge=1, le=31)
+    payroll_last_paid_at: Optional[date] = None
+    payroll_next_due_at: Optional[date] = None
+    payroll_reference: Optional[str] = None
+    payroll_notes: Optional[str] = None
+
+
+class HREmployeeSystemUserSummary(BaseModel):
+    id: int
+    email: EmailStr
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    status: Literal["Activo", "Inactivo"]
+
+
+class HREmployeeRead(HREmployeeBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    system_user: Optional[HREmployeeSystemUserSummary] = None
+
+    class Config:
+        from_attributes = True
+
+
+class HREmployeeDocumentRead(BaseModel):
+    id: int
+    employee_id: int
+    file_name: str
+    file_url: str
+    file_size: int
+    note: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HREmployeeCreateSystemUserRequest(BaseModel):
+    email: EmailStr
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"] = "Vendedor"
+    password: Optional[str] = None
+    pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
+
+
+class HREmployeeLinkSystemUserRequest(BaseModel):
+    user_id: int
+
+
+class HRSystemUserOption(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    status: Literal["Activo", "Inactivo"]
+    employee_id: Optional[int] = None
 
 
 class PosStationCreate(BaseModel):

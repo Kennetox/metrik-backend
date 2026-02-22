@@ -2032,6 +2032,17 @@ def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUs
         existing_pin = get_pos_user_by_pin(db, pin_plain)
         if existing_pin:
             raise ValueError("Ya existe un usuario con ese PIN")
+    if user_in.employee_id:
+        employee = get_hr_employee(db, user_in.employee_id)
+        if not employee:
+            raise ValueError("Empleado HR no encontrado")
+        linked = (
+            db.query(models.PosUser)
+            .filter(models.PosUser.employee_id == user_in.employee_id)
+            .first()
+        )
+        if linked:
+            raise ValueError("Ese empleado HR ya tiene un usuario vinculado")
 
     user = models.PosUser(
         name=user_in.name,
@@ -2044,10 +2055,23 @@ def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUs
         phone=user_in.phone,
         position=user_in.position,
         notes=user_in.notes,
+        employee_id=user_in.employee_id,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+    if user.employee_id:
+        employee = get_hr_employee(db, user.employee_id)
+        if employee:
+            employee.email = user.email
+            employee.phone = user.phone
+            employee.position = user.position
+            employee.notes = user.notes
+            employee.avatar_url = user.avatar_url
+            employee.birth_date = user.birth_date
+            employee.location = user.location
+            employee.bio = user.bio
+            db.commit()
     # Aquí podríamos disparar invitación / pin
     return user
 
@@ -2064,6 +2088,18 @@ def update_pos_user(
         existing = get_pos_user_by_email(db, new_email)
         if existing and existing.id != user.id:
             raise ValueError("Ya existe un usuario con ese email")
+    if "employee_id" in data and data["employee_id"] is not None:
+        employee = get_hr_employee(db, data["employee_id"])
+        if not employee:
+            raise ValueError("Empleado HR no encontrado")
+        linked = (
+            db.query(models.PosUser)
+            .filter(models.PosUser.employee_id == data["employee_id"])
+            .filter(models.PosUser.id != user.id)
+            .first()
+        )
+        if linked:
+            raise ValueError("Ese empleado HR ya tiene un usuario vinculado")
 
     new_role = data.get("role", user.role)
     new_status = data.get("status", user.status)
@@ -2094,6 +2130,18 @@ def update_pos_user(
 
     db.commit()
     db.refresh(user)
+    if user.employee_id:
+        employee = get_hr_employee(db, user.employee_id)
+        if employee:
+            employee.email = user.email
+            employee.phone = user.phone
+            employee.position = user.position
+            employee.notes = user.notes
+            employee.avatar_url = user.avatar_url
+            employee.birth_date = user.birth_date
+            employee.location = user.location
+            employee.bio = user.bio
+            db.commit()
     return user
 
 
@@ -2139,6 +2187,101 @@ def delete_user_document(
         db.query(models.PosUserDocument)
         .filter(models.PosUserDocument.user_id == user_id)
         .filter(models.PosUserDocument.id == doc_id)
+        .first()
+    )
+    if not doc:
+        return False
+    db.delete(doc)
+    db.commit()
+    return True
+
+
+def list_hr_employees(db: Session, status: str | None = None):
+    query = db.query(models.HREmployee)
+    if status:
+        query = query.filter(models.HREmployee.status == status)
+    return (
+        query.options(joinedload(models.HREmployee.system_user))
+        .order_by(models.HREmployee.created_at.desc())
+        .all()
+    )
+
+
+def get_hr_employee(db: Session, employee_id: int) -> models.HREmployee | None:
+    return (
+        db.query(models.HREmployee)
+        .options(joinedload(models.HREmployee.system_user))
+        .filter(models.HREmployee.id == employee_id)
+        .first()
+    )
+
+
+def create_hr_employee(
+    db: Session,
+    payload: schemas.HREmployeeCreate,
+) -> models.HREmployee:
+    employee = models.HREmployee(**payload.model_dump())
+    db.add(employee)
+    db.commit()
+    db.refresh(employee)
+    return employee
+
+
+def update_hr_employee(
+    db: Session,
+    employee: models.HREmployee,
+    payload: schemas.HREmployeeUpdate,
+) -> models.HREmployee:
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(employee, field, value)
+    db.commit()
+    db.refresh(employee)
+    return employee
+
+
+def list_hr_employee_documents(
+    db: Session,
+    employee_id: int,
+) -> list[models.HREmployeeDocument]:
+    return (
+        db.query(models.HREmployeeDocument)
+        .filter(models.HREmployeeDocument.employee_id == employee_id)
+        .order_by(models.HREmployeeDocument.created_at.desc())
+        .all()
+    )
+
+
+def create_hr_employee_document(
+    db: Session,
+    employee_id: int,
+    file_name: str,
+    file_url: str,
+    file_size: int,
+    note: str | None,
+) -> models.HREmployeeDocument:
+    doc = models.HREmployeeDocument(
+        employee_id=employee_id,
+        file_name=file_name,
+        file_url=file_url,
+        file_size=file_size,
+        note=note,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def delete_hr_employee_document(
+    db: Session,
+    employee_id: int,
+    doc_id: int,
+) -> bool:
+    doc = (
+        db.query(models.HREmployeeDocument)
+        .filter(models.HREmployeeDocument.id == doc_id)
+        .filter(models.HREmployeeDocument.employee_id == employee_id)
         .first()
     )
     if not doc:

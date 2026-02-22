@@ -71,6 +71,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
+                _ensure_table_hr_employees_postgres(connection)
+                _ensure_table_hr_employee_documents_postgres(connection)
                 _ensure_table_sale_number_reservations_postgres(connection)
                 _ensure_table_pos_station_notices_postgres(connection)
                 _ensure_column_postgres(
@@ -129,8 +131,20 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "pos_users", "birth_date", "DATE")
                 _ensure_column_postgres(connection, "pos_users", "location", "TEXT")
                 _ensure_column_postgres(connection, "pos_users", "bio", "TEXT")
+                _ensure_column_postgres(connection, "pos_users", "employee_id", "INTEGER")
                 _ensure_column_postgres(connection, "pos_users", "invited_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "pos_users", "accepted_at", "TIMESTAMP")
+                _backfill_hr_employees_from_users(connection, backend="postgresql")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_frequency", "TEXT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_amount", "FLOAT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_currency", "TEXT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_payment_method", "TEXT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_day_of_week", "TEXT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_day_of_month", "INTEGER")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_last_paid_at", "DATE")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_next_due_at", "DATE")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_reference", "TEXT")
+                _ensure_column_postgres(connection, "hr_employees", "payroll_notes", "TEXT")
                 _ensure_column_postgres(
                     connection,
                     "pos_stations",
@@ -427,6 +441,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
                 _ensure_table_user_documents(connection)
+                _ensure_table_hr_employees(connection)
+                _ensure_table_hr_employee_documents(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_table_document_adjustments(connection)
@@ -526,8 +542,20 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "pos_users", "birth_date", "DATE")
                 _ensure_column(connection, "pos_users", "location", "TEXT")
                 _ensure_column(connection, "pos_users", "bio", "TEXT")
+                _ensure_column(connection, "pos_users", "employee_id", "INTEGER")
                 _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
                 _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
+                _backfill_hr_employees_from_users(connection, backend="sqlite")
+                _ensure_column(connection, "hr_employees", "payroll_frequency", "TEXT")
+                _ensure_column(connection, "hr_employees", "payroll_amount", "FLOAT")
+                _ensure_column(connection, "hr_employees", "payroll_currency", "TEXT")
+                _ensure_column(connection, "hr_employees", "payroll_payment_method", "TEXT")
+                _ensure_column(connection, "hr_employees", "payroll_day_of_week", "TEXT")
+                _ensure_column(connection, "hr_employees", "payroll_day_of_month", "INTEGER")
+                _ensure_column(connection, "hr_employees", "payroll_last_paid_at", "DATE")
+                _ensure_column(connection, "hr_employees", "payroll_next_due_at", "DATE")
+                _ensure_column(connection, "hr_employees", "payroll_reference", "TEXT")
+                _ensure_column(connection, "hr_employees", "payroll_notes", "TEXT")
                 if _table_exists(connection, "pos_closures"):
                     _ensure_column(
                         connection,
@@ -1140,6 +1168,163 @@ def _ensure_table_user_documents(connection) -> None:
         _ensure_column(connection, "pos_user_documents", "file_size", "INTEGER")
         _ensure_column(connection, "pos_user_documents", "note", "TEXT")
         _ensure_column(connection, "pos_user_documents", "created_at", "DATETIME")
+
+
+def _ensure_table_hr_employees(connection) -> None:
+    if not _table_exists(connection, "hr_employees"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE hr_employees (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT,
+                    status TEXT NOT NULL DEFAULT 'Activo',
+                    phone TEXT,
+                    position TEXT,
+                    notes TEXT,
+                    avatar_url TEXT,
+                    birth_date DATE,
+                    location TEXT,
+                    bio TEXT,
+                    payroll_frequency TEXT,
+                    payroll_amount FLOAT,
+                    payroll_currency TEXT,
+                    payroll_payment_method TEXT,
+                    payroll_day_of_week TEXT,
+                    payroll_day_of_month INTEGER,
+                    payroll_last_paid_at DATE,
+                    payroll_next_due_at DATE,
+                    payroll_reference TEXT,
+                    payroll_notes TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS hr_employees_name_idx ON hr_employees(name)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS hr_employees_email_idx ON hr_employees(email)"
+            )
+        )
+    else:
+        _ensure_column(connection, "hr_employees", "name", "TEXT")
+        _ensure_column(connection, "hr_employees", "email", "TEXT")
+        _ensure_column(connection, "hr_employees", "status", "TEXT DEFAULT 'Activo'")
+        _ensure_column(connection, "hr_employees", "phone", "TEXT")
+        _ensure_column(connection, "hr_employees", "position", "TEXT")
+        _ensure_column(connection, "hr_employees", "notes", "TEXT")
+        _ensure_column(connection, "hr_employees", "avatar_url", "TEXT")
+        _ensure_column(connection, "hr_employees", "birth_date", "DATE")
+        _ensure_column(connection, "hr_employees", "location", "TEXT")
+        _ensure_column(connection, "hr_employees", "bio", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_frequency", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_amount", "FLOAT")
+        _ensure_column(connection, "hr_employees", "payroll_currency", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_payment_method", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_day_of_week", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_day_of_month", "INTEGER")
+        _ensure_column(connection, "hr_employees", "payroll_last_paid_at", "DATE")
+        _ensure_column(connection, "hr_employees", "payroll_next_due_at", "DATE")
+        _ensure_column(connection, "hr_employees", "payroll_reference", "TEXT")
+        _ensure_column(connection, "hr_employees", "payroll_notes", "TEXT")
+        _ensure_column(connection, "hr_employees", "created_at", "DATETIME")
+        _ensure_column(connection, "hr_employees", "updated_at", "DATETIME")
+
+
+def _ensure_table_hr_employee_documents(connection) -> None:
+    if not _table_exists(connection, "hr_employee_documents"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE hr_employee_documents (
+                    id INTEGER PRIMARY KEY,
+                    employee_id INTEGER NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_url TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    note TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(employee_id) REFERENCES hr_employees(id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS hr_employee_documents_employee_idx
+                ON hr_employee_documents(employee_id)
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "hr_employee_documents", "employee_id", "INTEGER")
+        _ensure_column(connection, "hr_employee_documents", "file_name", "TEXT")
+        _ensure_column(connection, "hr_employee_documents", "file_url", "TEXT")
+        _ensure_column(connection, "hr_employee_documents", "file_size", "INTEGER")
+        _ensure_column(connection, "hr_employee_documents", "note", "TEXT")
+        _ensure_column(connection, "hr_employee_documents", "created_at", "DATETIME")
+
+
+def _backfill_hr_employees_from_users(connection, backend: str) -> None:
+    rows = connection.execute(
+        text(
+            """
+            SELECT id, name, email, status, phone, position, notes, avatar_url, birth_date, location, bio, created_at
+            FROM pos_users
+            WHERE employee_id IS NULL
+            """
+        )
+    ).mappings().all()
+    for row in rows:
+        connection.execute(
+            text(
+                """
+                INSERT INTO hr_employees (
+                    id, name, email, status, phone, position, notes, avatar_url, birth_date, location, bio, created_at, updated_at
+                )
+                SELECT :id, :name, :email, :status, :phone, :position, :notes, :avatar_url, :birth_date, :location, :bio, :created_at, CURRENT_TIMESTAMP
+                WHERE NOT EXISTS (SELECT 1 FROM hr_employees WHERE id = :id)
+                """
+            ),
+            {
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "email": row.get("email"),
+                "status": row.get("status") or "Activo",
+                "phone": row.get("phone"),
+                "position": row.get("position"),
+                "notes": row.get("notes"),
+                "avatar_url": row.get("avatar_url"),
+                "birth_date": row.get("birth_date"),
+                "location": row.get("location"),
+                "bio": row.get("bio"),
+                "created_at": row.get("created_at"),
+            },
+        )
+        connection.execute(
+            text("UPDATE pos_users SET employee_id = :id WHERE id = :id"),
+            {"id": row.get("id")},
+        )
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence('hr_employees', 'id'),
+                    COALESCE((SELECT MAX(id) FROM hr_employees), 1),
+                    true
+                )
+                """
+            )
+        )
 
 
 def _ensure_table_payment_methods(connection) -> None:
@@ -1822,6 +2007,76 @@ def _ensure_table_user_documents_postgres(connection) -> None:
                 note TEXT,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
+            """
+        )
+    )
+
+
+def _ensure_table_hr_employees_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS hr_employees (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT,
+                status TEXT NOT NULL DEFAULT 'Activo',
+                phone TEXT,
+                position TEXT,
+                notes TEXT,
+                avatar_url TEXT,
+                birth_date DATE,
+                location TEXT,
+                bio TEXT,
+                payroll_frequency TEXT,
+                payroll_amount FLOAT,
+                payroll_currency TEXT,
+                payroll_payment_method TEXT,
+                payroll_day_of_week TEXT,
+                payroll_day_of_month INTEGER,
+                payroll_last_paid_at DATE,
+                payroll_next_due_at DATE,
+                payroll_reference TEXT,
+                payroll_notes TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS hr_employees_name_idx ON hr_employees(name)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS hr_employees_email_idx ON hr_employees(email)"
+        )
+    )
+
+
+def _ensure_table_hr_employee_documents_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS hr_employee_documents (
+                id SERIAL PRIMARY KEY,
+                employee_id INTEGER NOT NULL REFERENCES hr_employees(id),
+                file_name TEXT NOT NULL,
+                file_url TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                note TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS hr_employee_documents_employee_idx
+            ON hr_employee_documents (employee_id)
             """
         )
     )
