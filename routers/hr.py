@@ -188,6 +188,47 @@ def delete_system_user_for_employee(
     return Response(status_code=204)
 
 
+@router.post("/employees/{employee_id}/avatar", response_model=schemas.UploadAvatarResponse)
+async def upload_hr_employee_avatar(
+    employee_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("hr.manage")),
+):
+    employee = crud.get_hr_employee(db, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    try:
+        result = await storage.save_user_avatar(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(500, detail=f"No se pudo guardar la imagen: {exc}") from exc
+
+    employee.avatar_url = result.url
+    if employee.system_user:
+        employee.system_user.avatar_url = result.url
+    db.commit()
+    return schemas.UploadAvatarResponse(url=result.url)
+
+
+@router.delete("/employees/{employee_id}/avatar", response_model=schemas.HREmployeeRead)
+def clear_hr_employee_avatar(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("hr.manage")),
+):
+    employee = crud.get_hr_employee(db, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    employee.avatar_url = None
+    if employee.system_user:
+        employee.system_user.avatar_url = None
+    db.commit()
+    db.refresh(employee)
+    return employee
+
+
 @router.get(
     "/employees/{employee_id}/documents",
     response_model=List[schemas.HREmployeeDocumentRead],

@@ -1010,6 +1010,19 @@ def update_profile(
 
     db.commit()
     db.refresh(current_user)
+    if current_user.employee_id:
+        employee = crud.get_hr_employee(db, current_user.employee_id)
+        if employee:
+            employee.name = current_user.name
+            employee.email = current_user.email
+            employee.phone = current_user.phone
+            employee.position = current_user.position
+            employee.notes = current_user.notes
+            employee.avatar_url = current_user.avatar_url
+            employee.birth_date = current_user.birth_date
+            employee.location = current_user.location
+            employee.bio = current_user.bio
+            db.commit()
     return schemas.PosUserProfileRead.model_validate(current_user)
 
 
@@ -1029,6 +1042,11 @@ async def upload_profile_avatar(
     current_user.avatar_url = result.url
     db.commit()
     db.refresh(current_user)
+    if current_user.employee_id:
+        employee = crud.get_hr_employee(db, current_user.employee_id)
+        if employee:
+            employee.avatar_url = current_user.avatar_url
+            db.commit()
     return schemas.UploadAvatarResponse(url=result.url)
 
 
