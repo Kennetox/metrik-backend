@@ -21,6 +21,7 @@ from routers import (
     separated_orders as separated_orders_router,
     inventory as inventory_router,
     hr as hr_router,
+    schedule as schedule_router,
 )
 
 app = FastAPI(
@@ -28,6 +29,9 @@ app = FastAPI(
     version="0.1.0",
     description="Backend inicial del sistema Kensar 2.0"
 )
+
+# Kill switch del modulo de horarios (queda completamente apagado).
+ENABLE_SCHEDULE_MODULE = False
 
 
 @app.get("/health")
@@ -99,3 +103,5 @@ app.include_router(dashboard_router.router)
 app.include_router(auth_router.router)
 app.include_router(inventory_router.router)
 app.include_router(hr_router.router)
+if ENABLE_SCHEDULE_MODULE:
+    app.include_router(schedule_router.router)
