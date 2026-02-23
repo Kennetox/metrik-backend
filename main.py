@@ -21,7 +21,6 @@ from routers import (
     separated_orders as separated_orders_router,
     inventory as inventory_router,
     hr as hr_router,
-    schedule as schedule_router,
 )
 
 app = FastAPI(
@@ -104,4 +103,6 @@ app.include_router(auth_router.router)
 app.include_router(inventory_router.router)
 app.include_router(hr_router.router)
 if ENABLE_SCHEDULE_MODULE:
+    from routers import schedule as schedule_router
+
     app.include_router(schedule_router.router)
