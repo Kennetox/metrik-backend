@@ -328,6 +328,15 @@ def get_product_audit_log(
         raise HTTPException(status_code=404, detail="Product not found")
     return crud.list_product_audit_logs(db, product_id=product_id, limit=limit)
 
+
+@router.get("/audit/recent", response_model=List[schemas.ProductAuditLogRead])
+def get_recent_product_audit_logs(
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("products.view")),
+):
+    return crud.list_recent_product_audit_logs(db, limit=limit)
+
 @router.get("/export/csv")
 def export_products_csv(db: Session = Depends(get_db)):
     products = crud.get_products(db, skip=0, limit=100000)

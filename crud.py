@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import hashlib
 import logging
 import re
@@ -278,6 +278,20 @@ def list_product_audit_logs(
     return (
         db.query(models.ProductAuditLog)
         .filter(models.ProductAuditLog.product_id == product_id)
+        .order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+
+def list_recent_product_audit_logs(
+    db: Session,
+    *,
+    limit: int = 10,
+) -> List[models.ProductAuditLog]:
+    safe_limit = min(max(limit, 1), 200)
+    return (
+        db.query(models.ProductAuditLog)
         .order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc())
         .limit(safe_limit)
         .all()
@@ -2378,6 +2392,343 @@ def delete_hr_employee_document(
     db.delete(doc)
     db.commit()
     return True
+
+
+# ===================== HR SCHEDULE =====================
+
+
+def _start_of_week(value: date) -> date:
+    return value - timedelta(days=value.weekday())
+
+
+def _parse_minutes(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        hours, minutes = value.split(":")
+        return int(hours) * 60 + int(minutes)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _calculate_schedule_shift_hours(shift: models.ScheduleShift) -> float:
+    if shift.is_time_off:
+        return 0.0
+    start_minutes = _parse_minutes(shift.start_time)
+    end_minutes = _parse_minutes(shift.end_time)
+    if start_minutes <= 0 and end_minutes <= 0:
+        return 0.0
+    total = max(0, end_minutes - start_minutes - int(shift.break_minutes or 0))
+    return round(total / 60.0, 2)
+
+
+def schedule_shift_total_hours(shift: models.ScheduleShift) -> float:
+    return _calculate_schedule_shift_hours(shift)
+
+
+def _validate_schedule_shift_fields(
+    start_time: str | None,
+    end_time: str | None,
+    break_minutes: int,
+    is_time_off: bool,
+) -> None:
+    if break_minutes < 0:
+        raise ValueError("El descanso no puede ser negativo")
+    if is_time_off:
+        return
+    if not start_time or not end_time:
+        raise ValueError("Debes indicar hora de inicio y fin")
+    start_minutes = _parse_minutes(start_time)
+    end_minutes = _parse_minutes(end_time)
+    if end_minutes <= start_minutes:
+        raise ValueError("La hora fin debe ser mayor a la hora inicio")
+    if break_minutes >= (end_minutes - start_minutes):
+        raise ValueError("El descanso no puede ser mayor o igual a la duración del turno")
+
+
+def get_schedule_week_by_start(
+    db: Session,
+    week_start: date,
+) -> models.ScheduleWeek | None:
+    normalized_start = _start_of_week(week_start)
+    return (
+        db.query(models.ScheduleWeek)
+        .filter(models.ScheduleWeek.week_start == normalized_start)
+        .first()
+    )
+
+
+def get_schedule_week(
+    db: Session,
+    week_id: int,
+) -> models.ScheduleWeek | None:
+    return (
+        db.query(models.ScheduleWeek)
+        .filter(models.ScheduleWeek.id == week_id)
+        .first()
+    )
+
+
+def get_or_create_schedule_week(
+    db: Session,
+    week_start: date,
+    notes: str | None = None,
+) -> models.ScheduleWeek:
+    normalized_start = _start_of_week(week_start)
+    week = get_schedule_week_by_start(db, normalized_start)
+    if week:
+        if notes is not None:
+            week.notes = notes
+            db.commit()
+            db.refresh(week)
+        return week
+
+    week = models.ScheduleWeek(
+        week_start=normalized_start,
+        status="draft",
+        notes=notes,
+    )
+    db.add(week)
+    db.commit()
+    db.refresh(week)
+    return week
+
+
+def publish_schedule_week(
+    db: Session,
+    week: models.ScheduleWeek,
+    published_by_user_id: int | None = None,
+    notes: str | None = None,
+) -> models.ScheduleWeek:
+    week.status = "published"
+    week.published_at = datetime.utcnow()
+    week.published_by_user_id = published_by_user_id
+    if notes is not None:
+        week.notes = notes
+    db.commit()
+    db.refresh(week)
+    return week
+
+
+def list_schedule_templates(
+    db: Session,
+    include_inactive: bool = True,
+) -> List[models.ScheduleTemplate]:
+    query = db.query(models.ScheduleTemplate)
+    if not include_inactive:
+        query = query.filter(models.ScheduleTemplate.is_active.is_(True))
+    return (
+        query.order_by(
+            models.ScheduleTemplate.order_index.asc(),
+            models.ScheduleTemplate.id.asc(),
+        )
+        .all()
+    )
+
+
+def get_schedule_template(
+    db: Session,
+    template_id: int,
+) -> models.ScheduleTemplate | None:
+    return (
+        db.query(models.ScheduleTemplate)
+        .filter(models.ScheduleTemplate.id == template_id)
+        .first()
+    )
+
+
+def create_schedule_template(
+    db: Session,
+    payload: schemas.ScheduleTemplateCreate,
+) -> models.ScheduleTemplate:
+    template = models.ScheduleTemplate(**payload.model_dump())
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+    return template
+
+
+def update_schedule_template(
+    db: Session,
+    template: models.ScheduleTemplate,
+    payload: schemas.ScheduleTemplateUpdate,
+) -> models.ScheduleTemplate:
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(template, field, value)
+    db.commit()
+    db.refresh(template)
+    return template
+
+
+def list_schedule_shifts_for_week(
+    db: Session,
+    week_id: int,
+) -> List[models.ScheduleShift]:
+    return (
+        db.query(models.ScheduleShift)
+        .options(selectinload(models.ScheduleShift.employee))
+        .filter(models.ScheduleShift.week_id == week_id)
+        .order_by(
+            models.ScheduleShift.shift_date.asc(),
+            models.ScheduleShift.employee_id.asc(),
+        )
+        .all()
+    )
+
+
+def upsert_schedule_shift(
+    db: Session,
+    payload: schemas.ScheduleShiftUpsertRequest,
+) -> models.ScheduleShift:
+    week: models.ScheduleWeek | None = None
+    if payload.week_id is not None:
+        week = get_schedule_week(db, payload.week_id)
+        if not week:
+            raise ValueError("Semana no encontrada")
+    else:
+        if payload.week_start is None:
+            raise ValueError("Debes indicar week_id o week_start")
+        week = get_or_create_schedule_week(db, payload.week_start)
+
+    employee = get_hr_employee(db, payload.employee_id)
+    if not employee:
+        raise ValueError("Empleado no encontrado")
+
+    normalized_shift_date = payload.shift_date
+    if _start_of_week(normalized_shift_date) != week.week_start:
+        raise ValueError("La fecha del turno debe pertenecer a la semana seleccionada")
+
+    _validate_schedule_shift_fields(
+        payload.start_time,
+        payload.end_time,
+        payload.break_minutes,
+        payload.is_time_off,
+    )
+
+    shift = (
+        db.query(models.ScheduleShift)
+        .filter(models.ScheduleShift.week_id == week.id)
+        .filter(models.ScheduleShift.employee_id == payload.employee_id)
+        .filter(models.ScheduleShift.shift_date == normalized_shift_date)
+        .first()
+    )
+    data = payload.model_dump(
+        exclude={"week_id", "week_start"},
+        exclude_unset=True,
+    )
+    if shift:
+        for field, value in data.items():
+            setattr(shift, field, value)
+    else:
+        shift = models.ScheduleShift(
+            week_id=week.id,
+            **data,
+        )
+        db.add(shift)
+    db.commit()
+    db.refresh(shift)
+    return shift
+
+
+def get_schedule_shift(
+    db: Session,
+    shift_id: int,
+) -> models.ScheduleShift | None:
+    return (
+        db.query(models.ScheduleShift)
+        .options(selectinload(models.ScheduleShift.employee))
+        .filter(models.ScheduleShift.id == shift_id)
+        .first()
+    )
+
+
+def update_schedule_shift(
+    db: Session,
+    shift: models.ScheduleShift,
+    payload: schemas.ScheduleShiftUpdate,
+) -> models.ScheduleShift:
+    data = payload.model_dump(exclude_unset=True)
+    start_time = data.get("start_time", shift.start_time)
+    end_time = data.get("end_time", shift.end_time)
+    break_minutes = data.get("break_minutes", shift.break_minutes or 0)
+    is_time_off = data.get("is_time_off", shift.is_time_off)
+    _validate_schedule_shift_fields(start_time, end_time, break_minutes, is_time_off)
+
+    for field, value in data.items():
+        setattr(shift, field, value)
+    db.commit()
+    db.refresh(shift)
+    return shift
+
+
+def delete_schedule_shift(
+    db: Session,
+    shift: models.ScheduleShift,
+) -> None:
+    db.delete(shift)
+    db.commit()
+
+
+def get_schedule_week_view(
+    db: Session,
+    week_start: date,
+) -> schemas.ScheduleWeekView:
+    week = get_or_create_schedule_week(db, week_start)
+    shifts = list_schedule_shifts_for_week(db, week.id)
+    employees = list_hr_employees(db)
+
+    week_days = [week.week_start + timedelta(days=offset) for offset in range(7)]
+    day_totals_map: Dict[date, float] = {day: 0.0 for day in week_days}
+    shift_payload: List[schemas.ScheduleShiftRead] = []
+    for shift in shifts:
+        total_hours = _calculate_schedule_shift_hours(shift)
+        day_totals_map[shift.shift_date] = round(
+            day_totals_map.get(shift.shift_date, 0.0) + total_hours,
+            2,
+        )
+        shift_payload.append(
+            schemas.ScheduleShiftRead(
+                id=shift.id,
+                week_id=shift.week_id,
+                employee_id=shift.employee_id,
+                shift_date=shift.shift_date,
+                start_time=shift.start_time,
+                end_time=shift.end_time,
+                break_minutes=shift.break_minutes or 0,
+                position=shift.position,
+                color=shift.color,
+                note=shift.note,
+                is_time_off=bool(shift.is_time_off),
+                source_template_id=shift.source_template_id,
+                created_at=shift.created_at,
+                updated_at=shift.updated_at,
+                total_hours=total_hours,
+            )
+        )
+
+    week_total_hours = round(sum(day_totals_map.values()), 2)
+    day_totals = [
+        schemas.ScheduleDayTotal(shift_date=day, total_hours=day_totals_map.get(day, 0.0))
+        for day in week_days
+    ]
+    employee_rows = [
+        schemas.ScheduleEmployeeRow(
+            id=employee.id,
+            name=employee.name,
+            status="Activo" if employee.status == "Activo" else "Inactivo",
+            position=employee.position,
+            avatar_url=employee.avatar_url,
+        )
+        for employee in sorted(employees, key=lambda row: (row.status != "Activo", row.name.lower()))
+    ]
+    return schemas.ScheduleWeekView(
+        week=schemas.ScheduleWeekRead.model_validate(week),
+        employees=employee_rows,
+        shifts=shift_payload,
+        day_totals=day_totals,
+        week_total_hours=week_total_hours,
+    )
 
 
 # ===================== POS STATIONS =====================

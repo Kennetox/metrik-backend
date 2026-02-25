@@ -73,6 +73,9 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_user_documents_postgres(connection)
                 _ensure_table_hr_employees_postgres(connection)
                 _ensure_table_hr_employee_documents_postgres(connection)
+                _ensure_table_schedule_templates_postgres(connection)
+                _ensure_table_schedule_weeks_postgres(connection)
+                _ensure_table_schedule_shifts_postgres(connection)
                 _ensure_table_sale_number_reservations_postgres(connection)
                 _ensure_table_pos_station_notices_postgres(connection)
                 _ensure_column_postgres(
@@ -443,6 +446,9 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_user_documents(connection)
                 _ensure_table_hr_employees(connection)
                 _ensure_table_hr_employee_documents(connection)
+                _ensure_table_schedule_templates(connection)
+                _ensure_table_schedule_weeks(connection)
+                _ensure_table_schedule_shifts(connection)
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_table_document_adjustments(connection)
@@ -1273,6 +1279,168 @@ def _ensure_table_hr_employee_documents(connection) -> None:
         _ensure_column(connection, "hr_employee_documents", "created_at", "DATETIME")
 
 
+def _ensure_table_schedule_templates(connection) -> None:
+    if not _table_exists(connection, "schedule_templates"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE schedule_templates (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    break_minutes INTEGER NOT NULL DEFAULT 0,
+                    color TEXT,
+                    position TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    order_index INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "schedule_templates", "name", "TEXT")
+        _ensure_column(connection, "schedule_templates", "start_time", "TEXT")
+        _ensure_column(connection, "schedule_templates", "end_time", "TEXT")
+        _ensure_column(
+            connection,
+            "schedule_templates",
+            "break_minutes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "schedule_templates", "color", "TEXT")
+        _ensure_column(connection, "schedule_templates", "position", "TEXT")
+        _ensure_column(
+            connection,
+            "schedule_templates",
+            "is_active",
+            "BOOLEAN NOT NULL DEFAULT 1",
+        )
+        _ensure_column(
+            connection,
+            "schedule_templates",
+            "order_index",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "schedule_templates", "created_at", "DATETIME")
+        _ensure_column(connection, "schedule_templates", "updated_at", "DATETIME")
+
+
+def _ensure_table_schedule_weeks(connection) -> None:
+    if not _table_exists(connection, "schedule_weeks"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE schedule_weeks (
+                    id INTEGER PRIMARY KEY,
+                    week_start DATE NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    notes TEXT,
+                    published_at DATETIME,
+                    published_by_user_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(published_by_user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS schedule_weeks_week_start_idx ON schedule_weeks(week_start)"
+            )
+        )
+    else:
+        _ensure_column(connection, "schedule_weeks", "week_start", "DATE")
+        _ensure_column(connection, "schedule_weeks", "status", "TEXT DEFAULT 'draft'")
+        _ensure_column(connection, "schedule_weeks", "notes", "TEXT")
+        _ensure_column(connection, "schedule_weeks", "published_at", "DATETIME")
+        _ensure_column(connection, "schedule_weeks", "published_by_user_id", "INTEGER")
+        _ensure_column(connection, "schedule_weeks", "created_at", "DATETIME")
+        _ensure_column(connection, "schedule_weeks", "updated_at", "DATETIME")
+
+
+def _ensure_table_schedule_shifts(connection) -> None:
+    if not _table_exists(connection, "schedule_shifts"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE schedule_shifts (
+                    id INTEGER PRIMARY KEY,
+                    week_id INTEGER NOT NULL,
+                    employee_id INTEGER NOT NULL,
+                    shift_date DATE NOT NULL,
+                    start_time TEXT,
+                    end_time TEXT,
+                    break_minutes INTEGER NOT NULL DEFAULT 0,
+                    position TEXT,
+                    color TEXT,
+                    note TEXT,
+                    is_time_off BOOLEAN NOT NULL DEFAULT 0,
+                    source_template_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(week_id) REFERENCES schedule_weeks(id),
+                    FOREIGN KEY(employee_id) REFERENCES hr_employees(id),
+                    FOREIGN KEY(source_template_id) REFERENCES schedule_templates(id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS schedule_shifts_cell_idx
+                ON schedule_shifts(week_id, employee_id, shift_date)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS schedule_shifts_week_idx ON schedule_shifts(week_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS schedule_shifts_employee_idx ON schedule_shifts(employee_id)"
+            )
+        )
+    else:
+        _ensure_column(connection, "schedule_shifts", "week_id", "INTEGER")
+        _ensure_column(connection, "schedule_shifts", "employee_id", "INTEGER")
+        _ensure_column(connection, "schedule_shifts", "shift_date", "DATE")
+        _ensure_column(connection, "schedule_shifts", "start_time", "TEXT")
+        _ensure_column(connection, "schedule_shifts", "end_time", "TEXT")
+        _ensure_column(
+            connection,
+            "schedule_shifts",
+            "break_minutes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "schedule_shifts", "position", "TEXT")
+        _ensure_column(connection, "schedule_shifts", "color", "TEXT")
+        _ensure_column(connection, "schedule_shifts", "note", "TEXT")
+        _ensure_column(
+            connection,
+            "schedule_shifts",
+            "is_time_off",
+            "BOOLEAN NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "schedule_shifts", "source_template_id", "INTEGER")
+        _ensure_column(connection, "schedule_shifts", "created_at", "DATETIME")
+        _ensure_column(connection, "schedule_shifts", "updated_at", "DATETIME")
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS schedule_shifts_cell_idx
+                ON schedule_shifts(week_id, employee_id, shift_date)
+                """
+            )
+        )
+
+
 def _backfill_hr_employees_from_users(connection, backend: str) -> None:
     rows = connection.execute(
         text(
@@ -1924,6 +2092,17 @@ def _ensure_table_product_audit_logs_postgres(connection) -> None:
             """
         )
     )
+    # El historial de productos debe sobrevivir aunque el producto sea eliminado.
+    # Si existe una FK antigua hacia products.id, la retiramos para evitar bloqueos
+    # al eliminar productos con auditoría.
+    connection.execute(
+        text(
+            """
+            ALTER TABLE product_audit_logs
+            DROP CONSTRAINT IF EXISTS product_audit_logs_product_id_fkey
+            """
+        )
+    )
 
 
 def _ensure_table_sale_number_reservations_postgres(connection) -> None:
@@ -2078,6 +2257,95 @@ def _ensure_table_hr_employee_documents_postgres(connection) -> None:
             CREATE INDEX IF NOT EXISTS hr_employee_documents_employee_idx
             ON hr_employee_documents (employee_id)
             """
+        )
+    )
+
+
+def _ensure_table_schedule_templates_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_templates (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                break_minutes INTEGER NOT NULL DEFAULT 0,
+                color TEXT,
+                position TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                order_index INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_schedule_weeks_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_weeks (
+                id SERIAL PRIMARY KEY,
+                week_start DATE NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'draft',
+                notes TEXT,
+                published_at TIMESTAMP,
+                published_by_user_id INTEGER REFERENCES pos_users(id),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS schedule_weeks_week_start_idx ON schedule_weeks(week_start)"
+        )
+    )
+
+
+def _ensure_table_schedule_shifts_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_shifts (
+                id SERIAL PRIMARY KEY,
+                week_id INTEGER NOT NULL REFERENCES schedule_weeks(id) ON DELETE CASCADE,
+                employee_id INTEGER NOT NULL REFERENCES hr_employees(id) ON DELETE CASCADE,
+                shift_date DATE NOT NULL,
+                start_time TEXT,
+                end_time TEXT,
+                break_minutes INTEGER NOT NULL DEFAULT 0,
+                position TEXT,
+                color TEXT,
+                note TEXT,
+                is_time_off BOOLEAN NOT NULL DEFAULT FALSE,
+                source_template_id INTEGER REFERENCES schedule_templates(id),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS schedule_shifts_cell_idx
+            ON schedule_shifts(week_id, employee_id, shift_date)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS schedule_shifts_week_idx ON schedule_shifts(week_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS schedule_shifts_employee_idx ON schedule_shifts(employee_id)"
         )
     )
 
