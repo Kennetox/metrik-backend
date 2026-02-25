@@ -1264,21 +1264,40 @@ def get_sale_return(db: Session, return_id: int) -> Optional[models.SaleReturn]:
     )
 
 
-def list_returns(db: Session, skip: int = 0, limit: int = 100):
+def list_returns(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+):
+    query = db.query(models.SaleReturn).options(joinedload(models.SaleReturn.sale))
+    if date_from is not None:
+        query = query.filter(models.SaleReturn.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.SaleReturn.created_at < date_to)
     return (
-        db.query(models.SaleReturn)
-        .options(joinedload(models.SaleReturn.sale))
-        .order_by(models.SaleReturn.created_at.desc())
+        query.order_by(models.SaleReturn.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
 
 
-def list_changes(db: Session, skip: int = 0, limit: int = 100):
+def list_changes(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+):
+    query = db.query(models.SaleChange)
+    if date_from is not None:
+        query = query.filter(models.SaleChange.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.SaleChange.created_at < date_to)
     return (
-        db.query(models.SaleChange)
-        .order_by(models.SaleChange.created_at.desc())
+        query.order_by(models.SaleChange.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()

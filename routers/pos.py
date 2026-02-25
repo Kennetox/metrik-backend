@@ -834,10 +834,18 @@ def email_sale_ticket(
 def list_returns(
     skip: int = 0,
     limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
     _: models.PosUser = Depends(require_permission("pos.returns")),
 ):
-    returns = crud.list_returns(db, skip=skip, limit=limit)
+    returns = crud.list_returns(
+        db,
+        skip=skip,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+    )
     return returns
 
 
@@ -845,10 +853,18 @@ def list_returns(
 def list_changes(
     skip: int = 0,
     limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
     _: models.PosUser = Depends(require_permission("pos.returns")),
 ):
-    changes = crud.list_changes(db, skip=skip, limit=limit)
+    changes = crud.list_changes(
+        db,
+        skip=skip,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+    )
     return changes
 
 
