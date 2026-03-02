@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List
 import math
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 
@@ -18,6 +20,8 @@ router = APIRouter(
     prefix="/receiving",
     tags=["receiving"],
 )
+
+SOP_FILE_PATH = Path(__file__).resolve().parents[1] / "docs" / "sop-recepcion-tablet-v1.md"
 
 
 def _normalize_optional_text(value: str | None) -> str | None:
@@ -62,6 +66,22 @@ def _validate_invoice_requirements(
             status_code=422,
             detail="Para compras con factura, la referencia/número de factura es obligatoria.",
         )
+
+
+@router.get("/sop/download")
+def download_receiving_sop():
+    if not SOP_FILE_PATH.exists():
+        raise HTTPException(status_code=404, detail="SOP no disponible.")
+
+    content = SOP_FILE_PATH.read_text(encoding="utf-8")
+    headers = {
+        "Content-Disposition": 'attachment; filename="sop-recepcion-tablet-v1.md"',
+    }
+    return PlainTextResponse(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers=headers,
+    )
 
 
 @router.post("/lots", response_model=schemas.ReceivingLotRead, status_code=201)
