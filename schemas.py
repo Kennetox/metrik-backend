@@ -1551,6 +1551,15 @@ class AuthPosStationLoginResponse(BaseModel):
     station_email: EmailStr
 
 
+class AuthTabletEmailCheckRequest(BaseModel):
+    email: EmailStr
+
+
+class AuthTabletEmailCheckResponse(BaseModel):
+    exists: bool
+    user: Optional[PosUserRead] = None
+
+
 class RolePermissionAction(BaseModel):
     id: str
     label: str

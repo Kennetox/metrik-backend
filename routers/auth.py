@@ -211,6 +211,14 @@ def tablet_login(
             status_code=401, detail="PIN inválido o usuario inactivo"
         )
 
+    if payload.email:
+        if not user.email or user.email.lower() != payload.email.lower():
+            if station:
+                crud.register_pos_station_login_failure(db, station)
+            raise HTTPException(
+                status_code=401, detail="El PIN no corresponde al correo validado."
+            )
+
     if station and payload.device_id:
         if station.bound_device_id and station.bound_device_id != payload.device_id:
             raise HTTPException(
@@ -246,6 +254,24 @@ def tablet_login(
 
     user_read = schemas.PosUserRead.model_validate(user)
     return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
+
+
+@router.post(
+    "/tablet-email-check",
+    response_model=schemas.AuthTabletEmailCheckResponse,
+)
+def tablet_email_check(
+    payload: schemas.AuthTabletEmailCheckRequest,
+    db: Session = Depends(get_db),
+):
+    user = crud.get_pos_user_by_email(db, payload.email)
+    if not user or not user.is_active or user.status != "Activo":
+        raise HTTPException(status_code=404, detail="Correo no encontrado o inactivo")
+
+    return schemas.AuthTabletEmailCheckResponse(
+        exists=True,
+        user=schemas.PosUserRead.model_validate(user),
+    )
 
 
 @router.post(
