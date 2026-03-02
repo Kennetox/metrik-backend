@@ -10,7 +10,7 @@ import string
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import String, cast, func, or_
+from sqlalchemy import String, cast, func, or_, text
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
@@ -78,6 +78,346 @@ def _build_proportional_payments(
     # Si algun renglón quedó en 0 por redondeo, lo excluimos.
     filtered = [(method, amount) for method, amount in distributed if amount > 0]
     return filtered if filtered else [(normalized[0][0], total_amount)]
+
+
+def create_receiving_lot(
+    db: Session,
+    payload: schemas.ReceivingLotCreate,
+    created_by_user_id: int | None = None,
+) -> models.ReceivingLot:
+    source_reference = _clean_field(payload.source_reference)
+    supplier_name = _clean_field(payload.supplier_name)
+    invoice_reference = _clean_field(payload.invoice_reference)
+    if payload.purchase_type == "invoice" and not source_reference:
+        source_reference = invoice_reference
+    lot = models.ReceivingLot(
+        purchase_type=payload.purchase_type,
+        origin_name=payload.origin_name.strip(),
+        source_reference=source_reference,
+        supplier_name=supplier_name,
+        invoice_reference=invoice_reference,
+        notes=_clean_field(payload.notes),
+        status="open",
+        created_by_user_id=created_by_user_id,
+    )
+    db.add(lot)
+    db.flush()
+
+    if not lot.lot_number:
+        lot.lot_number = f"RC-{lot.id:06d}"
+
+    db.commit()
+    db.refresh(lot)
+    return lot
+
+
+def get_receiving_lot(db: Session, lot_id: int) -> Optional[models.ReceivingLot]:
+    return (
+        db.query(models.ReceivingLot)
+        .filter(models.ReceivingLot.id == lot_id)
+        .first()
+    )
+
+
+def get_receiving_lot_by_number(
+    db: Session,
+    lot_number: str,
+) -> Optional[models.ReceivingLot]:
+    return (
+        db.query(models.ReceivingLot)
+        .filter(models.ReceivingLot.lot_number == lot_number)
+        .first()
+    )
+
+
+def list_receiving_lots(
+    db: Session,
+    status: str | None = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> List[models.ReceivingLot]:
+    query = db.query(models.ReceivingLot)
+    if status:
+        query = query.filter(models.ReceivingLot.status == status)
+    return (
+        query.order_by(models.ReceivingLot.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_receiving_lots(
+    db: Session,
+    status: str | None = None,
+) -> int:
+    query = db.query(func.count(models.ReceivingLot.id))
+    if status:
+        query = query.filter(models.ReceivingLot.status == status)
+    return int(query.scalar() or 0)
+
+
+def list_receiving_lot_items(
+    db: Session,
+    lot_id: int,
+) -> List[models.ReceivingLotItem]:
+    return (
+        db.query(models.ReceivingLotItem)
+        .filter(models.ReceivingLotItem.lot_id == lot_id)
+        .order_by(models.ReceivingLotItem.created_at.asc(), models.ReceivingLotItem.id.asc())
+        .all()
+    )
+
+
+def get_receiving_lot_item(
+    db: Session,
+    lot_id: int,
+    item_id: int,
+) -> Optional[models.ReceivingLotItem]:
+    return (
+        db.query(models.ReceivingLotItem)
+        .filter(
+            models.ReceivingLotItem.id == item_id,
+            models.ReceivingLotItem.lot_id == lot_id,
+        )
+        .first()
+    )
+
+
+def search_receiving_products(
+    db: Session,
+    q: str,
+    limit: int = 20,
+) -> List[models.Product]:
+    query = db.query(models.Product).filter(models.Product.active.is_(True))
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.Product.name.ilike(like),
+                models.Product.sku.ilike(like),
+                models.Product.barcode.ilike(like),
+            )
+        )
+    return (
+        query.order_by(models.Product.name.asc(), models.Product.id.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+def _next_numeric_code(values: List[str]) -> str:
+    max_num = 0
+    max_len = 1
+    for raw in values:
+        clean = (raw or "").strip()
+        if not clean or not clean.isdigit():
+            continue
+        number = int(clean)
+        if number > max_num:
+            max_num = number
+        if len(clean) > max_len:
+            max_len = len(clean)
+
+    next_num = max_num + 1
+    next_str = str(next_num)
+    if len(next_str) < max_len:
+        return next_str.zfill(max_len)
+    return next_str
+
+
+def get_next_product_codes(db: Session) -> tuple[str, str]:
+    sku_values = [
+        row[0]
+        for row in db.query(models.Product.sku)
+        .filter(models.Product.sku.isnot(None))
+        .all()
+    ]
+    barcode_values = [
+        row[0]
+        for row in db.query(models.Product.barcode)
+        .filter(models.Product.barcode.isnot(None))
+        .all()
+    ]
+    return _next_numeric_code(sku_values), _next_numeric_code(barcode_values)
+
+
+def _acquire_product_codes_lock(db: Session) -> None:
+    backend = db.bind.dialect.name if db.bind and db.bind.dialect else ""
+    if backend == "postgresql":
+        # Lock transaccional para serializar generación de SKU/barcode.
+        db.execute(text("SELECT pg_advisory_xact_lock(91827431)"))
+
+
+def create_receiving_product_quick(
+    db: Session,
+    payload: schemas.ReceivingProductQuickCreate,
+) -> models.Product:
+    _acquire_product_codes_lock(db)
+
+    for _ in range(8):
+        next_sku, next_barcode = get_next_product_codes(db)
+        product_data = schemas.ProductCreate(
+            sku=next_sku,
+            name=payload.name.strip(),
+            price=float(payload.price),
+            cost=float(payload.cost if payload.cost is not None else payload.price),
+            barcode=next_barcode,
+            unit=None,
+            stock_min=0,
+            preferred_qty=0,
+            reorder_point=0,
+            low_stock_alert=False,
+            allow_price_change=False,
+            active=True,
+            service=False,
+            includes_tax=False,
+            group_name=payload.group_name.strip(),
+            brand=_clean_field(payload.brand),
+            supplier=_clean_field(payload.supplier),
+        )
+
+        try:
+            return create_product(db, product_data)
+        except IntegrityError:
+            db.rollback()
+            continue
+
+    raise ValueError(
+        "No se pudo generar SKU/código de barras únicos. Intenta de nuevo."
+    )
+
+
+def add_receiving_lot_item(
+    db: Session,
+    lot: models.ReceivingLot,
+    product: models.Product,
+    qty_received: float,
+    unit_cost: float | None = None,
+    notes: str | None = None,
+) -> models.ReceivingLotItem:
+    existing = (
+        db.query(models.ReceivingLotItem)
+        .filter(
+            models.ReceivingLotItem.lot_id == lot.id,
+            models.ReceivingLotItem.product_id == product.id,
+        )
+        .first()
+    )
+
+    if existing:
+        existing.qty_received = float(existing.qty_received or 0) + float(qty_received)
+        if unit_cost is not None:
+            existing.unit_cost_snapshot = float(unit_cost)
+        if notes is not None:
+            existing.notes = _clean_field(notes)
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    item = models.ReceivingLotItem(
+        lot_id=lot.id,
+        product_id=product.id,
+        product_name_snapshot=product.name,
+        sku_snapshot=product.sku,
+        barcode_snapshot=product.barcode,
+        qty_received=float(qty_received),
+        unit_cost_snapshot=float(unit_cost if unit_cost is not None else product.cost or 0),
+        unit_price_snapshot=float(product.price or 0),
+        is_new_product=False,
+        notes=_clean_field(notes),
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def update_receiving_lot_item(
+    db: Session,
+    item: models.ReceivingLotItem,
+    qty_received: float,
+    unit_cost: float | None = None,
+    notes: str | None = None,
+) -> models.ReceivingLotItem:
+    item.qty_received = float(qty_received)
+    if unit_cost is not None:
+        item.unit_cost_snapshot = float(unit_cost)
+    if notes is not None:
+        item.notes = _clean_field(notes)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def delete_receiving_lot_item(
+    db: Session,
+    item: models.ReceivingLotItem,
+) -> None:
+    db.delete(item)
+    db.commit()
+
+
+def close_receiving_lot(
+    db: Session,
+    lot: models.ReceivingLot,
+    closed_by_user_id: int | None = None,
+) -> models.ReceivingLot:
+    lot.status = "closed"
+    lot.closed_by_user_id = closed_by_user_id
+    lot.closed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(lot)
+    return lot
+
+
+def update_receiving_lot(
+    db: Session,
+    lot: models.ReceivingLot,
+    *,
+    purchase_type: str,
+    source_reference: str | None = None,
+    supplier_name: str | None = None,
+    invoice_reference: str | None = None,
+    notes: str | None = None,
+) -> models.ReceivingLot:
+    lot.purchase_type = purchase_type
+    lot.source_reference = _clean_field(source_reference)
+    lot.supplier_name = _clean_field(supplier_name)
+    lot.invoice_reference = _clean_field(invoice_reference)
+    lot.notes = _clean_field(notes)
+    if purchase_type == "invoice" and not lot.source_reference:
+        lot.source_reference = lot.invoice_reference
+    db.commit()
+    db.refresh(lot)
+    return lot
+
+
+def update_receiving_lot_support_file(
+    db: Session,
+    lot: models.ReceivingLot,
+    *,
+    support_file_name: str | None,
+    support_file_url: str | None,
+    support_file_size: int | None,
+) -> models.ReceivingLot:
+    lot.support_file_name = _clean_field(support_file_name)
+    lot.support_file_url = _clean_field(support_file_url)
+    lot.support_file_size = support_file_size
+    db.commit()
+    db.refresh(lot)
+    return lot
+
+
+def cancel_receiving_lot(
+    db: Session,
+    lot: models.ReceivingLot,
+) -> models.ReceivingLot:
+    lot.status = "cancelled"
+    db.commit()
+    db.refresh(lot)
+    return lot
 
 
 def revoke_user_sessions(
@@ -178,6 +518,10 @@ def get_catalog_version(db: Session):
 
 def get_product_by_sku(db: Session, sku: str):
     return db.query(models.Product).filter(models.Product.sku == sku).first()
+
+
+def get_product_by_barcode(db: Session, barcode: str):
+    return db.query(models.Product).filter(models.Product.barcode == barcode).first()
 
 
 # 🔹 Obtener producto por ID
@@ -2835,6 +3179,15 @@ def get_pos_station(db: Session, station_id: str) -> Optional[models.PosStation]
         db.query(models.PosStation)
         .options(selectinload(models.PosStation.user))
         .filter(models.PosStation.id == station_id)
+        .first()
+    )
+
+
+def get_pos_station_by_label(db: Session, label: str) -> Optional[models.PosStation]:
+    return (
+        db.query(models.PosStation)
+        .options(selectinload(models.PosStation.user))
+        .filter(func.lower(models.PosStation.label) == label.lower())
         .first()
     )
 

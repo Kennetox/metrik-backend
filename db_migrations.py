@@ -56,6 +56,69 @@ def _ensure_column_postgres(
     )
 
 
+def _has_duplicate_non_empty_barcodes(connection, backend: str) -> bool:
+    if backend == "postgresql":
+        row = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                  SELECT 1
+                  FROM products
+                  WHERE barcode IS NOT NULL AND btrim(barcode) <> ''
+                  GROUP BY btrim(barcode)
+                  HAVING COUNT(*) > 1
+                ) AS has_dup
+                """
+            )
+        ).mappings().first()
+    else:
+        row = connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                  SELECT 1
+                  FROM products
+                  WHERE barcode IS NOT NULL AND trim(barcode) <> ''
+                  GROUP BY trim(barcode)
+                  HAVING COUNT(*) > 1
+                ) AS has_dup
+                """
+            )
+        ).mappings().first()
+    return bool(row and row.get("has_dup"))
+
+
+def _ensure_products_barcode_unique_index(connection, backend: str) -> None:
+    if _has_duplicate_non_empty_barcodes(connection, backend):
+        print(
+            "[schema-upgrade] No se creó índice único de barcode: "
+            "existen duplicados en products.barcode."
+        )
+        return
+
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS products_barcode_unique_idx
+                ON products (barcode)
+                WHERE barcode IS NOT NULL AND btrim(barcode) <> ''
+                """
+            )
+        )
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS products_barcode_unique_idx
+            ON products (barcode)
+            WHERE barcode IS NOT NULL AND trim(barcode) <> ''
+            """
+        )
+    )
+
+
 def run_schema_upgrades(engine: Engine) -> None:
     """Adds missing columns if they don't exist yet."""
 
@@ -331,6 +394,14 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "adjustment_reference",
                     "TEXT",
                 )
+                _ensure_column_postgres(connection, "receiving_lots", "supplier_name", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "invoice_reference", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "source_reference", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "notes", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "support_file_name", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "support_file_url", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "support_file_size", "INTEGER")
+                _ensure_products_barcode_unique_index(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_column(
@@ -540,6 +611,14 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "adjustment_reference",
                     "TEXT",
                 )
+                if _table_exists(connection, "receiving_lots"):
+                    _ensure_column(connection, "receiving_lots", "supplier_name", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "invoice_reference", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "source_reference", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "notes", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "support_file_name", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "support_file_url", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "support_file_size", "INTEGER")
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
                 _ensure_column(connection, "pos_users", "pin_hash", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
@@ -1619,6 +1698,7 @@ def _ensure_table_document_adjustments(connection) -> None:
             "created_at",
             "DATETIME",
         )
+        _ensure_products_barcode_unique_index(connection, backend="sqlite")
 
 
 def _ensure_table_product_audit_logs(connection) -> None:

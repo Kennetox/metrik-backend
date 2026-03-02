@@ -241,6 +241,185 @@ class InventoryOverview(BaseModel):
     status_rows: List[InventoryStatusRow]
 
 
+# ===================== RECEIVING =====================
+
+
+ReceivingLotStatus = Literal["open", "closed", "cancelled"]
+PurchaseType = Literal["invoice", "cash"]
+
+
+class ReceivingLotBase(BaseModel):
+    purchase_type: PurchaseType
+    origin_name: NonEmptyStr
+    source_reference: Optional[str] = None
+    supplier_name: Optional[str] = None
+    invoice_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ReceivingLotCreate(ReceivingLotBase):
+    pass
+
+
+class ReceivingLotUpdate(BaseModel):
+    purchase_type: PurchaseType
+    source_reference: Optional[str] = None
+    supplier_name: Optional[str] = None
+    invoice_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ReceivingLotRead(ReceivingLotBase):
+    id: int
+    lot_number: str
+    status: ReceivingLotStatus
+    created_by_user_id: Optional[int] = None
+    closed_by_user_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
+    support_file_name: Optional[str] = None
+    support_file_url: Optional[str] = None
+    support_file_size: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ReceivingLotItemRead(BaseModel):
+    id: int
+    lot_id: int
+    product_id: int
+    product_name_snapshot: str
+    sku_snapshot: Optional[str] = None
+    barcode_snapshot: Optional[str] = None
+    qty_received: float
+    unit_cost_snapshot: float
+    unit_price_snapshot: float
+    is_new_product: bool
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReceivingProductLookup(BaseModel):
+    id: int
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    name: str
+    price: float
+    cost: float
+
+    class Config:
+        from_attributes = True
+
+
+class ReceivingLotItemCreate(BaseModel):
+    product_id: int
+    qty_received: float = Field(gt=0)
+    unit_cost: Optional[float] = Field(default=None, ge=0)
+    notes: Optional[str] = None
+
+
+class ReceivingLotItemUpdate(BaseModel):
+    qty_received: float = Field(gt=0)
+    unit_cost: Optional[float] = Field(default=None, ge=0)
+    notes: Optional[str] = None
+
+
+class ReceivingProductCodePreview(BaseModel):
+    sku: str
+    barcode: str
+
+
+class ReceivingProductQuickCreate(BaseModel):
+    name: NonEmptyStr
+    price: float = Field(gt=0)
+    cost: Optional[float] = Field(default=None, ge=0)
+    group_name: NonEmptyStr
+    brand: Optional[str] = None
+    supplier: Optional[str] = None
+
+
+class ReceivingProductGroupOption(BaseModel):
+    path: str
+    display_name: str
+    parent_path: Optional[str] = None
+
+
+class ReceivingLabelsSummary(BaseModel):
+    pending: int = 0
+    printed: int = 0
+    error: int = 0
+
+
+class ApiWarning(BaseModel):
+    code: str
+    message: str
+
+
+class ReceivingLotDetail(BaseModel):
+    lot: ReceivingLotRead
+    items: List[ReceivingLotItemRead]
+    labels_summary: ReceivingLabelsSummary
+    warnings: List[ApiWarning]
+
+
+class ReceivingLotPage(BaseModel):
+    items: List[ReceivingLotRead]
+    total: int
+    skip: int
+    limit: int
+
+
+class ReceivingDocumentRead(BaseModel):
+    id: int
+    lot_number: str
+    status: ReceivingLotStatus
+    purchase_type: PurchaseType
+    origin_name: str
+    lines_count: int
+    units_total: float
+    created_at: datetime
+    closed_at: Optional[datetime] = None
+    closed_by_user_name: Optional[str] = None
+    supplier_name: Optional[str] = None
+    invoice_reference: Optional[str] = None
+    support_file_name: Optional[str] = None
+    support_file_url: Optional[str] = None
+    support_file_size: Optional[int] = None
+
+
+class ReceivingDocumentPage(BaseModel):
+    items: List[ReceivingDocumentRead]
+    total: int
+    skip: int
+    limit: int
+
+
+class ReceivingCreatedProductRead(BaseModel):
+    audit_id: int
+    product_id: int
+    name: str
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    price: float
+    cost: float
+    group_name: Optional[str] = None
+    created_at: datetime
+    created_by_user_name: Optional[str] = None
+
+
+class ReceivingCreatedProductPage(BaseModel):
+    items: List[ReceivingCreatedProductRead]
+    total: int
+    skip: int
+    limit: int
+
+
 class LabelExportItem(BaseModel):
     product_id: int
     sku: Optional[str] = None
@@ -586,6 +765,132 @@ class HRSystemUserOption(BaseModel):
     role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
     status: Literal["Activo", "Inactivo"]
     employee_id: Optional[int] = None
+
+
+ScheduleStatus = Literal["draft", "published"]
+ScheduleTimeStr = Annotated[
+    str,
+    Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$"),
+]
+
+
+class ScheduleTemplateBase(BaseModel):
+    name: str
+    start_time: ScheduleTimeStr
+    end_time: ScheduleTimeStr
+    break_minutes: int = Field(default=0, ge=0, le=240)
+    color: Optional[str] = None
+    position: Optional[str] = None
+    is_active: bool = True
+    order_index: int = 0
+
+
+class ScheduleTemplateCreate(ScheduleTemplateBase):
+    pass
+
+
+class ScheduleTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    start_time: Optional[ScheduleTimeStr] = None
+    end_time: Optional[ScheduleTimeStr] = None
+    break_minutes: Optional[int] = Field(default=None, ge=0, le=240)
+    color: Optional[str] = None
+    position: Optional[str] = None
+    is_active: Optional[bool] = None
+    order_index: Optional[int] = None
+
+
+class ScheduleTemplateRead(ScheduleTemplateBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ScheduleWeekCreate(BaseModel):
+    week_start: date
+    notes: Optional[str] = None
+
+
+class ScheduleWeekRead(BaseModel):
+    id: int
+    week_start: date
+    status: ScheduleStatus
+    notes: Optional[str] = None
+    published_at: Optional[datetime] = None
+    published_by_user_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ScheduleWeekPublishRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class ScheduleShiftBase(BaseModel):
+    employee_id: int
+    shift_date: date
+    start_time: Optional[ScheduleTimeStr] = None
+    end_time: Optional[ScheduleTimeStr] = None
+    break_minutes: int = Field(default=0, ge=0, le=240)
+    position: Optional[str] = None
+    color: Optional[str] = None
+    note: Optional[str] = None
+    is_time_off: bool = False
+    source_template_id: Optional[int] = None
+
+
+class ScheduleShiftUpsertRequest(ScheduleShiftBase):
+    week_id: Optional[int] = None
+    week_start: Optional[date] = None
+
+
+class ScheduleShiftUpdate(BaseModel):
+    start_time: Optional[ScheduleTimeStr] = None
+    end_time: Optional[ScheduleTimeStr] = None
+    break_minutes: Optional[int] = Field(default=None, ge=0, le=240)
+    position: Optional[str] = None
+    color: Optional[str] = None
+    note: Optional[str] = None
+    is_time_off: Optional[bool] = None
+    source_template_id: Optional[int] = None
+
+
+class ScheduleShiftRead(ScheduleShiftBase):
+    id: int
+    week_id: int
+    created_at: datetime
+    updated_at: datetime
+    total_hours: float = 0.0
+
+    class Config:
+        from_attributes = True
+
+
+class ScheduleEmployeeRow(BaseModel):
+    id: int
+    name: str
+    status: Literal["Activo", "Inactivo"]
+    position: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
+class ScheduleDayTotal(BaseModel):
+    shift_date: date
+    total_hours: float
+
+
+class ScheduleWeekView(BaseModel):
+    week: ScheduleWeekRead
+    employees: List[ScheduleEmployeeRow]
+    shifts: List[ScheduleShiftRead]
+    day_totals: List[ScheduleDayTotal]
+    week_total_hours: float
 
 
 class PosStationCreate(BaseModel):
@@ -1047,6 +1352,12 @@ class ReportEmailRequest(BaseModel):
     attach_pdf: bool = True
 
 
+class ReportPdfExportRequest(BaseModel):
+    title: Optional[str] = None
+    document_html: str
+    preset_id: Optional[str] = None
+
+
 class ReportExportCompanyInfo(BaseModel):
     name: str
     address: Optional[str] = None
@@ -1216,6 +1527,13 @@ class AuthPosLoginRequest(BaseModel):
     pin: Optional[str] = None
     email: Optional[EmailStr] = None
     password: Optional[str] = None
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
+
+
+class AuthTabletLoginRequest(BaseModel):
+    station_id: str
+    pin: str
     device_id: Optional[str] = None
     device_label: Optional[str] = None
 

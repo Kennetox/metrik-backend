@@ -336,6 +336,38 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
             },
         ],
     },
+    {
+        "id": "schedule",
+        "label": "Horarios",
+        "description": "Planificación semanal de turnos del equipo.",
+        "roles": _role_flags(Administrador=True, Supervisor=True),
+        "actions": [
+            {
+                "id": "schedule.view",
+                "label": "Ver horarios",
+                "description": "Consultar la grilla semanal de turnos.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "schedule.manage",
+                "label": "Editar horarios",
+                "description": "Crear, mover y actualizar turnos.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "schedule.publish",
+                "label": "Publicar horario",
+                "description": "Publicar la semana para compartir con el equipo.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+            {
+                "id": "schedule.export",
+                "label": "Exportar horario",
+                "description": "Exportar la semana en CSV o PDF.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+        ],
+    },
 ]
 
 

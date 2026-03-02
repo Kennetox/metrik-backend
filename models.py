@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -105,6 +106,67 @@ class InventoryMovement(Base):
 
     product = relationship("Product")
     created_by = relationship("PosUser")
+
+
+class ReceivingLot(Base):
+    __tablename__ = "receiving_lots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lot_number = Column(String, unique=True, index=True, nullable=True)
+    status = Column(String, nullable=False, default="open")
+    purchase_type = Column(String, nullable=False, default="cash")
+    origin_name = Column(String, nullable=False)
+    supplier_name = Column(String, nullable=True)
+    invoice_reference = Column(String, nullable=True)
+    source_reference = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    support_file_name = Column(String, nullable=True)
+    support_file_url = Column(String(512), nullable=True)
+    support_file_size = Column(Integer, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    closed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    closed_at = Column(DateTime, nullable=True)
+
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+    closed_by = relationship("PosUser", foreign_keys=[closed_by_user_id])
+    items = relationship(
+        "ReceivingLotItem",
+        back_populates="lot",
+        cascade="all, delete-orphan",
+    )
+
+
+class ReceivingLotItem(Base):
+    __tablename__ = "receiving_lot_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lot_id = Column(Integer, ForeignKey("receiving_lots.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_name_snapshot = Column(String, nullable=False)
+    sku_snapshot = Column(String, nullable=True)
+    barcode_snapshot = Column(String, nullable=True)
+    qty_received = Column(Float, nullable=False, default=0)
+    unit_cost_snapshot = Column(Float, nullable=False, default=0)
+    unit_price_snapshot = Column(Float, nullable=False, default=0)
+    is_new_product = Column(Boolean, nullable=False, default=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    lot = relationship("ReceivingLot", back_populates="items")
+    product = relationship("Product")
 
 
 class Sale(Base):
@@ -438,6 +500,95 @@ class HREmployee(Base):
         back_populates="employee",
         cascade="all, delete-orphan",
     )
+    schedule_shifts = relationship(
+        "ScheduleShift",
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScheduleTemplate(Base):
+    __tablename__ = "schedule_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    start_time = Column(String, nullable=False)
+    end_time = Column(String, nullable=False)
+    break_minutes = Column(Integer, nullable=False, default=0)
+    color = Column(String(16), nullable=True)
+    position = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    order_index = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    shifts = relationship("ScheduleShift", back_populates="template")
+
+
+class ScheduleWeek(Base):
+    __tablename__ = "schedule_weeks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    week_start = Column(Date, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="draft")
+    notes = Column(Text, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    published_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    published_by_user = relationship("PosUser", foreign_keys=[published_by_user_id])
+    shifts = relationship(
+        "ScheduleShift",
+        back_populates="week",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScheduleShift(Base):
+    __tablename__ = "schedule_shifts"
+    __table_args__ = (
+        UniqueConstraint("week_id", "employee_id", "shift_date", name="uq_schedule_shift_cell"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    week_id = Column(Integer, ForeignKey("schedule_weeks.id"), nullable=False, index=True)
+    employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
+    shift_date = Column(Date, nullable=False, index=True)
+    start_time = Column(String, nullable=True)
+    end_time = Column(String, nullable=True)
+    break_minutes = Column(Integer, nullable=False, default=0)
+    position = Column(String, nullable=True)
+    color = Column(String(16), nullable=True)
+    note = Column(Text, nullable=True)
+    is_time_off = Column(Boolean, nullable=False, default=False)
+    source_template_id = Column(
+        Integer,
+        ForeignKey("schedule_templates.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    week = relationship("ScheduleWeek", back_populates="shifts")
+    employee = relationship("HREmployee", back_populates="schedule_shifts")
+    template = relationship("ScheduleTemplate", back_populates="shifts")
 
 
 class PosUser(Base):

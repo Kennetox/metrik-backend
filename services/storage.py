@@ -42,6 +42,13 @@ class StoredUserDocument:
     size: int
 
 
+@dataclass
+class StoredReceivingSupportFile:
+    filename: str
+    url: str
+    size: int
+
+
 def _get_base_dir(tenant_id: Optional[int] = None) -> Path:
     base_dir = Path(os.getenv("PRODUCT_UPLOAD_DIR", "uploads/product-images"))
     if tenant_id is not None:
@@ -110,6 +117,19 @@ def _build_user_document_url(filename: str, user_id: int) -> str:
         return f"{base_url.rstrip('/')}/{user_id}/{filename}"
     storage_path = os.getenv("USER_DOC_PUBLIC_PATH", "/uploads/user-documents")
     return f"{storage_path.rstrip('/')}/{user_id}/{filename}"
+
+
+def _get_receiving_support_dir(lot_id: int) -> Path:
+    base = Path(os.getenv("RECEIVING_SUPPORT_UPLOAD_DIR", "uploads/receiving-support"))
+    return base / str(lot_id)
+
+
+def _build_receiving_support_url(filename: str, lot_id: int) -> str:
+    base_url = os.getenv("RECEIVING_SUPPORT_BASE_URL")
+    if base_url:
+        return f"{base_url.rstrip('/')}/{lot_id}/{filename}"
+    storage_path = os.getenv("RECEIVING_SUPPORT_PUBLIC_PATH", "/uploads/receiving-support")
+    return f"{storage_path.rstrip('/')}/{lot_id}/{filename}"
 
 
 async def save_product_image(
@@ -204,3 +224,28 @@ async def save_user_document(file: UploadFile, user_id: int) -> StoredUserDocume
 
     url = _build_user_document_url(filename, user_id)
     return StoredUserDocument(filename=original_name, url=url, size=len(contents))
+
+
+async def save_receiving_support_file(
+    file: UploadFile,
+    lot_id: int,
+) -> StoredReceivingSupportFile:
+    original_name = file.filename or ""
+    extension = Path(original_name).suffix.lower()
+    if extension not in DOC_ALLOWED_EXTENSIONS:
+        raise ValueError("Formato no soportado. Usa PDF, JPG, PNG, WEBP o DOC/DOCX.")
+
+    contents = await file.read()
+    if len(contents) > MAX_DOC_SIZE:
+        raise ValueError("El archivo supera los 5MB permitidos")
+
+    filename = f"receiving-support-{uuid4().hex}{extension}"
+    base_dir = _get_receiving_support_dir(lot_id)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    file_path = base_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    url = _build_receiving_support_url(filename, lot_id)
+    return StoredReceivingSupportFile(filename=original_name, url=url, size=len(contents))

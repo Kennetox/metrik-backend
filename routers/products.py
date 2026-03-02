@@ -239,6 +239,10 @@ def create_product(
         existing = crud.get_product_by_sku(db, product_in.sku)
         if existing:
             raise HTTPException(status_code=400, detail="SKU already registered")
+    if product_in.barcode:
+        existing_barcode = crud.get_product_by_barcode(db, product_in.barcode)
+        if existing_barcode:
+            raise HTTPException(status_code=400, detail="Barcode already registered")
 
     product = crud.create_product(db, product_in)
     crud.create_product_audit_log(
@@ -274,6 +278,13 @@ def update_product(
         existing = crud.get_product_by_sku(db, product_in.sku)
         if existing:
             raise HTTPException(status_code=400, detail="SKU already registered")
+    if (
+        product_in.barcode
+        and product_in.barcode != db_product.barcode
+    ):
+        existing_barcode = crud.get_product_by_barcode(db, product_in.barcode)
+        if existing_barcode:
+            raise HTTPException(status_code=400, detail="Barcode already registered")
 
     changes = _build_product_changes(db_product, product_in)
     updated = crud.update_product(db, db_product, product_in)
