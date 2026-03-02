@@ -11,7 +11,7 @@ PASSWORD_ITERATIONS = 120_000
 SECRET_KEY = os.getenv("POS_SECRET_KEY", "kensar-pos-secret-change-me")
 POS_TOKEN_TTL_SECONDS = int(os.getenv("POS_TOKEN_TTL", 60 * 60 * 12))
 WEB_TOKEN_TTL_SECONDS = int(os.getenv("WEB_TOKEN_TTL", 60 * 60 * 12))
-WEB_INACTIVITY_TIMEOUT_SECONDS = int(os.getenv("WEB_INACTIVITY_TIMEOUT", 60 * 60))
+WEB_INACTIVITY_TIMEOUT_SECONDS = int(os.getenv("WEB_INACTIVITY_TIMEOUT", 3 * 60 * 60))
 
 
 def _b64encode(data: bytes) -> str:

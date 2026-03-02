@@ -13,6 +13,7 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XlsxImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import crud
@@ -27,6 +28,12 @@ router = APIRouter(
     prefix="/reports",
     tags=["reports"],
 )
+
+
+class ReportPdfExportRequest(BaseModel):
+    title: Optional[str] = None
+    document_html: str
+    preset_id: Optional[str] = None
 
 
 @router.post("/email")
@@ -80,6 +87,33 @@ def send_report_email(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {"status": "sent"}
+
+
+@router.post("/export/pdf")
+def export_report_pdf(
+    payload: ReportPdfExportRequest,
+    _: object = Depends(require_permission("reports.view")),
+):
+    if not payload.document_html:
+        raise HTTPException(status_code=400, detail="El HTML del reporte es requerido")
+    if not pdf_utils.can_render_html_pdf():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "El servidor no tiene habilitada la generacion de PDF HTML "
+                "(dependencias de WeasyPrint faltantes)."
+            ),
+        )
+
+    pdf_bytes = pdf_utils.build_pdf_from_html(payload.title or "Reporte Kensar", payload.document_html)
+    safe_id = re.sub(r"[^a-z0-9_-]+", "_", (payload.preset_id or "reporte").lower()).strip("_") or "reporte"
+    filename = f"{safe_id}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _parse_money(raw_value: str) -> Optional[float]:

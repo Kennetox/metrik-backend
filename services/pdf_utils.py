@@ -1,6 +1,19 @@
+import os
 import re
 from html import unescape
 from typing import List
+
+# En macOS, WeasyPrint (cffi) puede no resolver librerias de Homebrew
+# sin DYLD_FALLBACK_LIBRARY_PATH.
+if os.name == "posix" and "darwin" in os.sys.platform:
+    brew_lib = "/opt/homebrew/lib"
+    usr_local_lib = "/usr/local/lib"
+    current = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").strip()
+    parts = [p for p in current.split(":") if p] if current else []
+    for path in (brew_lib, usr_local_lib):
+        if path not in parts:
+            parts.append(path)
+    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(parts)
 
 try:  # pragma: no cover - optional dependency
     from weasyprint import HTML
@@ -83,32 +96,31 @@ STYLE_PATCH = """
   .summary {
     display: flex !important;
     flex-wrap: nowrap !important;
-    gap: 8px !important;
-    padding-top: 10px !important;
-    padding-bottom: 6px !important;
+    gap: 5px !important;
+    padding-top: 6px !important;
+    padding-bottom: 4px !important;
   }
   .summary .card {
     flex: 1 1 0 !important;
     width: auto !important;
     min-width: 0 !important;
-    padding: 10px 12px !important;
-    border-radius: 8px !important;
+    padding: 5px 8px !important;
+    border-radius: 10px !important;
     display: flex !important;
     flex-direction: column !important;
     justify-content: center !important;
-    min-height: 80px !important;
+    min-height: 42px !important;
   }
   .summary .card .label {
-    margin-bottom: 4px !important;
-    font-size: 10px !important;
+    margin-bottom: 1px !important;
+    font-size: 8.5px !important;
   }
   .summary .card .value {
-    font-size: 18px !important;
+    font-size: 13px !important;
   }
   header,
   .meta,
   .summary,
-  .table-block,
   .note,
   .components {
     page-break-inside: avoid !important;
