@@ -193,8 +193,6 @@ def tablet_login(
         raise HTTPException(status_code=400, detail="Debes configurar una estación tablet.")
 
     station = crud.get_pos_station(db, station_lookup)
-    if not station:
-        station = crud.get_pos_station_by_label(db, station_lookup)
     if station and not station.is_active:
         raise HTTPException(status_code=400, detail="Estación inválida o inactiva")
 
