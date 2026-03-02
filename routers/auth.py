@@ -183,6 +183,73 @@ def pos_login(
     return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
 
 
+@router.post("/tablet-login", response_model=schemas.AuthLoginResponse)
+def tablet_login(
+    payload: schemas.AuthPosLoginRequest,
+    db: Session = Depends(get_db),
+):
+    station_lookup = payload.station_id.strip()
+    if not station_lookup:
+        raise HTTPException(status_code=400, detail="Debes configurar una estación tablet.")
+
+    station = crud.get_pos_station(db, station_lookup)
+    if not station:
+        station = crud.get_pos_station_by_label(db, station_lookup)
+    if station and not station.is_active:
+        raise HTTPException(status_code=400, detail="Estación inválida o inactiva")
+
+    if not payload.pin:
+        raise HTTPException(status_code=400, detail="Debes ingresar PIN.")
+
+    try:
+        user = crud.get_pos_user_by_pin(db, payload.pin)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="PIN inválido") from exc
+
+    if not user or not user.is_active or user.status != "Activo":
+        if station:
+            crud.register_pos_station_login_failure(db, station)
+        raise HTTPException(
+            status_code=401, detail="PIN inválido o usuario inactivo"
+        )
+
+    if station and payload.device_id:
+        if station.bound_device_id and station.bound_device_id != payload.device_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Esta estación ya está vinculada a otro equipo. Solicita al administrador que la libere.",
+            )
+        if not station.bound_device_id:
+            station.bound_device_id = payload.device_id
+            station.bound_device_label = payload.device_label
+            station.bound_at = datetime.utcnow()
+            station.bound_by_user_id = user.id
+            station.bound_by_user_name = user.name
+        elif payload.device_label and not station.bound_device_label:
+            station.bound_device_label = payload.device_label
+
+    if station:
+        crud.register_pos_station_login_success(db, station)
+    crud.revoke_user_sessions(db, user.id, reason="replaced", session_type="tablet")
+    token = create_access_token(user.id, user.role, POS_TOKEN_TTL_SECONDS)
+    expires_at = datetime.utcnow() + timedelta(seconds=POS_TOKEN_TTL_SECONDS)
+    crud.create_pos_session(
+        db,
+        user_id=user.id,
+        token=token,
+        session_type="tablet",
+        expires_at=expires_at,
+        station_id=station.id if station else station_lookup,
+        device_id=payload.device_id,
+    )
+    user.last_login = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+
+    user_read = schemas.PosUserRead.model_validate(user)
+    return schemas.AuthLoginResponse(token=token, user=user_read, expires_at=expires_at)
+
+
 @router.post(
     "/pos-station-login",
     response_model=schemas.AuthPosStationLoginResponse,
