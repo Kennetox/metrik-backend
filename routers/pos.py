@@ -991,6 +991,82 @@ def send_settings_test_email(
     return schemas.EmailSendResponse(status="sent")
 
 
+@router.post("/contact-request", response_model=schemas.ContactRequestResponse)
+def send_public_contact_request(
+    payload: schemas.ContactRequestCreate,
+    db: Session = Depends(get_db),
+):
+    settings = crud.get_pos_settings(db)
+
+    query_labels = {
+        "soporte_tecnico": "Soporte técnico",
+        "consulta_comercial": "Consulta comercial",
+        "facturacion": "Facturación y pagos",
+        "implementacion": "Implementación y configuración",
+        "sugerencia": "Sugerencia / mejora",
+        "otro": "Otro",
+    }
+
+    query_label = query_labels.get(payload.query_type, "Consulta")
+    sender_name = (payload.sender_name or "").strip() or "No informado"
+    sender_email = (payload.sender_email or "").strip() or "No informado"
+    source = (payload.source or "").strip() or "web_contacto"
+    message_clean = payload.message.strip()
+
+    subject = f"[Metrik] Nueva solicitud: {query_label}"
+    html_body = f"""
+      <div style="font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.6">
+        <h2 style="margin:0 0 12px">Nueva solicitud de contacto</h2>
+        <p style="margin:0 0 16px;color:#475569">Formulario web de metrikpos.com</p>
+        <table style="border-collapse:collapse;width:100%;max-width:680px">
+          <tr>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px;font-weight:600;background:#f8fafc">Tipo</td>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px">{escape(query_label)}</td>
+          </tr>
+          <tr>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px;font-weight:600;background:#f8fafc">Nombre</td>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px">{escape(sender_name)}</td>
+          </tr>
+          <tr>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px;font-weight:600;background:#f8fafc">Correo</td>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px">{escape(sender_email)}</td>
+          </tr>
+          <tr>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px;font-weight:600;background:#f8fafc">Origen</td>
+            <td style="border:1px solid #cbd5e1;padding:8px 10px">{escape(source)}</td>
+          </tr>
+        </table>
+        <h3 style="margin:16px 0 8px">Mensaje</h3>
+        <div style="border:1px solid #cbd5e1;background:#f8fafc;padding:12px;border-radius:8px;white-space:pre-wrap">{escape(message_clean)}</div>
+      </div>
+    """
+    text_body = (
+        "Nueva solicitud de contacto\n"
+        f"Tipo: {query_label}\n"
+        f"Nombre: {sender_name}\n"
+        f"Correo: {sender_email}\n"
+        f"Origen: {source}\n\n"
+        "Mensaje:\n"
+        f"{message_clean}"
+    )
+
+    try:
+        email_service.send_email(
+            recipients=["kennethjc2301@gmail.com"],
+            cc=["kensarelec@gmail.com"],
+            subject=subject,
+            html_body=html_body,
+            text_body=text_body,
+            smtp_config=settings,
+        )
+    except email_service.EmailDeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return schemas.ContactRequestResponse(status="sent")
+
+
 @router.get("/qz/cert")
 def get_qz_certificate(
     db: Session = Depends(get_db),

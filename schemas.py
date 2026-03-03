@@ -1612,6 +1612,25 @@ class SmtpTestEmailRequest(BaseModel):
     message: Optional[str] = None
 
 
+class ContactRequestCreate(BaseModel):
+    query_type: Literal[
+        "soporte_tecnico",
+        "consulta_comercial",
+        "facturacion",
+        "implementacion",
+        "sugerencia",
+        "otro",
+    ]
+    message: str = Field(min_length=10, max_length=700)
+    sender_name: NonEmptyStr = Field(max_length=80)
+    sender_email: Optional[EmailStr] = None
+    source: Optional[str] = Field(default="web_contacto", max_length=60)
+
+
+class ContactRequestResponse(BaseModel):
+    status: str = "sent"
+
+
 class SeparatedOrderPaymentBase(BaseModel):
     method: str
     amount: float
