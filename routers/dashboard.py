@@ -282,10 +282,10 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     month_start_bogota = datetime(
         now_bogota.year, now_bogota.month, 1, tzinfo=bogota_tz
     )
-    seven_days_ago_bogota = today_start_bogota - timedelta(days=6)
+    trend_start_bogota = today_start_bogota - timedelta(days=13)
 
     month_start_utc = month_start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
-    seven_days_ago_utc = seven_days_ago_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    trend_start_utc = trend_start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
 
     sales_month = (
         db.query(models.Sale)
@@ -315,6 +315,36 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             )
         )
         .filter(models.SeparatedOrderPayment.paid_at >= month_start_utc)
+        .all()
+    )
+    sales_trend = (
+        db.query(models.Sale)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.created_at >= trend_start_utc)
+        .all()
+    )
+    returns_trend = (
+        db.query(models.SaleReturn)
+        .filter(models.SaleReturn.created_at >= trend_start_utc)
+        .filter(models.SaleReturn.status == "confirmed")
+        .filter(models.SaleReturn.adjustment_reference.is_(None))
+        .all()
+    )
+    changes_trend = (
+        db.query(models.SaleChange)
+        .filter(models.SaleChange.created_at >= trend_start_utc)
+        .filter(models.SaleChange.status == "confirmed")
+        .all()
+    )
+    separated_payments_trend = (
+        db.query(models.SeparatedOrderPayment)
+        .filter(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
+        .filter(models.SeparatedOrderPayment.paid_at >= trend_start_utc)
         .all()
     )
 
@@ -350,6 +380,39 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         day = _to_bogota_date(change.created_at, bogota_tz)
         change_extra_by_day[day] += float(change.extra_payment or 0.0)
         change_refund_by_day[day] += float(change.refund_due or 0.0)
+
+    trend_totals_by_day = defaultdict(float)
+    trend_tickets_by_day = defaultdict(int)
+    trend_refunds_by_day = defaultdict(float)
+    trend_change_extra_by_day = defaultdict(float)
+    trend_change_refund_by_day = defaultdict(float)
+    _, trend_total_delta_by_sale = _collect_sale_adjustments(
+        db, [sale.id for sale in sales_trend]
+    )
+
+    for sale in sales_trend:
+        day = _to_bogota_date(sale.created_at, bogota_tz)
+        cash_total = _sale_cash_total(sale)
+        if cash_total > 0:
+            trend_totals_by_day[day] += cash_total
+            trend_tickets_by_day[day] += 1
+        delta = trend_total_delta_by_sale.get(sale.id, 0.0)
+        if delta:
+            trend_totals_by_day[day] += float(delta)
+
+    for payment in separated_payments_trend:
+        day = _to_bogota_date(payment.paid_at, bogota_tz)
+        trend_totals_by_day[day] += float(payment.amount or 0.0)
+
+    for ret in returns_trend:
+        day = _to_bogota_date(ret.created_at, bogota_tz)
+        refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
+        trend_refunds_by_day[day] += refund_total
+
+    for change in changes_trend:
+        day = _to_bogota_date(change.created_at, bogota_tz)
+        trend_change_extra_by_day[day] += float(change.extra_payment or 0.0)
+        trend_change_refund_by_day[day] += float(change.refund_due or 0.0)
 
     today_date = today_start_bogota.date()
     today_sales_total = (
@@ -447,12 +510,12 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     trend_days_count = 14
     for offset in range(trend_days_count):
         day = today_start_bogota.date() - timedelta(days=offset)
-        trend_map[day] = {"total": 0.0, "tickets": tickets_by_day.get(day, 0)}
+        trend_map[day] = {"total": 0.0, "tickets": trend_tickets_by_day.get(day, 0)}
         trend_map[day]["total"] = (
-            totals_by_day.get(day, 0.0)
-            + change_extra_by_day.get(day, 0.0)
-            - refunds_by_day.get(day, 0.0)
-            - change_refund_by_day.get(day, 0.0)
+            trend_totals_by_day.get(day, 0.0)
+            + trend_change_extra_by_day.get(day, 0.0)
+            - trend_refunds_by_day.get(day, 0.0)
+            - trend_change_refund_by_day.get(day, 0.0)
         )
 
     trend_days: List[schemas.SalesTrendPoint] = []
