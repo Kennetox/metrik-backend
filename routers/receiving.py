@@ -444,7 +444,6 @@ def get_receiving_lot_support_file(
     lot_id: int,
     download: bool = Query(default=False),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
 ):
     lot = crud.get_receiving_lot(db, lot_id)
     if not lot:
