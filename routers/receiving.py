@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
+import mimetypes
 from pathlib import Path
 from typing import List
 import math
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.orm import Session
 
@@ -68,6 +70,36 @@ def _validate_invoice_requirements(
         )
 
 
+def _resolve_receiving_support_file_path(lot_id: int, support_file_url: str | None) -> Path | None:
+    if not support_file_url:
+        return None
+
+    raw = support_file_url.strip()
+    if not raw:
+        return None
+
+    parsed_path = urlparse(raw).path if "://" in raw else raw
+    clean_path = parsed_path.split("?", 1)[0].split("#", 1)[0]
+    candidate_name = unquote(Path(clean_path).name or "").strip()
+    if not candidate_name:
+        return None
+
+    lot_dir = storage.get_receiving_support_dir(lot_id)
+    direct_path = lot_dir / candidate_name
+    if direct_path.exists():
+        return direct_path
+
+    if lot_dir.exists():
+        files = [entry for entry in lot_dir.iterdir() if entry.is_file()]
+        if len(files) == 1:
+            return files[0]
+        if len(files) > 1:
+            files.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+            return files[0]
+
+    return None
+
+
 @router.get("/sop/download")
 def download_receiving_sop():
     if not SOP_FILE_PATH.exists():
@@ -100,6 +132,7 @@ def create_receiving_lot(
     payload.supplier_name = supplier_name
     payload.invoice_reference = invoice_reference
     payload.source_reference = _normalize_optional_text(payload.source_reference) or invoice_reference
+    payload.notes = _normalize_optional_text(payload.notes)
 
     lot = crud.create_receiving_lot(
         db,
@@ -357,7 +390,7 @@ def update_receiving_lot(
         supplier_name=supplier_name,
         invoice_reference=invoice_reference,
         source_reference=source_reference,
-        notes=payload.notes,
+        notes=_normalize_optional_text(payload.notes),
     )
     return schemas.ReceivingLotRead.model_validate(updated)
 
@@ -404,6 +437,35 @@ async def upload_receiving_lot_support_file(
         support_file_size=stored.size,
     )
     return schemas.ReceivingLotRead.model_validate(updated)
+
+
+@router.get("/lots/{lot_id}/support-file")
+def get_receiving_lot_support_file(
+    lot_id: int,
+    download: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    _: models.PosUser = Depends(require_permission("movements.view")),
+):
+    lot = crud.get_receiving_lot(db, lot_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    if not lot.support_file_url:
+        raise HTTPException(status_code=404, detail="El lote no tiene soporte adjunto")
+
+    file_path = _resolve_receiving_support_file_path(lot_id, lot.support_file_url)
+    if not file_path or not file_path.exists():
+        raise HTTPException(status_code=404, detail="No se encontró el soporte adjunto")
+
+    download_name = (lot.support_file_name or file_path.name or "soporte_recepcion").strip()
+    media_type, _ = mimetypes.guess_type(str(file_path))
+    disposition = "attachment" if download else "inline"
+    headers = {"Content-Disposition": f'{disposition}; filename="{download_name}"'}
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type or "application/octet-stream",
+        headers=headers,
+    )
 
 
 @router.get("/lots/{lot_id}", response_model=schemas.ReceivingLotDetail)
@@ -476,6 +538,7 @@ def list_receiving_documents(
             models.ReceivingLot.closed_at.label("closed_at"),
             models.ReceivingLot.supplier_name.label("supplier_name"),
             models.ReceivingLot.invoice_reference.label("invoice_reference"),
+            models.ReceivingLot.notes.label("notes"),
             models.ReceivingLot.support_file_name.label("support_file_name"),
             models.ReceivingLot.support_file_url.label("support_file_url"),
             models.ReceivingLot.support_file_size.label("support_file_size"),
@@ -503,6 +566,7 @@ def list_receiving_documents(
         models.ReceivingLot.closed_at,
         models.ReceivingLot.supplier_name,
         models.ReceivingLot.invoice_reference,
+        models.ReceivingLot.notes,
         models.ReceivingLot.support_file_name,
         models.ReceivingLot.support_file_url,
         models.ReceivingLot.support_file_size,
@@ -532,6 +596,7 @@ def list_receiving_documents(
             closed_by_user_name=row.closed_by_user_name,
             supplier_name=row.supplier_name,
             invoice_reference=row.invoice_reference,
+            notes=row.notes,
             support_file_name=row.support_file_name,
             support_file_url=row.support_file_url,
             support_file_size=row.support_file_size,

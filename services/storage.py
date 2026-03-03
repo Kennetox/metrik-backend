@@ -123,6 +123,9 @@ def _get_receiving_support_dir(lot_id: int) -> Path:
     base = Path(os.getenv("RECEIVING_SUPPORT_UPLOAD_DIR", "uploads/receiving-support"))
     return base / str(lot_id)
 
+def get_receiving_support_dir(lot_id: int) -> Path:
+    return _get_receiving_support_dir(lot_id)
+
 
 def _build_receiving_support_url(filename: str, lot_id: int) -> str:
     base_url = os.getenv("RECEIVING_SUPPORT_BASE_URL")
