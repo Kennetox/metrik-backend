@@ -51,6 +51,16 @@ def _parse_iso_datetime(value: str | None, field_name: str) -> datetime | None:
         ) from exc
 
 
+def _require_tenant_id(db: Session, user: models.PosUser) -> int:
+    tenant_id = crud.resolve_user_tenant_id(db, user)
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Usuario sin empresa asignada para operar recepción",
+        )
+    return tenant_id
+
+
 def _validate_invoice_requirements(
     purchase_type: schemas.PurchaseType,
     supplier_name: str | None,
@@ -70,7 +80,11 @@ def _validate_invoice_requirements(
         )
 
 
-def _resolve_receiving_support_file_path(lot_id: int, support_file_url: str | None) -> Path | None:
+def _resolve_receiving_support_file_path(
+    lot_id: int,
+    support_file_url: str | None,
+    tenant_id: int | None = None,
+) -> Path | None:
     if not support_file_url:
         return None
 
@@ -84,10 +98,17 @@ def _resolve_receiving_support_file_path(lot_id: int, support_file_url: str | No
     if not candidate_name:
         return None
 
-    lot_dir = storage.get_receiving_support_dir(lot_id)
+    lot_dir = storage.get_receiving_support_dir(lot_id, tenant_id=tenant_id)
     direct_path = lot_dir / candidate_name
     if direct_path.exists():
         return direct_path
+
+    # Backward compatibility for files saved before tenant-based physical paths.
+    if tenant_id is not None:
+        legacy_lot_dir = storage.get_receiving_support_dir(lot_id, tenant_id=None)
+        legacy_direct_path = legacy_lot_dir / candidate_name
+        if legacy_direct_path.exists():
+            return legacy_direct_path
 
     if lot_dir.exists():
         files = [entry for entry in lot_dir.iterdir() if entry.is_file()]
@@ -148,15 +169,17 @@ def list_receiving_lots(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = _require_tenant_id(db, current_user)
     items = crud.list_receiving_lots(
         db,
         status=status,
         skip=skip,
         limit=limit,
+        tenant_id=tenant_id,
     )
-    total = crud.count_receiving_lots(db, status=status)
+    total = crud.count_receiving_lots(db, status=status, tenant_id=tenant_id)
     return schemas.ReceivingLotPage(
         items=items,
         total=total,
@@ -170,9 +193,10 @@ def search_receiving_products(
     q: str = Query(default="", min_length=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
-    products = crud.search_receiving_products(db, q=q, limit=limit)
+    tenant_id = _require_tenant_id(db, current_user)
+    products = crud.search_receiving_products(db, q=q, limit=limit, tenant_id=tenant_id)
     return [schemas.ReceivingProductLookup.model_validate(product) for product in products]
 
 
@@ -181,9 +205,10 @@ def list_receiving_product_groups(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=1000, ge=1, le=5000),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
-    configured_groups = crud.list_product_groups(db, skip=0, limit=5000)
+    tenant_id = _require_tenant_id(db, current_user)
+    configured_groups = crud.list_product_groups(db, skip=0, limit=5000, tenant_id=tenant_id)
     options_by_path: dict[str, schemas.ReceivingProductGroupOption] = {}
 
     for group in configured_groups:
@@ -199,6 +224,7 @@ def list_receiving_product_groups(
     product_group_rows = (
         db.query(models.Product.group_name)
         .filter(models.Product.group_name.isnot(None))
+        .filter(models.Product.tenant_id == tenant_id)
         .all()
     )
     for (raw_group_name,) in product_group_rows:
@@ -226,9 +252,10 @@ def list_receiving_product_groups(
 @router.get("/products/next-codes", response_model=schemas.ReceivingProductCodePreview)
 def get_receiving_product_next_codes(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    sku, barcode = crud.get_next_product_codes(db)
+    tenant_id = _require_tenant_id(db, current_user)
+    sku, barcode = crud.get_next_product_codes(db, tenant_id=tenant_id)
     return schemas.ReceivingProductCodePreview(sku=sku, barcode=barcode)
 
 
@@ -239,7 +266,8 @@ def quick_create_receiving_product(
     actor: models.PosUser = Depends(require_permission("movements.manage")),
 ):
     try:
-        product = crud.create_receiving_product_quick(db, payload)
+        tenant_id = _require_tenant_id(db, actor)
+        product = crud.create_receiving_product_quick(db, payload, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -268,15 +296,16 @@ def add_receiving_lot_item(
     lot_id: int,
     payload: schemas.ReceivingLotItemCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
         raise HTTPException(status_code=409, detail="Solo puedes editar lotes abiertos")
 
-    product = crud.get_product(db, payload.product_id)
+    product = crud.get_product(db, payload.product_id, tenant_id=tenant_id)
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
@@ -297,15 +326,21 @@ def update_receiving_lot_item(
     item_id: int,
     payload: schemas.ReceivingLotItemUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
         raise HTTPException(status_code=409, detail="Solo puedes editar lotes abiertos")
 
-    item = crud.get_receiving_lot_item(db, lot_id=lot_id, item_id=item_id)
+    item = crud.get_receiving_lot_item(
+        db,
+        lot_id=lot_id,
+        item_id=item_id,
+        tenant_id=tenant_id,
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Ítem no encontrado")
 
@@ -324,15 +359,21 @@ def delete_receiving_lot_item(
     lot_id: int,
     item_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
         raise HTTPException(status_code=409, detail="Solo puedes editar lotes abiertos")
 
-    item = crud.get_receiving_lot_item(db, lot_id=lot_id, item_id=item_id)
+    item = crud.get_receiving_lot_item(
+        db,
+        lot_id=lot_id,
+        item_id=item_id,
+        tenant_id=tenant_id,
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Ítem no encontrado")
 
@@ -346,13 +387,14 @@ def close_receiving_lot(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
         raise HTTPException(status_code=409, detail="El lote ya está cerrado o cancelado")
 
-    items = crud.list_receiving_lot_items(db, lot_id=lot_id)
+    items = crud.list_receiving_lot_items(db, lot_id=lot_id, tenant_id=tenant_id)
     if len(items) == 0:
         raise HTTPException(status_code=409, detail="No puedes cerrar un lote sin ítems")
     _validate_invoice_requirements(
@@ -370,9 +412,10 @@ def update_receiving_lot(
     lot_id: int,
     payload: schemas.ReceivingLotUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
@@ -399,9 +442,10 @@ def update_receiving_lot(
 def cancel_receiving_lot(
     lot_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
@@ -416,16 +460,21 @@ async def upload_receiving_lot_support_file(
     lot_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.manage")),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if lot.status != "open":
         raise HTTPException(status_code=409, detail="Solo puedes adjuntar soporte en lotes abiertos")
 
     try:
-        stored = await storage.save_receiving_support_file(file, lot_id=lot_id)
+        stored = await storage.save_receiving_support_file(
+            file,
+            lot_id=lot_id,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -444,14 +493,20 @@ def get_receiving_lot_support_file(
     lot_id: int,
     download: bool = Query(default=False),
     db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
     if not lot.support_file_url:
         raise HTTPException(status_code=404, detail="El lote no tiene soporte adjunto")
 
-    file_path = _resolve_receiving_support_file_path(lot_id, lot.support_file_url)
+    file_path = _resolve_receiving_support_file_path(
+        lot_id,
+        lot.support_file_url,
+        tenant_id=tenant_id,
+    )
     if not file_path or not file_path.exists():
         raise HTTPException(status_code=404, detail="No se encontró el soporte adjunto")
 
@@ -471,13 +526,18 @@ def get_receiving_lot_support_file(
 def get_receiving_lot(
     lot_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
-    lot = crud.get_receiving_lot(db, lot_id)
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
     if not lot:
         raise HTTPException(status_code=404, detail="Lote no encontrado")
 
-    items: List[models.ReceivingLotItem] = crud.list_receiving_lot_items(db, lot_id)
+    items: List[models.ReceivingLotItem] = crud.list_receiving_lot_items(
+        db,
+        lot_id,
+        tenant_id=tenant_id,
+    )
     pending_labels = sum(max(0, int(math.ceil(float(item.qty_received or 0)))) for item in items)
     warnings: List[schemas.ApiWarning] = []
 
@@ -522,8 +582,9 @@ def list_receiving_documents(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = _require_tenant_id(db, current_user)
     parsed_date_from = _parse_iso_datetime(date_from, "date_from")
     parsed_date_to = _parse_iso_datetime(date_to, "date_to")
     query = (
@@ -548,6 +609,7 @@ def list_receiving_documents(
         .outerjoin(models.ReceivingLotItem, models.ReceivingLotItem.lot_id == models.ReceivingLot.id)
         .outerjoin(models.PosUser, models.PosUser.id == models.ReceivingLot.closed_by_user_id)
         .filter(models.ReceivingLot.status == "closed")
+        .filter(models.ReceivingLot.tenant_id == tenant_id)
     )
 
     if parsed_date_from:
@@ -610,8 +672,9 @@ def list_receiving_created_products(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = _require_tenant_id(db, current_user)
     source_pattern_legacy = '%"source": "receiving_quick_create"%'
     source_pattern_app = '%"source": "metrik_stock_app"%'
     query = (
@@ -629,6 +692,8 @@ def list_receiving_created_products(
         )
         .join(models.Product, models.Product.id == models.ProductAuditLog.product_id)
         .filter(models.ProductAuditLog.action == "create")
+        .filter(models.ProductAuditLog.tenant_id == tenant_id)
+        .filter(models.Product.tenant_id == tenant_id)
         .filter(
             or_(
                 cast(models.ProductAuditLog.changes, String).ilike(source_pattern_legacy),

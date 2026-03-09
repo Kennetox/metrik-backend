@@ -1,12 +1,14 @@
 import logging
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from database import Base, engine
+from database import Base, engine, SessionLocal
 import models
+import crud
 from db_migrations import run_schema_upgrades
 from services import storage
 from routers import (
@@ -22,6 +24,7 @@ from routers import (
     inventory as inventory_router,
     receiving as receiving_router,
     hr as hr_router,
+    platform as platform_router,
 )
 
 app = FastAPI(
@@ -59,6 +62,21 @@ app.add_middleware(
 Base.metadata.create_all(bind=engine)
 # Aplicamos parches de schema para SQLite y Postgres.
 run_schema_upgrades(engine)
+
+platform_owner_email = os.getenv("PLATFORM_OWNER_EMAIL")
+platform_owner_password = os.getenv("PLATFORM_OWNER_PASSWORD")
+platform_owner_name = os.getenv("PLATFORM_OWNER_NAME", "Metrik Platform Admin")
+if platform_owner_email and platform_owner_password:
+    bootstrap_db = SessionLocal()
+    try:
+        crud.ensure_platform_user(
+            bootstrap_db,
+            email=platform_owner_email,
+            password=platform_owner_password,
+            name=platform_owner_name,
+        )
+    finally:
+        bootstrap_db.close()
 
 logger = logging.getLogger("kensar.validation")
 
@@ -104,6 +122,7 @@ app.include_router(auth_router.router)
 app.include_router(inventory_router.router)
 app.include_router(receiving_router.router)
 app.include_router(hr_router.router)
+app.include_router(platform_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
 

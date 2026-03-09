@@ -129,6 +129,7 @@ def _create_sale_record(
     customer_id=None,
     surcharge_amount: float = 0.0,
     surcharge_label: Optional[str] = None,
+    pos_name: str = "POS 1",
 ):
     db = TestingSessionLocal()
     product = models.Product(
@@ -163,7 +164,7 @@ def _create_sale_record(
         surcharge_label=surcharge_label,
         customer_name="Test",
         notes=None,
-        pos_name="POS 1",
+        pos_name=pos_name,
         vendor_name="Tester",
         customer_id=customer_id,
         items=[
@@ -241,8 +242,21 @@ def test_sale_with_surcharge_fields(client: TestClient):
 
 def test_closure_accumulates_surcharge(client: TestClient):
     headers = _auth_headers(client)
-    _create_sale_record(surcharge_amount=25.0, surcharge_label="Manual")
-    resp = client.post("/pos/closures", json=_closure_payload(), headers=headers)
+    isolated_pos_name = "POS SURCHARGE TEST"
+    _create_sale_record(
+        surcharge_amount=25.0,
+        surcharge_label="Manual",
+        pos_name=isolated_pos_name,
+    )
+    resp = client.post(
+        "/pos/closures",
+        json={
+            "pos_name": isolated_pos_name,
+            "counted_cash": 100.0,
+            "notes": "Cierre automático",
+        },
+        headers=headers,
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert data["total_surcharge"] == 25.0

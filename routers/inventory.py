@@ -2,13 +2,13 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, or_, true
 from fastapi.responses import StreamingResponse
 import csv
 import io
 import pandas as pd
 
-import models, schemas
+import crud, models, schemas
 from database import get_db
 from dependencies import require_permission
 
@@ -23,12 +23,18 @@ router = APIRouter(
 def get_inventory_overview(
     status_limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     stock_subquery = (
         db.query(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty_on_hand"),
+        )
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
         )
         .group_by(models.InventoryMovement.product_id)
         .subquery()
@@ -42,6 +48,11 @@ def get_inventory_overview(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
         .all()
     )
 
@@ -87,6 +98,16 @@ def get_inventory_overview(
     movement_rows = (
         db.query(models.InventoryMovement, models.Product.name)
         .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
         .order_by(models.InventoryMovement.created_at.desc())
         .limit(8)
         .all()
@@ -129,11 +150,22 @@ def list_inventory_movements(
     skip: int = 0,
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     movement_rows = (
         db.query(models.InventoryMovement, models.Product.name)
         .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
         .order_by(models.InventoryMovement.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -199,14 +231,20 @@ def list_inventory_products(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     stock_subquery = (
         db.query(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label(
                 "qty_on_hand"
             ),
+        )
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
         )
         .group_by(models.InventoryMovement.product_id)
         .subquery()
@@ -222,6 +260,11 @@ def list_inventory_products(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock)
     product_rows = _apply_product_sort(product_rows, qty_col, sort)
@@ -232,6 +275,11 @@ def list_inventory_products(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     count_query = _apply_product_filters(count_query, qty_col, search, stock)
     total = int(count_query.scalar() or 0)
@@ -248,6 +296,11 @@ def list_inventory_products(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     totals_query = _apply_product_filters(totals_query, qty_col, search, stock)
     totals_row = totals_query.first()
@@ -295,14 +348,20 @@ def export_inventory_products(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     stock_subquery = (
         db.query(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label(
                 "qty_on_hand"
             ),
+        )
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
         )
         .group_by(models.InventoryMovement.product_id)
         .subquery()
@@ -316,6 +375,11 @@ def export_inventory_products(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock)
     product_rows = _apply_product_sort(product_rows, qty_col, sort).all()
@@ -373,14 +437,20 @@ def export_inventory_products_xlsx(
         default="name_asc", pattern="^(name_asc|stock_asc|stock_desc)$"
     ),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     stock_subquery = (
         db.query(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label(
                 "qty_on_hand"
             ),
+        )
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
         )
         .group_by(models.InventoryMovement.product_id)
         .subquery()
@@ -394,6 +464,11 @@ def export_inventory_products_xlsx(
         .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
         .filter(models.Product.service.is_(False))
         .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock)
     product_rows = _apply_product_sort(product_rows, qty_col, sort).all()
@@ -441,9 +516,19 @@ def get_product_history(
     skip: int = 0,
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("movements.view")),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
-    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    product = (
+        db.query(models.Product)
+        .filter(models.Product.id == product_id)
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
@@ -470,6 +555,11 @@ def get_product_history(
             ).label("total_out"),
         )
         .filter(models.InventoryMovement.product_id == product_id)
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
         .first()
     )
     net = float(getattr(totals, "net", 0.0) or 0.0)
@@ -479,6 +569,11 @@ def get_product_history(
     movement_query = (
         db.query(models.InventoryMovement)
         .filter(models.InventoryMovement.product_id == product_id)
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
     )
     total_movements = int(
         movement_query.with_entities(func.count(models.InventoryMovement.id)).scalar()
@@ -532,7 +627,17 @@ def create_inventory_movement(
     if payload.qty_delta == 0:
         raise HTTPException(status_code=400, detail="La cantidad no puede ser 0")
 
-    product = db.query(models.Product).filter(models.Product.id == payload.product_id).first()
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    product = (
+        db.query(models.Product)
+        .filter(models.Product.id == payload.product_id)
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     if product.service:
@@ -542,6 +647,7 @@ def create_inventory_movement(
         )
 
     movement = models.InventoryMovement(
+        tenant_id=tenant_id,
         product_id=payload.product_id,
         qty_delta=payload.qty_delta,
         reason=payload.reason,

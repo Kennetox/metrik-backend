@@ -388,6 +388,7 @@ class ReceivingDocumentRead(BaseModel):
     closed_by_user_name: Optional[str] = None
     supplier_name: Optional[str] = None
     invoice_reference: Optional[str] = None
+    notes: Optional[str] = None
     support_file_name: Optional[str] = None
     support_file_url: Optional[str] = None
     support_file_size: Optional[int] = None
@@ -517,12 +518,10 @@ class PosSettingsBase(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     logo_url: Optional[str] = Field(
         default=None,
-        serialization_alias="logoUrl",
         validation_alias="logoUrl",
     )
     ticket_logo_url: Optional[str] = Field(
         default=None,
-        serialization_alias="ticketLogoUrl",
         validation_alias="ticketLogoUrl",
     )
     closure_email_recipients: List[EmailStr] = Field(
@@ -550,10 +549,6 @@ class PosSettingsBase(BaseModel):
         "contact_email",
         "contact_phone",
         "ticket_footer",
-        "smtp_host",
-        "smtp_user",
-        "smtp_password",
-        "email_from",
         mode="before",
     )
     @classmethod
@@ -591,6 +586,7 @@ class PosUserBase(BaseModel):
 class PosUserCreate(PosUserBase):
     password: Optional[str] = None
     employee_id: Optional[int] = None
+    create_hr_profile: bool = False
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
 
 
@@ -897,11 +893,15 @@ class PosStationCreate(BaseModel):
     label: str
     station_email: EmailStr
     station_password: Annotated[str, Field(min_length=6)]
+    station_type: Literal["desktop", "tablet"] = "desktop"
+    parent_station_id: Optional[str] = None
 
 
 class PosStationUpdate(BaseModel):
     label: Optional[str] = None
     is_active: Optional[bool] = None
+    station_type: Optional[Literal["desktop", "tablet"]] = None
+    parent_station_id: Optional[str] = None
     reset_pin: bool = False
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
     station_email: Optional[EmailStr] = None
@@ -928,6 +928,9 @@ class PosStationPrinterConfigRead(PosStationPrinterConfigBase):
 class PosStationRead(BaseModel):
     id: str
     label: str
+    station_type: Literal["desktop", "tablet"] = "desktop"
+    parent_station_id: Optional[str] = None
+    parent_station_label: Optional[str] = None
     station_email: Optional[EmailStr] = None
     is_active: bool
     last_login_at: Optional[datetime] = None
@@ -965,6 +968,19 @@ class PosStationNoticeRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PosClosureStationScopeItem(BaseModel):
+    station_id: str
+    station_label: str
+    station_type: Literal["desktop", "tablet"] = "desktop"
+    is_primary: bool = False
+
+
+class PosClosureStationScopeRead(BaseModel):
+    primary_station_id: str
+    station_ids: List[str] = Field(default_factory=list)
+    stations: List[PosClosureStationScopeItem] = Field(default_factory=list)
 
 
 class PosCustomerBase(BaseModel):
@@ -1493,15 +1509,149 @@ class SaleNumberReservationResponse(BaseModel):
     status: str
 
 
+class TenantRead(BaseModel):
+    id: int
+    slug: str
+    name: str
+    is_active: bool
+    lifecycle_stage: Literal["demo", "active", "inactive", "suspended", "archived"] = "active"
+    trial_started_at: Optional[datetime] = None
+    trial_ends_at: Optional[datetime] = None
+    converted_at: Optional[datetime] = None
+    enabled_modules: List[str] = []
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PlatformTenantAdminRead(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    status: Literal["Activo", "Inactivo"] = "Activo"
+    created_at: datetime
+
+
+class PlatformTenantCompanyRead(BaseModel):
+    company_name: str
+    tax_id: Optional[str] = None
+    address: Optional[str] = None
+    contact_email: Optional[EmailStr] = None
+    contact_phone: Optional[str] = None
+
+
+class TenantModuleCatalogItem(BaseModel):
+    id: str
+    label: str
+    description: str
+    required: bool = False
+    platform_visible: bool = True
+    enabled_by_default: bool = True
+
+
+class PlatformTenantRead(TenantRead):
+    admin_user: Optional[PlatformTenantAdminRead] = None
+    company_details: Optional[PlatformTenantCompanyRead] = None
+    trial_days_remaining: Optional[int] = None
+    module_catalog: List[TenantModuleCatalogItem] = []
+
+
+class PlatformTenantCreateRequest(BaseModel):
+    slug: Annotated[str, Field(min_length=2, max_length=64, pattern=r"^[a-z0-9-]+$")]
+    name: Annotated[str, Field(min_length=2, max_length=128)]
+    admin_name: Annotated[str, Field(min_length=2, max_length=128)]
+    admin_email: EmailStr
+    admin_password: Annotated[str, Field(min_length=8)]
+    admin_phone: Optional[str] = None
+
+
+class PlatformTenantCreateResponse(BaseModel):
+    tenant: PlatformTenantRead
+    admin_user: PosUserRead
+    detail: str = "Tenant creado correctamente"
+
+
+class PlatformTenantUpdateRequest(BaseModel):
+    name: Optional[Annotated[str, Field(min_length=2, max_length=128)]] = None
+    is_active: Optional[bool] = None
+    enabled_modules: Optional[List[str]] = None
+    lifecycle_stage: Optional[
+        Literal["demo", "active", "inactive", "suspended", "archived"]
+    ] = None
+
+
+class PlatformTenantRecoveryResponse(BaseModel):
+    detail: str
+    recipient: EmailStr
+    expires_in: int
+
+
+class PlatformTenantTrialUpdateRequest(BaseModel):
+    extra_days: Annotated[int, Field(ge=1, le=90)]
+
+
+class TenantSessionRead(BaseModel):
+    id: int
+    slug: str
+    name: str
+    lifecycle_stage: Literal["demo", "active", "inactive", "suspended", "archived"] = "active"
+    trial_started_at: Optional[datetime] = None
+    trial_ends_at: Optional[datetime] = None
+    trial_days_remaining: Optional[int] = None
+    enabled_modules: List[str] = []
+
+
+class PlatformUserRead(BaseModel):
+    id: int
+    email: EmailStr
+    name: str
+    is_active: bool
+    last_login: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PlatformLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class PlatformLoginResponse(BaseModel):
+    token: str
+    user: PlatformUserRead
+    expires_at: Optional[datetime] = None
+
+
 class AuthLoginRequest(BaseModel):
     email: EmailStr
     password: str
+    tenant_slug: Optional[str] = None
 
 
 class AuthLoginResponse(BaseModel):
     token: str
     user: PosUserRead
+    tenant: Optional[TenantSessionRead] = None
     expires_at: Optional[datetime] = None
+
+
+class DemoStartRequest(BaseModel):
+    company_name: Annotated[str, Field(min_length=2, max_length=128)]
+    business_type: Optional[Annotated[str, Field(max_length=80)]] = None
+    company_phone: Optional[str] = None
+    company_city: Optional[str] = None
+    admin_name: Annotated[str, Field(min_length=2, max_length=128)]
+    admin_email: EmailStr
+    admin_phone: Optional[str] = None
+    password: Annotated[str, Field(min_length=8)]
+
+
+class DemoStartResponse(AuthLoginResponse):
+    detail: str = "Demo creada correctamente"
 
 
 class AuthForgotPasswordRequest(BaseModel):
@@ -1549,9 +1699,13 @@ class AuthPosStationLoginResponse(BaseModel):
     station_id: str
     station_label: str
     station_email: EmailStr
+    tenant_name: Optional[str] = None
+    parent_station_id: Optional[str] = None
+    parent_station_label: Optional[str] = None
 
 
 class AuthTabletEmailCheckRequest(BaseModel):
+    station_id: str
     email: EmailStr
 
 
@@ -1598,6 +1752,15 @@ class EmailSendRequest(BaseModel):
 class EmailSendResponse(BaseModel):
     status: str = "sent"
     document_type: Literal["ticket", "invoice"] = "ticket"
+
+
+class SaleDocumentResponse(BaseModel):
+    sale_id: int
+    sale_number: Optional[int] = None
+    document_number: Optional[str] = None
+    document_type: Literal["ticket", "invoice"] = "ticket"
+    filename: str
+    document_html: str
 
 
 class SmtpTestEmailRequest(BaseModel):
@@ -1721,12 +1884,38 @@ class PosClosureCreate(PosClosureBase):
     closure_date: Optional[date] = None
 
 
+class PosClosureStationBreakdown(BaseModel):
+    station_id: Optional[str] = None
+    station_label: str
+    station_type: Optional[str] = None
+    sales_count: int = 0
+    total_amount: float = 0.0
+    total_refunds: float = 0.0
+    total_cash: float = 0.0
+    total_card: float = 0.0
+    total_qr: float = 0.0
+    total_nequi: float = 0.0
+    total_daviplata: float = 0.0
+    total_credit: float = 0.0
+    change_extra_total: float = 0.0
+    change_refund_total: float = 0.0
+    net_amount: float = 0.0
+
+
 class PosClosureRead(PosClosureBase):
     id: int
     consecutive: Optional[str] = None
     closed_by_user_id: int
     closed_by_user_name: str
     sales_count: int
+    station_breakdown: List[PosClosureStationBreakdown] = Field(default_factory=list)
+
+    @field_validator("station_breakdown", mode="before")
+    @classmethod
+    def _normalize_station_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
 
     class Config:
         from_attributes = True

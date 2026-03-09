@@ -19,11 +19,62 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    slug = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    lifecycle_stage = Column(String(24), nullable=False, default="active")
+    trial_started_at = Column(DateTime, nullable=True)
+    trial_ends_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    enabled_modules = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class PlatformUser(Base):
+    __tablename__ = "platform_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    password_hash = Column(String, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class DemoSignupAudit(Base):
+    __tablename__ = "demo_signup_audits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    email = Column(String(255), nullable=False, index=True)
+    ip_address = Column(String(64), nullable=True, index=True)
+    user_agent = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    sku = Column(String, unique=True, index=True, nullable=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    sku = Column(String, index=True, nullable=True)
     name = Column(String, index=True, nullable=False)
 
     price = Column(Float, nullable=False)
@@ -61,6 +112,7 @@ class ProductAuditLog(Base):
     __tablename__ = "product_audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     product_id = Column(Integer, nullable=False, index=True)
     action = Column(String, nullable=False)  # create | update | delete
     actor_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
@@ -76,6 +128,7 @@ class ProductGroup(Base):
     __tablename__ = "product_groups"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     path = Column(String, unique=True, nullable=False, index=True)
     display_name = Column(String, nullable=False)
     parent_path = Column(String, nullable=True)
@@ -95,6 +148,7 @@ class InventoryMovement(Base):
     __tablename__ = "inventory_movements"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     qty_delta = Column(Float, nullable=False, default=0)
     reason = Column(String, nullable=False)
@@ -112,6 +166,7 @@ class ReceivingLot(Base):
     __tablename__ = "receiving_lots"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     lot_number = Column(String, unique=True, index=True, nullable=True)
     status = Column(String, nullable=False, default="open")
     purchase_type = Column(String, nullable=False, default="cash")
@@ -147,6 +202,7 @@ class ReceivingLotItem(Base):
     __tablename__ = "receiving_lot_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     lot_id = Column(Integer, ForeignKey("receiving_lots.id"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     product_name_snapshot = Column(String, nullable=False)
@@ -173,6 +229,7 @@ class Sale(Base):
     __tablename__ = "sales"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     status = Column(String, nullable=False, default="active")
     voided_at = Column(DateTime, nullable=True)
@@ -184,7 +241,7 @@ class Sale(Base):
     sale_number = Column(Integer, index=True, nullable=True)
 
     # Número de documento único tipo "V-000001"
-    document_number = Column(String, unique=True, index=True, nullable=True)
+    document_number = Column(String, index=True, nullable=True)
 
     # Método principal de pago (nuevo campo pensado para reportes)
     main_payment_method = Column(String, nullable=False, default="cash")
@@ -304,6 +361,7 @@ class DocumentAdjustment(Base):
     __tablename__ = "document_adjustments"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     doc_type = Column(String, nullable=False, index=True)
     doc_id = Column(Integer, nullable=False, index=True)
     adjustment_type = Column(String, nullable=False)
@@ -325,10 +383,11 @@ class SaleNumberReservation(Base):
     __tablename__ = "sale_number_reservations"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     status = Column(String, nullable=False, default="reserved")
-    sale_number = Column(Integer, unique=True, index=True, nullable=False)
-    document_number = Column(String, unique=True, index=True, nullable=False)
+    sale_number = Column(Integer, index=True, nullable=False)
+    document_number = Column(String, index=True, nullable=False)
     pos_name = Column(String, nullable=True)
     station_id = Column(String, nullable=True)
     reserved_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
@@ -342,6 +401,7 @@ class SaleItem(Base):
     __tablename__ = "sale_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
 
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
@@ -370,6 +430,7 @@ class SalePayment(Base):
     __tablename__ = "sale_payments"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
 
     # Relación con la venta
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
@@ -388,10 +449,14 @@ class SalePayment(Base):
 
 class PaymentMethod(Base):
     __tablename__ = "payment_methods"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="payment_methods_tenant_slug_key"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
-    slug = Column(String, unique=True, index=True, nullable=False)
+    slug = Column(String, index=True, nullable=False)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     allow_change = Column(Boolean, nullable=False, default=False)
@@ -413,7 +478,8 @@ def default_notifications():
 class PosSettings(Base):
     __tablename__ = "pos_settings"
 
-    id = Column(Integer, primary_key=True, default=1)
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     company_name = Column(String, nullable=False, default="Mi Negocio")
     tax_id = Column(String, nullable=True)
     address = Column(String, nullable=True)
@@ -445,6 +511,7 @@ class PosCustomer(Base):
     __tablename__ = "pos_customers"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
@@ -466,6 +533,7 @@ class HREmployee(Base):
     __tablename__ = "hr_employees"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False, index=True)
     email = Column(String, nullable=True, index=True)
     status = Column(String, nullable=False, default="Activo")
@@ -511,6 +579,7 @@ class ScheduleTemplate(Base):
     __tablename__ = "schedule_templates"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     start_time = Column(String, nullable=False)
     end_time = Column(String, nullable=False)
@@ -534,6 +603,7 @@ class ScheduleWeek(Base):
     __tablename__ = "schedule_weeks"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     week_start = Column(Date, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="draft")
     notes = Column(Text, nullable=True)
@@ -562,6 +632,7 @@ class ScheduleShift(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     week_id = Column(Integer, ForeignKey("schedule_weeks.id"), nullable=False, index=True)
     employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
     shift_date = Column(Date, nullable=False, index=True)
@@ -595,6 +666,7 @@ class PosUser(Base):
     __tablename__ = "pos_users"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, unique=True, index=True)
     role = Column(String, nullable=False, default="Vendedor")
@@ -628,6 +700,7 @@ class PosSession(Base):
     __tablename__ = "pos_sessions"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
     token_hash = Column(String(128), unique=True, nullable=False, index=True)
     session_type = Column(String, nullable=False)
@@ -646,6 +719,7 @@ class PosUserDocument(Base):
     __tablename__ = "pos_user_documents"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
     file_name = Column(String, nullable=False)
     file_url = Column(String(512), nullable=False)
@@ -660,6 +734,7 @@ class HREmployeeDocument(Base):
     __tablename__ = "hr_employee_documents"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     employee_id = Column(Integer, ForeignKey("hr_employees.id"), nullable=False, index=True)
     file_name = Column(String, nullable=False)
     file_url = Column(String(512), nullable=False)
@@ -674,6 +749,7 @@ class PasswordReset(Base):
     __tablename__ = "password_resets"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
     token_hash = Column(String(128), unique=True, nullable=False)
     expires_at = Column(DateTime, nullable=False)
@@ -687,11 +763,14 @@ class PosStation(Base):
     __tablename__ = "pos_stations"
 
     id = Column(String, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     label = Column(String, nullable=False)
     pos_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     station_email = Column(String, nullable=True)
     station_password_hash = Column(String, nullable=True)
     pin_hash = Column(String, nullable=True)
+    station_type = Column(String, nullable=False, default="desktop")
+    parent_station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     failed_attempts = Column(Integer, nullable=False, default=0)
     last_login_at = Column(DateTime, nullable=True)
@@ -719,12 +798,18 @@ class PosStation(Base):
         back_populates="stations",
         foreign_keys=[pos_user_id],
     )
+    parent_station = relationship(
+        "PosStation",
+        remote_side=[id],
+        foreign_keys=[parent_station_id],
+    )
 
 
 class PosStationNotice(Base):
     __tablename__ = "pos_station_notices"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     station_id = Column(String, ForeignKey("pos_stations.id"), nullable=False, index=True)
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -741,6 +826,7 @@ class PosClosure(Base):
     __tablename__ = "pos_closures"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     pos_name = Column(String, nullable=True)
     pos_identifier = Column(String, nullable=True)
     station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
@@ -748,7 +834,7 @@ class PosClosure(Base):
     closed_by_user_name = Column(String, nullable=False)
     opened_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    consecutive = Column(String, unique=True, index=True, nullable=True)
+    consecutive = Column(String, index=True, nullable=True)
 
     total_amount = Column(Float, nullable=False, default=0)
     total_cash = Column(Float, nullable=False, default=0)
@@ -767,6 +853,7 @@ class PosClosure(Base):
     change_count = Column(Integer, nullable=False, default=0)
     notes = Column(Text, nullable=True)
     total_surcharge = Column(Float, nullable=False, default=0)
+    station_breakdown = Column(JSON, nullable=True)
 
     closed_by_user = relationship("PosUser")
     station = relationship("PosStation")
@@ -782,6 +869,7 @@ class SeparatedOrder(Base):
     __tablename__ = "separated_orders"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, unique=True)
     customer_id = Column(Integer, ForeignKey("pos_customers.id"), nullable=True)
     customer_name = Column(String, nullable=True)
@@ -821,6 +909,7 @@ class SeparatedOrderPayment(Base):
     __tablename__ = "separated_order_payments"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     separated_order_id = Column(
         Integer,
         ForeignKey("separated_orders.id"),
@@ -848,9 +937,10 @@ class SaleReturn(Base):
     __tablename__ = "sale_returns"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
 
-    document_number = Column(String, unique=True, index=True, nullable=True)
+    document_number = Column(String, index=True, nullable=True)
     status = Column(String, nullable=False, default="confirmed")
     notes = Column(String, nullable=True)
     created_by = Column(String, nullable=True)
@@ -892,6 +982,7 @@ class SaleReturnItem(Base):
     __tablename__ = "sale_return_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     return_id = Column(
         Integer,
         ForeignKey("sale_returns.id"),
@@ -922,6 +1013,7 @@ class SaleReturnPayment(Base):
     __tablename__ = "sale_return_payments"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     return_id = Column(
         Integer,
         ForeignKey("sale_returns.id"),
@@ -939,10 +1031,11 @@ class SaleChange(Base):
     __tablename__ = "sale_changes"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
     closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
 
-    document_number = Column(String, unique=True, index=True, nullable=True)
+    document_number = Column(String, index=True, nullable=True)
     status = Column(String, nullable=False, default="confirmed")
     notes = Column(String, nullable=True)
     created_by = Column(String, nullable=True)
@@ -984,6 +1077,7 @@ class SaleChangeReturnItem(Base):
     __tablename__ = "sale_change_return_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     change_id = Column(
         Integer,
         ForeignKey("sale_changes.id"),
@@ -1014,6 +1108,7 @@ class SaleChangeNewItem(Base):
     __tablename__ = "sale_change_new_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     change_id = Column(
         Integer,
         ForeignKey("sale_changes.id"),
@@ -1036,6 +1131,7 @@ class SaleChangePayment(Base):
     __tablename__ = "sale_change_payments"
 
     id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     change_id = Column(
         Integer,
         ForeignKey("sale_changes.id"),

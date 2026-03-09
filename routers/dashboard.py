@@ -13,7 +13,7 @@ from io import BytesIO
 import models
 import schemas
 from database import get_db
-from dependencies import require_permission
+from dependencies import get_current_tenant_id, require_permission
 
 
 router = APIRouter(
@@ -73,16 +73,25 @@ def _parse_adjustment_payments(payload: object) -> list[tuple[str, float]]:
     return results
 
 
-def _collect_sale_adjustments(db: Session, sale_ids: list[int]):
+def _collect_sale_adjustments(
+    db: Session,
+    sale_ids: list[int],
+    tenant_id: int,
+):
     if not sale_ids:
         return {}, {}
-    adjustments = (
+    adjustments_query = (
         db.query(models.DocumentAdjustment)
         .filter(models.DocumentAdjustment.doc_type == "sale")
         .filter(models.DocumentAdjustment.doc_id.in_(sale_ids))
-        .order_by(models.DocumentAdjustment.created_at.desc())
-        .all()
     )
+    if tenant_id is not None:
+        adjustments_query = adjustments_query.filter(
+            models.DocumentAdjustment.tenant_id == tenant_id
+        )
+    adjustments = adjustments_query.order_by(
+        models.DocumentAdjustment.created_at.desc()
+    ).all()
     latest_payment_adjustment: dict[int, models.DocumentAdjustment] = {}
     total_delta: dict[int, float] = defaultdict(float)
     for adjustment in adjustments:
@@ -131,6 +140,7 @@ def _resolve_range_bounds(
 def get_payment_methods_summary(
     range: str = "day",
     start_date: Optional[str] = None,
+    tenant_id: int = Depends(get_current_tenant_id),
     db: Session = Depends(get_db),
 ):
     bogota_tz = ZoneInfo("America/Bogota")
@@ -150,12 +160,14 @@ def get_payment_methods_summary(
     sales = (
         db.query(models.Sale)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= start_utc)
         .filter(models.Sale.created_at <= end_utc)
         .all()
     )
     returns = (
         db.query(models.SaleReturn)
+        .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= start_utc)
         .filter(models.SaleReturn.created_at <= end_utc)
         .filter(models.SaleReturn.status == "confirmed")
@@ -164,6 +176,7 @@ def get_payment_methods_summary(
     )
     changes = (
         db.query(models.SaleChange)
+        .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= start_utc)
         .filter(models.SaleChange.created_at <= end_utc)
         .filter(models.SaleChange.status == "confirmed")
@@ -171,6 +184,7 @@ def get_payment_methods_summary(
     )
     separated_payments = (
         db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -185,7 +199,7 @@ def get_payment_methods_summary(
     payment_totals = defaultdict(float)
     payment_ticket_sets = defaultdict(set)
     payment_adjustments, _ = _collect_sale_adjustments(
-        db, [sale.id for sale in sales]
+        db, [sale.id for sale in sales], tenant_id
     )
 
     for sale in sales:
@@ -260,7 +274,10 @@ def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: date
 
 
 @router.get("/summary", response_model=schemas.DashboardSummary)
-def get_dashboard_summary(db: Session = Depends(get_db)):
+def get_dashboard_summary(
+    tenant_id: int = Depends(get_current_tenant_id),
+    db: Session = Depends(get_db),
+):
     """
     Devuelve los KPIs básicos para el inicio:
     - Ventas de hoy
@@ -290,11 +307,13 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     sales_month = (
         db.query(models.Sale)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= month_start_utc)
         .all()
     )
     returns_month = (
         db.query(models.SaleReturn)
+        .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= month_start_utc)
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.SaleReturn.adjustment_reference.is_(None))
@@ -302,12 +321,14 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     )
     changes_month = (
         db.query(models.SaleChange)
+        .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= month_start_utc)
         .filter(models.SaleChange.status == "confirmed")
         .all()
     )
     separated_payments_month = (
         db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -320,11 +341,13 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     sales_trend = (
         db.query(models.Sale)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= trend_start_utc)
         .all()
     )
     returns_trend = (
         db.query(models.SaleReturn)
+        .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= trend_start_utc)
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.SaleReturn.adjustment_reference.is_(None))
@@ -332,12 +355,14 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     )
     changes_trend = (
         db.query(models.SaleChange)
+        .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= trend_start_utc)
         .filter(models.SaleChange.status == "confirmed")
         .all()
     )
     separated_payments_trend = (
         db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -354,7 +379,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     change_extra_by_day = defaultdict(float)
     change_refund_by_day = defaultdict(float)
     payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
-        db, [sale.id for sale in sales_month]
+        db, [sale.id for sale in sales_month], tenant_id
     )
 
     for sale in sales_month:
@@ -387,7 +412,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     trend_change_extra_by_day = defaultdict(float)
     trend_change_refund_by_day = defaultdict(float)
     _, trend_total_delta_by_sale = _collect_sale_adjustments(
-        db, [sale.id for sale in sales_trend]
+        db, [sale.id for sale in sales_trend], tenant_id
     )
 
     for sale in sales_trend:
@@ -611,6 +636,7 @@ def export_documents_excel(
 )
 def get_monthly_sales(
     year: Optional[int] = None,
+    tenant_id: int = Depends(get_current_tenant_id),
     db: Session = Depends(get_db),
 ):
     """Devuelve la sumatoria de ventas netas y tickets por mes."""
@@ -630,12 +656,14 @@ def get_monthly_sales(
     sales_year = (
         db.query(models.Sale)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= year_start)
         .filter(models.Sale.created_at < year_end)
         .all()
     )
     returns_year = (
         db.query(models.SaleReturn)
+        .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= year_start)
         .filter(models.SaleReturn.created_at < year_end)
         .filter(models.SaleReturn.status == "confirmed")
@@ -643,6 +671,7 @@ def get_monthly_sales(
     )
     changes_year = (
         db.query(models.SaleChange)
+        .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= year_start)
         .filter(models.SaleChange.created_at < year_end)
         .filter(models.SaleChange.status == "confirmed")
@@ -650,6 +679,7 @@ def get_monthly_sales(
     )
     separated_payments_year = (
         db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -663,7 +693,7 @@ def get_monthly_sales(
 
     monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
     _, total_delta_by_sale = _collect_sale_adjustments(
-        db, [sale.id for sale in sales_year]
+        db, [sale.id for sale in sales_year], tenant_id
     )
 
     for sale in sales_year:

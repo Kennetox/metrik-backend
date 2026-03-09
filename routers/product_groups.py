@@ -19,19 +19,21 @@ def list_groups(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("products.view")),
+    current_user: object = Depends(require_permission("products.view")),
 ):
-    return crud.list_product_groups(db, skip=skip, limit=limit)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_product_groups(db, skip=skip, limit=limit, tenant_id=tenant_id)
 
 
 @router.post("/", response_model=schemas.ProductGroupRead, status_code=201)
 def create_group(
     group_in: schemas.ProductGroupCreate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("products.manage")),
+    current_user: object = Depends(require_permission("products.manage")),
 ):
     try:
-        return crud.create_product_group(db, group_in)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        return crud.create_product_group(db, group_in, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -41,9 +43,10 @@ def update_group(
     group_id: int,
     group_in: schemas.ProductGroupUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("products.manage")),
+    current_user: object = Depends(require_permission("products.manage")),
 ):
-    group = crud.get_product_group(db, group_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    group = crud.get_product_group(db, group_id, tenant_id=tenant_id)
     if not group:
         raise HTTPException(status_code=404, detail="Grupo no encontrado")
     try:

@@ -1,11 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as html_escape
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import models
 from services.pdf_utils import build_pdf_from_html, build_simple_pdf
 
 TICKET_MODE = "ticket"
+THERMAL_TICKET_MODE = "thermal_ticket"
 CLASSIC_INVOICE_MODE = "classic_invoice"
 
 FALLBACK_COMPANY = {
@@ -494,6 +496,21 @@ def _format_ticket_datetime(value: Optional[datetime]) -> str:
     return f"{weekday}, {value.day:02d} de {month} de {value.year} {value.strftime('%H:%M')}"
 
 
+def _format_bogota_short_datetime(value: Optional[datetime]) -> str:
+    if not value:
+        return ""
+    bogota_tz = ZoneInfo("America/Bogota")
+    current = value
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(bogota_tz)
+    meridian = "a. m." if current.hour < 12 else "p. m."
+    hour12 = current.hour % 12
+    if hour12 == 0:
+        hour12 = 12
+    return f"{current.day}/{current.month:02d}/{str(current.year)[-2:]}, {hour12}:{current.minute:02d} {meridian}"
+
+
 def _company_profile(settings: Optional[models.PosSettings]):
     profile = dict(FALLBACK_COMPANY)
     if settings:
@@ -642,6 +659,21 @@ def _build_payment_rows(sale: models.Sale) -> str:
         label = (payment.method or "").replace("_", " ").title() or "Pago"
         rows.append(
             "<div class=\"row\">"
+            f"<span>{_escape_html(label)}</span>"
+            f"<span>{_format_money(payment.amount)}</span>"
+            "</div>"
+        )
+    return "\n".join(rows)
+
+
+def _build_thermal_payment_rows(sale: models.Sale) -> str:
+    if not sale.payments:
+        return '<div class="line"><span>Sin pagos registrados</span><span>$ 0</span></div>'
+    rows = []
+    for payment in sale.payments:
+        label = (payment.method or "").replace("_", " ").title() or "Pago"
+        rows.append(
+            "<div class=\"line\">"
             f"<span>{_escape_html(label)}</span>"
             f"<span>{_format_money(payment.amount)}</span>"
             "</div>"
@@ -1147,6 +1179,220 @@ def _render_modern_ticket_html(
     return "".join(parts)
 
 
+def _render_thermal_ticket_html(
+    sale: models.Sale,
+    company: dict,
+    items_summary: List[dict],
+    subtotal: float,
+    line_discount_total: float,
+) -> str:
+    document_number = sale.document_number or f"V-{sale.id:06d}"
+    formatted_date = _format_bogota_short_datetime(sale.created_at)
+    payment_rows = _build_thermal_payment_rows(sale)
+    cart_discount_label, cart_discount_display = _cart_discount_meta(sale)
+    if cart_discount_label == "Desc. carrito":
+        cart_discount_label = "Descuento carrito"
+    total_amount = _effective_total(sale)
+    footer_html = _footer_lines(company["footer"])
+    change_amount = float(sale.change_amount or 0.0)
+    change_row = ""
+    if change_amount:
+        change_row = (
+            "<div class=\"line\">"
+            f"<span>{'Cambio' if change_amount > 0 else 'Saldo'}</span>"
+            f"<span>{_format_money(abs(change_amount))}</span>"
+            "</div>"
+        )
+
+    sale_number_str = str(sale.sale_number or sale.id or "")
+    numeric_sale = "".join(ch for ch in sale_number_str if ch.isdigit())
+    padded_sale = (numeric_sale or "0").zfill(6)
+    barcode_svg = _generate_code128_svg(
+        padded_sale,
+        height=30.0,
+        module_width=2.0,
+        include_text=True,
+        font_size=12.0,
+        quiet_zone_modules=10,
+    )
+
+    customer_block = ""
+    if sale.customer_name and sale.customer_name.strip():
+        customer_lines = [
+            '<div class="line-title">Cliente</div>',
+            f'<div class="customer-name">{_escape_html(sale.customer_name)}</div>',
+        ]
+        if sale.customer_phone:
+            customer_lines.append(
+                f'<div class="customer-detail">Tel: {_escape_html(sale.customer_phone)}</div>'
+            )
+        if sale.customer_email:
+            customer_lines.append(
+                f'<div class="customer-detail">Email: {_escape_html(sale.customer_email)}</div>'
+            )
+        if sale.customer_tax_id:
+            customer_lines.append(
+                f'<div class="customer-detail">NIT / ID: {_escape_html(sale.customer_tax_id)}</div>'
+            )
+        if sale.customer_address:
+            customer_lines.append(
+                f'<div class="customer-detail">Dirección: {_escape_html(sale.customer_address)}</div>'
+            )
+        customer_block = (
+            "<div class=\"section\">"
+            + "".join(customer_lines)
+            + "</div><div class=\"separator\"></div>"
+        )
+
+    notes_block = _notes_block(sale.notes)
+    if notes_block:
+        notes_block = notes_block.replace("notes-card", "thermal-notes")
+
+    items_rows = (
+        "".join(
+            (
+                '<div class="item-row">'
+                "<div>"
+                f'<div class="item-name">{_escape_html(item["name"])}</div>'
+                f'<div class="item-meta">{_format_quantity(item["quantity"])} x {_format_money(item["unit_price"])}'
+                + (
+                    f' <span class="item-discount">(Desc -{_format_money(item["discount"])})</span>'
+                    if float(item["discount"] or 0.0) > 0
+                    else ""
+                )
+                + "</div>"
+                "</div>"
+                f'<div class="item-total">{_format_money(item["total"])}</div>'
+                "</div>"
+            )
+            for item in items_summary
+        )
+        if items_summary
+        else '<div class="item-row"><div class="item-name">Sin artículos</div></div>'
+    )
+
+    surcharge_amount = _surcharge_amount(sale)
+    surcharge_row = ""
+    if surcharge_amount > 0:
+        surcharge_row = (
+            "<div class=\"line\">"
+            f"<span>{_escape_html(_surcharge_label(sale))}</span>"
+            f"<span>+ {_format_money(surcharge_amount)}</span>"
+            "</div>"
+        )
+
+    html_parts: List[str] = [
+        "<!DOCTYPE html><html><head>",
+        '<meta charset="utf-8" />',
+        f"<title>Ticket {_escape_html(document_number)}</title>",
+        "<style>",
+        "@page { margin: 4mm; }",
+        "* { box-sizing: border-box; }",
+        'body { font-family: "Inter", "Helvetica Neue", Arial, sans-serif; width: 80mm; margin: 0 auto; font-size: 13px; color: #0f172a; background: #ffffff; }',
+        ".ticket { padding: 3mm 3mm 8mm; }",
+        ".logo { text-align: center; margin-bottom: 8px; }",
+        ".logo img { max-width: 60mm; max-height: 28mm; object-fit: contain; }",
+        "h1 { font-size: 20px; text-align: center; margin: 0; }",
+        ".company-info { text-align: center; color: #111827; font-size: 13px; line-height: 1.4; margin-top: 4px; }",
+        ".separator { border-top: 1px solid #111827; margin: 10px 0; }",
+        ".line-title { font-size: 12px; letter-spacing: 0.08em; color: #111827; text-transform: uppercase; font-weight: 700; margin-bottom: 2px; }",
+        ".customer-name { font-weight: 600; font-size: 14px; }",
+        ".customer-detail { color: #111827; font-size: 12px; }",
+        ".line { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 2px; line-height: 1.4; }",
+        ".line span:last-child { min-width: 38mm; text-align: right; font-weight: 700; }",
+        ".items { display: flex; flex-direction: column; gap: 6px; }",
+        ".item-row { display: flex; justify-content: space-between; gap: 4mm; }",
+        ".item-row > div:first-child { max-width: 46mm; }",
+        ".item-name { font-weight: 600; }",
+        ".item-meta { color: #0f172a; font-size: 11px; }",
+        ".item-discount { color: #0f172a; margin-left: 4px; }",
+        ".item-total { font-weight: 600; min-width: 25mm; text-align: right; }",
+        ".totals { display: flex; justify-content: space-between; font-size: 20px; margin-top: 8px; }",
+        ".totals span { font-weight: 800; font-size: 20px; }",
+        ".totals strong { font-size: 20px; font-weight: 800; }",
+        ".section { margin-bottom: 12px; }",
+        ".barcode { margin-top: 16px; text-align: center; }",
+        ".barcode svg { width: 96%; height: auto; }",
+        ".footer { margin-top: 16px; text-align: center; font-size: 12px; color: #111827; line-height: 1.4; }",
+        ".thermal-notes { margin-top: 10px; font-size: 12px; color: #111827; }",
+        "</style></head><body><div class=\"ticket\">",
+        "<div class=\"logo\">",
+    ]
+    if company["logo_url"]:
+        html_parts.append(f'<img src="{_escape_html(company["logo_url"])}" alt="Logo" />')
+    else:
+        html_parts.append(f"<strong>{_escape_html(company['name'])}</strong>")
+    html_parts.extend(
+        [
+            "</div>",
+            f"<h1>{_escape_html(company['name'])}</h1>",
+            "<div class=\"company-info\">",
+            f"{_escape_html(company['address'])}<br />",
+            f"{_escape_html(company['phone'])} · {_escape_html(company['email'])}<br />",
+            f"{_escape_html(company['tax_id'])}<br />",
+            "CONSERVA ESTE RECIBO Y EMPAQUE ORIGINAL PARA GARANTÍA",
+            "</div>",
+            "<div class=\"separator\"></div>",
+            customer_block,
+            "<div class=\"section\">",
+            f"<div class=\"line\"><span>No. Recibo</span><span>{_escape_html(document_number)}</span></div>",
+            f"<div class=\"line\"><span>Fecha</span><span>{_escape_html(formatted_date)}</span></div>",
+        ]
+    )
+    if sale.vendor_name:
+        html_parts.append(
+            f"<div class=\"line\"><span>Usuario</span><span>{_escape_html(sale.vendor_name)}</span></div>"
+        )
+    if sale.pos_name:
+        html_parts.append(
+            f"<div class=\"line\"><span>POS</span><span>{_escape_html(sale.pos_name)}</span></div>"
+        )
+    html_parts.extend(
+        [
+            "</div>",
+            "<div class=\"separator\"></div>",
+            "<div class=\"section\">",
+            '<div class="line-title">Detalle de productos</div>',
+            f"<div class=\"items\">{items_rows}</div>",
+            "</div>",
+            "<div class=\"separator\"></div>",
+            "<div class=\"section\">",
+            f"<div class=\"line\"><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>",
+        ]
+    )
+    if line_discount_total > 0:
+        html_parts.append(
+            f"<div class=\"line\"><span>Descuento artículos</span><span>- {_format_money(line_discount_total)}</span></div>"
+        )
+    html_parts.extend(
+        [
+            f"<div class=\"line\"><span>{_escape_html(cart_discount_label)}</span><span>{_escape_html(cart_discount_display)}</span></div>",
+            surcharge_row,
+            "</div>",
+            "<div class=\"separator\"></div>",
+            "<div class=\"section\">",
+            '<div class="line-title">Pagos recibidos</div>',
+            payment_rows,
+            change_row,
+            "</div>",
+            "<div class=\"totals\">",
+            "<span>TOTAL</span>",
+            f"<strong>{_format_money(total_amount)}</strong>",
+            "</div>",
+            notes_block,
+        ]
+    )
+    if barcode_svg:
+        html_parts.append(f'<div class="barcode">{barcode_svg}</div>')
+    html_parts.extend(
+        [
+            f'<div class="footer">{footer_html}</div>',
+            "</div></body></html>",
+        ]
+    )
+    return "".join(html_parts)
+
+
 def _render_classic_invoice_html(
     sale: models.Sale,
     company: dict,
@@ -1331,6 +1577,14 @@ def render_sale_ticket_html(
             subtotal,
             line_discount_total,
         )
+    if mode == THERMAL_TICKET_MODE:
+        return _render_thermal_ticket_html(
+            sale,
+            company,
+            items_summary,
+            subtotal,
+            line_discount_total,
+        )
     return _render_modern_ticket_html(
         sale,
         company,
@@ -1354,6 +1608,27 @@ def render_sale_ticket_pdf(
 def _format_currency(value: float) -> str:
     amount = float(value or 0.0)
     return f"${amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def _closure_station_breakdown_rows(closure: models.PosClosure) -> list[dict]:
+    raw_rows = getattr(closure, "station_breakdown", None)
+    if not isinstance(raw_rows, list):
+        return []
+    rows: list[dict] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("station_label") or raw.get("station_id") or "Sin estación")
+        rows.append(
+            {
+                "label": label,
+                "station_type": str(raw.get("station_type") or "").lower() or None,
+                "sales_count": int(raw.get("sales_count") or 0),
+                "total_amount": float(raw.get("total_amount") or 0.0),
+                "net_amount": float(raw.get("net_amount") or 0.0),
+            }
+        )
+    return rows
 
 
 def render_closure_html(
@@ -1394,6 +1669,35 @@ def render_closure_html(
         for label, value in totals
         if float(value or 0) != 0 or label == "Total ventas"
     )
+    station_breakdown_rows = _closure_station_breakdown_rows(closure)
+    has_auxiliary_station = any(
+        row.get("station_type") == "tablet" for row in station_breakdown_rows
+    )
+    station_breakdown_block = ""
+    if station_breakdown_rows and has_auxiliary_station:
+        lines = "".join(
+            "<tr>"
+            f"<td style=\"padding:4px 8px 4px 0;\">{html_escape(row['label'])}</td>"
+            f"<td style=\"padding:4px 8px; text-align:center;\">{int(row['sales_count'])}</td>"
+            f"<td style=\"padding:4px 8px; text-align:right;\">{_format_currency(row['total_amount'])}</td>"
+            f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(row['net_amount'])}</td>"
+            "</tr>"
+            for row in station_breakdown_rows
+        )
+        station_breakdown_block = (
+            "<p style=\"margin:0 0 8px;\"><strong>Desglose por estación</strong></p>"
+            "<table style=\"width:100%; border-collapse:collapse; font-size:12px; margin:0 0 12px;\">"
+            "<thead>"
+            "<tr>"
+            "<th style=\"text-align:left; padding:4px 8px 4px 0;\">Estación</th>"
+            "<th style=\"text-align:center; padding:4px 8px;\">Ventas</th>"
+            "<th style=\"text-align:right; padding:4px 8px;\">Bruto</th>"
+            "<th style=\"text-align:right; padding:4px 0;\">Neto</th>"
+            "</tr>"
+            "</thead>"
+            f"<tbody>{lines}</tbody>"
+            "</table>"
+        )
 
     return f"""
     <div style="font-family: Arial, sans-serif; color:#111827;">
@@ -1407,6 +1711,7 @@ def render_closure_html(
       </p>
       <p style="margin:0 0 12px;"><strong>Reporte:</strong> {closure_label}</p>
       <pre style="font-family: Arial, sans-serif; margin:0 0 16px; white-space:pre-wrap;">{totals_lines}</pre>
+      {station_breakdown_block}
       <p style="margin:0;"><strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}</p>
       <p style="margin:8px 0 0; color:#6b7280;">Adjunto: Reporte Z en PDF.</p>
     </div>
@@ -1465,6 +1770,19 @@ def render_closure_pdf(
             ("Diferencia", closure.difference),
         ]
     )
+    station_breakdown_rows = _closure_station_breakdown_rows(closure)
+    has_auxiliary_station = any(
+        row.get("station_type") == "tablet" for row in station_breakdown_rows
+    )
+    station_breakdown_lines = "".join(
+        "<tr>"
+        f"<td style=\"padding:4px 0;\">{html_escape(row['label'])}</td>"
+        f"<td style=\"padding:4px 0; text-align:center;\">{int(row['sales_count'])}</td>"
+        f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(row['total_amount'])}</td>"
+        f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(row['net_amount'])}</td>"
+        "</tr>"
+        for row in station_breakdown_rows
+    )
 
     logo_block = ""
     if logo_url:
@@ -1508,6 +1826,7 @@ def render_closure_pdf(
               <table width="100%" cellspacing="0" cellpadding="0" style="font-size:12px;">
                 {totals_lines}
               </table>
+              {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Desglose por estación</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'><thead><tr><th align='left' style='padding:4px 0;'>Estación</th><th align='center' style='padding:4px 0;'>Ventas</th><th align='right' style='padding:4px 0;'>Bruto</th><th align='right' style='padding:4px 0;'>Neto</th></tr></thead><tbody>" + station_breakdown_lines + "</tbody></table>" if station_breakdown_lines and has_auxiliary_station else ""}
               {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Tipos de pago</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'>" + payment_lines + "</table>" if payment_lines else ""}
               <div style="height:12px;"></div>
               <div style="border-top:1px solid #cbd5f5; padding-top:10px; font-size:12px;">

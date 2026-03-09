@@ -100,6 +100,7 @@ def list_separated_orders(
         require_permission("documents.separated_orders")
     ),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     return crud.list_separated_orders(
         db,
         skip=skip,
@@ -108,6 +109,7 @@ def list_separated_orders(
         sale_number=sale_number,
         customer=customer,
         status=status_filter,
+        tenant_id=tenant_id,
     )
 
 
@@ -119,7 +121,8 @@ def get_separated_order(
         require_permission("documents.separated_orders")
     ),
 ):
-    order = crud.get_separated_order(db, order_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     return order
@@ -137,7 +140,8 @@ def add_separated_payment(
         require_permission("documents.separated_orders")
     ),
 ):
-    order = crud.get_separated_order(db, order_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     try:
@@ -160,7 +164,8 @@ def void_separated_payment(
         require_permission("documents.separated_orders.void_payment")
     ),
 ):
-    order = crud.get_separated_order(db, order_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     payment = crud.get_separated_order_payment(db, payment_id)
@@ -187,7 +192,8 @@ def complete_separated_order(
         require_permission("documents.separated_orders")
     ),
 ):
-    order = crud.get_separated_order(db, order_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     note = payload.notes if payload else None
@@ -210,7 +216,8 @@ def cancel_separated_order(
         require_permission("documents.separated_orders")
     ),
 ):
-    order = crud.get_separated_order(db, order_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     note = payload.notes if payload else None

@@ -56,67 +56,345 @@ def _ensure_column_postgres(
     )
 
 
-def _has_duplicate_non_empty_barcodes(connection, backend: str) -> bool:
-    if backend == "postgresql":
-        row = connection.execute(
-            text(
-                """
-                SELECT EXISTS (
-                  SELECT 1
-                  FROM products
-                  WHERE barcode IS NOT NULL AND btrim(barcode) <> ''
-                  GROUP BY btrim(barcode)
-                  HAVING COUNT(*) > 1
-                ) AS has_dup
-                """
-            )
-        ).mappings().first()
-    else:
-        row = connection.execute(
-            text(
-                """
-                SELECT EXISTS (
-                  SELECT 1
-                  FROM products
-                  WHERE barcode IS NOT NULL AND trim(barcode) <> ''
-                  GROUP BY trim(barcode)
-                  HAVING COUNT(*) > 1
-                ) AS has_dup
-                """
-            )
-        ).mappings().first()
+def _has_duplicate_products_code_per_tenant(
+    connection,
+    backend: str,
+    column: str,
+) -> bool:
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
+    row = connection.execute(
+        text(
+            f"""
+            SELECT EXISTS (
+              SELECT 1
+              FROM products
+              WHERE tenant_id IS NOT NULL
+                AND {column} IS NOT NULL
+                AND {trim_fn}({column}) <> ''
+              GROUP BY tenant_id, {trim_fn}({column})
+              HAVING COUNT(*) > 1
+            ) AS has_dup
+            """
+        )
+    ).mappings().first()
     return bool(row and row.get("has_dup"))
 
 
-def _ensure_products_barcode_unique_index(connection, backend: str) -> None:
-    if _has_duplicate_non_empty_barcodes(connection, backend):
-        print(
-            "[schema-upgrade] No se creó índice único de barcode: "
-            "existen duplicados en products.barcode."
-        )
-        return
-
+def _ensure_products_tenant_scoped_unique_indexes(connection, backend: str) -> None:
     if backend == "postgresql":
+        # Remove legacy global uniqueness that breaks multitenant.
+        connection.execute(text("DROP INDEX IF EXISTS ix_products_sku"))
+        connection.execute(text("DROP INDEX IF EXISTS products_barcode_unique_idx"))
+        connection.execute(
+            text("ALTER TABLE IF EXISTS products DROP CONSTRAINT IF EXISTS products_sku_key")
+        )
+    else:
+        connection.execute(text("DROP INDEX IF EXISTS ix_products_sku"))
+        connection.execute(text("DROP INDEX IF EXISTS products_barcode_unique_idx"))
+
+    has_dup_sku = _has_duplicate_products_code_per_tenant(connection, backend, "sku")
+    has_dup_barcode = _has_duplicate_products_code_per_tenant(connection, backend, "barcode")
+
+    if has_dup_sku:
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, sku): "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        trim_fn = "btrim" if backend == "postgresql" else "trim"
         connection.execute(
             text(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS products_barcode_unique_idx
-                ON products (barcode)
-                WHERE barcode IS NOT NULL AND btrim(barcode) <> ''
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS products_tenant_sku_unique_idx
+                ON products (tenant_id, sku)
+                WHERE tenant_id IS NOT NULL
+                  AND sku IS NOT NULL
+                  AND {trim_fn}(sku) <> ''
                 """
             )
         )
+
+    if has_dup_barcode:
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, barcode): "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        trim_fn = "btrim" if backend == "postgresql" else "trim"
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS products_tenant_barcode_unique_idx
+                ON products (tenant_id, barcode)
+                WHERE tenant_id IS NOT NULL
+                  AND barcode IS NOT NULL
+                  AND {trim_fn}(barcode) <> ''
+                """
+            )
+        )
+
+
+def _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend: str) -> None:
+    if backend == "postgresql":
+        # Legacy global uniqueness on slug breaks multitenant isolation.
+        connection.execute(text("DROP INDEX IF EXISTS ix_payment_methods_slug"))
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS payment_methods "
+                "DROP CONSTRAINT IF EXISTS payment_methods_slug_key"
+            )
+        )
+    else:
+        connection.execute(text("DROP INDEX IF EXISTS ix_payment_methods_slug"))
+
+    if _has_duplicate_tenant_text(connection, "payment_methods", "slug", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, slug) en payment_methods: "
+            "hay duplicados dentro del mismo tenant."
+        )
         return
 
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
     connection.execute(
         text(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS products_barcode_unique_idx
-            ON products (barcode)
-            WHERE barcode IS NOT NULL AND trim(barcode) <> ''
+            f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS payment_methods_tenant_slug_unique_idx
+            ON payment_methods (tenant_id, slug)
+            WHERE tenant_id IS NOT NULL
+              AND slug IS NOT NULL
+              AND {trim_fn}(slug) <> ''
             """
         )
     )
+
+
+def _has_duplicate_tenant_number(
+    connection,
+    table: str,
+    column: str,
+) -> bool:
+    row = connection.execute(
+        text(
+            f"""
+            SELECT EXISTS (
+              SELECT 1
+              FROM {table}
+              WHERE tenant_id IS NOT NULL
+                AND {column} IS NOT NULL
+              GROUP BY tenant_id, {column}
+              HAVING COUNT(*) > 1
+            ) AS has_dup
+            """
+        )
+    ).mappings().first()
+    return bool(row and row.get("has_dup"))
+
+
+def _has_duplicate_tenant_text(
+    connection,
+    table: str,
+    column: str,
+    backend: str,
+) -> bool:
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
+    row = connection.execute(
+        text(
+            f"""
+            SELECT EXISTS (
+              SELECT 1
+              FROM {table}
+              WHERE tenant_id IS NOT NULL
+                AND {column} IS NOT NULL
+                AND {trim_fn}({column}) <> ''
+              GROUP BY tenant_id, {trim_fn}({column})
+              HAVING COUNT(*) > 1
+            ) AS has_dup
+            """
+        )
+    ).mappings().first()
+    return bool(row and row.get("has_dup"))
+
+
+def _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend: str) -> None:
+    if backend == "postgresql":
+        # Remove legacy global unique indexes that break multitenant.
+        connection.execute(text("DROP INDEX IF EXISTS ix_sales_sale_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sales_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_number_reservations_sale_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_number_reservations_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_returns_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_changes_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_pos_closures_consecutive"))
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS sales "
+                "DROP CONSTRAINT IF EXISTS sales_document_number_key"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS sale_number_reservations "
+                "DROP CONSTRAINT IF EXISTS sale_number_reservations_sale_number_key"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS sale_number_reservations "
+                "DROP CONSTRAINT IF EXISTS sale_number_reservations_document_number_key"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS sale_returns "
+                "DROP CONSTRAINT IF EXISTS sale_returns_document_number_key"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS sale_changes "
+                "DROP CONSTRAINT IF EXISTS sale_changes_document_number_key"
+            )
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE IF EXISTS pos_closures "
+                "DROP CONSTRAINT IF EXISTS pos_closures_consecutive_key"
+            )
+        )
+    else:
+        connection.execute(text("DROP INDEX IF EXISTS ix_sales_sale_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sales_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_number_reservations_sale_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_number_reservations_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_returns_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_sale_changes_document_number"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_pos_closures_consecutive"))
+
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
+
+    if _has_duplicate_tenant_number(connection, "sales", "sale_number"):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, sale_number) en sales: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS sales_tenant_sale_number_unique_idx
+                ON sales (tenant_id, sale_number)
+                WHERE tenant_id IS NOT NULL
+                  AND sale_number IS NOT NULL
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_text(connection, "sales", "document_number", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, document_number) en sales: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS sales_tenant_document_number_unique_idx
+                ON sales (tenant_id, document_number)
+                WHERE tenant_id IS NOT NULL
+                  AND document_number IS NOT NULL
+                  AND {trim_fn}(document_number) <> ''
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_number(connection, "sale_number_reservations", "sale_number"):
+        print(
+            "[schema-upgrade] No se creó índice único de reservas por tenant para sale_number: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS sale_number_reservations_tenant_sale_number_unique_idx
+                ON sale_number_reservations (tenant_id, sale_number)
+                WHERE tenant_id IS NOT NULL
+                  AND sale_number IS NOT NULL
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_text(connection, "sale_number_reservations", "document_number", backend):
+        print(
+            "[schema-upgrade] No se creó índice único de reservas por tenant para document_number: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS sale_number_reservations_tenant_document_number_unique_idx
+                ON sale_number_reservations (tenant_id, document_number)
+                WHERE tenant_id IS NOT NULL
+                  AND document_number IS NOT NULL
+                  AND {trim_fn}(document_number) <> ''
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_text(connection, "sale_returns", "document_number", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, document_number) en sale_returns: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS sale_returns_tenant_document_number_unique_idx
+                ON sale_returns (tenant_id, document_number)
+                WHERE tenant_id IS NOT NULL
+                  AND document_number IS NOT NULL
+                  AND {trim_fn}(document_number) <> ''
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_text(connection, "sale_changes", "document_number", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, document_number) en sale_changes: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS sale_changes_tenant_document_number_unique_idx
+                ON sale_changes (tenant_id, document_number)
+                WHERE tenant_id IS NOT NULL
+                  AND document_number IS NOT NULL
+                  AND {trim_fn}(document_number) <> ''
+                """
+            )
+        )
+
+    if _has_duplicate_tenant_text(connection, "pos_closures", "consecutive", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, consecutive) en pos_closures: "
+            "hay duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS pos_closures_tenant_consecutive_unique_idx
+                ON pos_closures (tenant_id, consecutive)
+                WHERE tenant_id IS NOT NULL
+                  AND consecutive IS NOT NULL
+                  AND {trim_fn}(consecutive) <> ''
+                """
+            )
+        )
 
 
 def run_schema_upgrades(engine: Engine) -> None:
@@ -129,6 +407,10 @@ def run_schema_upgrades(engine: Engine) -> None:
     with engine.connect() as connection:
         with connection.begin():
             if backend == "postgresql":
+                _ensure_table_tenants_postgres(connection)
+                _seed_default_tenant_postgres(connection)
+                _sync_kensar_tenant_name_from_settings_postgres(connection)
+                _ensure_pos_settings_id_sequence_postgres(connection)
                 _ensure_table_document_adjustments_postgres(connection)
                 _ensure_table_product_audit_logs_postgres(connection)
                 _ensure_table_sale_changes_postgres(connection)
@@ -141,12 +423,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_schedule_shifts_postgres(connection)
                 _ensure_table_sale_number_reservations_postgres(connection)
                 _ensure_table_pos_station_notices_postgres(connection)
+                _ensure_table_demo_signup_audits_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "sales",
                     "status",
                     "TEXT DEFAULT 'active'",
                 )
+                _ensure_column_postgres(connection, "tenants", "lifecycle_stage", "TEXT DEFAULT 'active'")
+                _ensure_column_postgres(connection, "tenants", "trial_started_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "tenants", "trial_ends_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "tenants", "converted_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "tenants", "enabled_modules", "JSONB")
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -215,6 +503,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                     connection,
                     "pos_stations",
                     "station_email",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "station_type",
+                    "TEXT DEFAULT 'desktop'",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "parent_station_id",
                     "TEXT",
                 )
                 _ensure_column_postgres(
@@ -312,6 +612,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column_postgres(
                     connection,
+                    "pos_closures",
+                    "station_breakdown",
+                    "JSONB",
+                )
+                _ensure_column_postgres(
+                    connection,
                     "sale_returns",
                     "closure_id",
                     "INTEGER",
@@ -401,15 +707,92 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_name", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_url", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_size", "INTEGER")
-                _ensure_products_barcode_unique_index(connection, backend="postgresql")
+                _ensure_column_postgres(connection, "products", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "product_groups", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "payment_methods", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "pos_settings", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "pos_customers", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "pos_users", "tenant_id", "INTEGER")
+                _ensure_column_postgres(connection, "pos_stations", "tenant_id", "INTEGER")
+                shared_tenant_tables = [
+                    "product_audit_logs",
+                    "document_adjustments",
+                    "sale_number_reservations",
+                    "hr_employees",
+                    "schedule_templates",
+                    "schedule_weeks",
+                    "schedule_shifts",
+                    "pos_sessions",
+                    "pos_user_documents",
+                    "hr_employee_documents",
+                    "password_resets",
+                    "pos_station_notices",
+                    "sale_return_items",
+                    "sale_return_payments",
+                    "sale_change_return_items",
+                    "sale_change_new_items",
+                    "sale_change_payments",
+                ]
+                transactional_tenant_tables = [
+                    "inventory_movements",
+                    "receiving_lots",
+                    "receiving_lot_items",
+                    "sales",
+                    "sale_items",
+                    "sale_payments",
+                    "sale_returns",
+                    "sale_changes",
+                    "pos_closures",
+                    "separated_orders",
+                    "separated_order_payments",
+                ]
+                for table in transactional_tenant_tables:
+                    _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+                for table in shared_tenant_tables:
+                    _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+                _ensure_tenant_fk_postgres(connection, "products")
+                _ensure_tenant_fk_postgres(connection, "product_groups")
+                _ensure_tenant_fk_postgres(connection, "payment_methods")
+                _ensure_tenant_fk_postgres(connection, "pos_settings")
+                _ensure_tenant_fk_postgres(connection, "pos_customers")
+                _ensure_tenant_fk_postgres(connection, "pos_users")
+                _ensure_tenant_fk_postgres(connection, "pos_stations")
+                for table in transactional_tenant_tables:
+                    _ensure_tenant_fk_postgres(connection, table)
+                for table in shared_tenant_tables:
+                    _ensure_tenant_fk_postgres(connection, table)
+                _ensure_tenant_index_postgres(connection, "products")
+                _ensure_tenant_index_postgres(connection, "product_groups")
+                _ensure_tenant_index_postgres(connection, "payment_methods")
+                _ensure_tenant_index_postgres(connection, "pos_settings")
+                _ensure_tenant_index_postgres(connection, "pos_customers")
+                _ensure_tenant_index_postgres(connection, "pos_users")
+                _ensure_tenant_index_postgres(connection, "pos_stations")
+                for table in transactional_tenant_tables:
+                    _ensure_tenant_index_postgres(connection, table)
+                for table in shared_tenant_tables:
+                    _ensure_tenant_index_postgres(connection, table)
+                _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
+                _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
+                _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
+                _backfill_legacy_users_to_default_tenant_postgres(connection)
                 return
             if backend == "sqlite":
+                _ensure_table_tenants(connection)
+                _ensure_table_demo_signup_audits(connection)
+                _seed_default_tenant_sqlite(connection)
+                _sync_kensar_tenant_name_from_settings_sqlite(connection)
                 _ensure_column(
                     connection,
                     "sales",
                     "status",
                     "TEXT DEFAULT 'active'",
                 )
+                _ensure_column(connection, "tenants", "lifecycle_stage", "TEXT DEFAULT 'active'")
+                _ensure_column(connection, "tenants", "trial_started_at", "TIMESTAMP")
+                _ensure_column(connection, "tenants", "trial_ends_at", "TIMESTAMP")
+                _ensure_column(connection, "tenants", "converted_at", "TIMESTAMP")
+                _ensure_column(connection, "tenants", "enabled_modules", "TEXT")
                 _ensure_column(
                     connection,
                     "sales",
@@ -512,6 +895,59 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "updated_at",
                     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                 )
+                if _table_exists(connection, "products"):
+                    _ensure_column(connection, "products", "tenant_id", "INTEGER")
+                if _table_exists(connection, "product_groups"):
+                    _ensure_column(connection, "product_groups", "tenant_id", "INTEGER")
+                if _table_exists(connection, "payment_methods"):
+                    _ensure_column(connection, "payment_methods", "tenant_id", "INTEGER")
+                if _table_exists(connection, "pos_settings"):
+                    _ensure_column(connection, "pos_settings", "tenant_id", "INTEGER")
+                if _table_exists(connection, "pos_customers"):
+                    _ensure_column(connection, "pos_customers", "tenant_id", "INTEGER")
+                if _table_exists(connection, "pos_users"):
+                    _ensure_column(connection, "pos_users", "tenant_id", "INTEGER")
+                    _backfill_legacy_users_to_default_tenant_sqlite(connection)
+                if _table_exists(connection, "pos_stations"):
+                    _ensure_column(connection, "pos_stations", "tenant_id", "INTEGER")
+                shared_tenant_tables = [
+                    "product_audit_logs",
+                    "document_adjustments",
+                    "sale_number_reservations",
+                    "hr_employees",
+                    "schedule_templates",
+                    "schedule_weeks",
+                    "schedule_shifts",
+                    "pos_sessions",
+                    "pos_user_documents",
+                    "hr_employee_documents",
+                    "password_resets",
+                    "pos_station_notices",
+                    "sale_return_items",
+                    "sale_return_payments",
+                    "sale_change_return_items",
+                    "sale_change_new_items",
+                    "sale_change_payments",
+                ]
+                transactional_tenant_tables = [
+                    "inventory_movements",
+                    "receiving_lots",
+                    "receiving_lot_items",
+                    "sales",
+                    "sale_items",
+                    "sale_payments",
+                    "sale_returns",
+                    "sale_changes",
+                    "pos_closures",
+                    "separated_orders",
+                    "separated_order_payments",
+                ]
+                for table in transactional_tenant_tables:
+                    if _table_exists(connection, table):
+                        _ensure_column(connection, table, "tenant_id", "INTEGER")
+                for table in shared_tenant_tables:
+                    if _table_exists(connection, table):
+                        _ensure_column(connection, table, "tenant_id", "INTEGER")
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
                 _ensure_table_user_documents(connection)
@@ -520,6 +956,13 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_schedule_templates(connection)
                 _ensure_table_schedule_weeks(connection)
                 _ensure_table_schedule_shifts(connection)
+                # Second pass after ensure_table_* calls so fresh DBs also get tenant_id.
+                for table in transactional_tenant_tables:
+                    if _table_exists(connection, table):
+                        _ensure_column(connection, table, "tenant_id", "INTEGER")
+                for table in shared_tenant_tables:
+                    if _table_exists(connection, table):
+                        _ensure_column(connection, table, "tenant_id", "INTEGER")
                 _ensure_table_payment_methods(connection)
                 _seed_default_payment_methods(connection)
                 _ensure_table_document_adjustments(connection)
@@ -627,6 +1070,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "pos_users", "birth_date", "DATE")
                 _ensure_column(connection, "pos_users", "location", "TEXT")
                 _ensure_column(connection, "pos_users", "bio", "TEXT")
+                _ensure_column(
+                    connection,
+                    "pos_stations",
+                    "station_type",
+                    "TEXT DEFAULT 'desktop'",
+                )
                 _ensure_column(connection, "pos_users", "employee_id", "INTEGER")
                 _ensure_column(connection, "pos_users", "invited_at", "DATETIME")
                 _ensure_column(connection, "pos_users", "accepted_at", "DATETIME")
@@ -746,7 +1195,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                             closed_by_user_name TEXT NOT NULL,
                             opened_at DATETIME,
                             closed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            consecutive TEXT UNIQUE,
+                            consecutive TEXT,
                             total_amount REAL DEFAULT 0,
                             total_cash REAL DEFAULT 0,
                             total_card REAL DEFAULT 0,
@@ -759,11 +1208,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                             counted_cash REAL DEFAULT 0,
                             difference REAL DEFAULT 0,
                             notes TEXT,
+                            station_breakdown TEXT,
                             FOREIGN KEY(closed_by_user_id) REFERENCES pos_users(id)
                         )
                         """
                     )
                 )
+            _ensure_column(
+                connection,
+                "pos_closures",
+                "station_breakdown",
+                "TEXT",
+            )
             _ensure_column(
                 connection,
                 "sales",
@@ -1125,6 +1581,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(
                     connection,
                     "pos_users",
+                    "tenant_id",
+                    "INTEGER",
+                )
+                _ensure_column(
+                    connection,
+                    "pos_users",
                     "password_hash",
                     "TEXT",
                 )
@@ -1155,8 +1617,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                 connection.execute(
                     text(
                         """
-                        INSERT INTO pos_users (name, email, role, status, is_active, password_hash, created_at)
-                        SELECT :name, :email, 'Administrador', 'Activo', 1, :hash, CURRENT_TIMESTAMP
+                        INSERT INTO pos_users (
+                            name, email, role, status, is_active, tenant_id, password_hash, created_at
+                        )
+                        SELECT
+                            :name,
+                            :email,
+                            'Administrador',
+                            'Activo',
+                            1,
+                            (SELECT id FROM tenants WHERE slug = 'kensar' LIMIT 1),
+                            :hash,
+                            CURRENT_TIMESTAMP
                         WHERE NOT EXISTS (
                             SELECT 1 FROM pos_users WHERE email = :email
                         )
@@ -1168,6 +1640,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "hash": master_hash,
                     },
                 )
+                _backfill_legacy_users_to_default_tenant_sqlite(connection)
 def _ensure_table_password_resets(connection) -> None:
     if not _table_exists(connection, "password_resets"):
         connection.execute(
@@ -1582,7 +2055,7 @@ def _ensure_table_payment_methods(connection) -> None:
                 CREATE TABLE payment_methods (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
-                    slug TEXT NOT NULL UNIQUE,
+                    slug TEXT NOT NULL,
                     description TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     allow_change BOOLEAN NOT NULL DEFAULT 0,
@@ -1626,6 +2099,7 @@ def _ensure_table_document_adjustments(connection) -> None:
                 """
                 CREATE TABLE document_adjustments (
                     id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
                     doc_type TEXT NOT NULL,
                     doc_id INTEGER NOT NULL,
                     adjustment_type TEXT NOT NULL,
@@ -1651,6 +2125,7 @@ def _ensure_table_document_adjustments(connection) -> None:
             )
         )
     else:
+        _ensure_column(connection, "document_adjustments", "tenant_id", "INTEGER")
         _ensure_column(connection, "document_adjustments", "doc_type", "TEXT")
         _ensure_column(connection, "document_adjustments", "doc_id", "INTEGER")
         _ensure_column(connection, "document_adjustments", "adjustment_type", "TEXT")
@@ -1698,7 +2173,9 @@ def _ensure_table_document_adjustments(connection) -> None:
             "created_at",
             "DATETIME",
         )
-        _ensure_products_barcode_unique_index(connection, backend="sqlite")
+        _ensure_products_tenant_scoped_unique_indexes(connection, backend="sqlite")
+        _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="sqlite")
+        _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="sqlite")
 
 
 def _ensure_table_product_audit_logs(connection) -> None:
@@ -1748,6 +2225,7 @@ def _ensure_table_pos_stations(connection) -> None:
                     station_email TEXT,
                     station_password_hash TEXT,
                     pin_hash TEXT,
+                    parent_station_id TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     failed_attempts INTEGER NOT NULL DEFAULT 0,
                     last_login_at DATETIME,
@@ -1765,6 +2243,7 @@ def _ensure_table_pos_stations(connection) -> None:
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(pos_user_id) REFERENCES pos_users(id),
+                    FOREIGN KEY(parent_station_id) REFERENCES pos_stations(id),
                     FOREIGN KEY(bound_by_user_id) REFERENCES pos_users(id)
                 )
                 """
@@ -1776,6 +2255,7 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "station_email", "TEXT")
         _ensure_column(connection, "pos_stations", "station_password_hash", "TEXT")
         _ensure_column(connection, "pos_stations", "pin_hash", "TEXT")
+        _ensure_column(connection, "pos_stations", "parent_station_id", "TEXT")
         _ensure_column(connection, "pos_stations", "is_active", "BOOLEAN NOT NULL DEFAULT 1")
         _ensure_column(connection, "pos_stations", "failed_attempts", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "pos_stations", "last_login_at", "DATETIME")
@@ -1839,6 +2319,7 @@ def _relax_pos_station_schema_sqlite(connection) -> None:
         "station_email",
         "station_password_hash",
         "pin_hash",
+        "parent_station_id",
         "is_active",
         "failed_attempts",
         "last_login_at",
@@ -1870,6 +2351,7 @@ def _relax_pos_station_schema_sqlite(connection) -> None:
                 station_email TEXT,
                 station_password_hash TEXT,
                 pin_hash TEXT,
+                parent_station_id TEXT,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
                 last_login_at DATETIME,
@@ -1887,6 +2369,7 @@ def _relax_pos_station_schema_sqlite(connection) -> None:
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(pos_user_id) REFERENCES pos_users(id),
+                FOREIGN KEY(parent_station_id) REFERENCES pos_stations(id),
                 FOREIGN KEY(bound_by_user_id) REFERENCES pos_users(id)
             )
             """
@@ -1913,7 +2396,7 @@ def _ensure_table_sale_changes(connection) -> None:
                     id INTEGER PRIMARY KEY,
                     sale_id INTEGER NOT NULL,
                     closure_id INTEGER,
-                    document_number TEXT UNIQUE,
+                    document_number TEXT,
                     status TEXT NOT NULL DEFAULT 'confirmed',
                     notes TEXT,
                     created_by TEXT,
@@ -2022,8 +2505,8 @@ def _ensure_table_sale_number_reservations(connection) -> None:
                 id INTEGER PRIMARY KEY,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 status TEXT NOT NULL DEFAULT 'reserved',
-                sale_number INTEGER NOT NULL UNIQUE,
-                document_number TEXT NOT NULL UNIQUE,
+                sale_number INTEGER NOT NULL,
+                document_number TEXT NOT NULL,
                 pos_name TEXT,
                 station_id TEXT,
                 reserved_by_user_id INTEGER,
@@ -2045,7 +2528,7 @@ def _ensure_table_sale_changes_postgres(connection) -> None:
                 id SERIAL PRIMARY KEY,
                 sale_id INTEGER NOT NULL REFERENCES sales(id),
                 closure_id INTEGER REFERENCES pos_closures(id),
-                document_number TEXT UNIQUE,
+                document_number TEXT,
                 status TEXT NOT NULL DEFAULT 'confirmed',
                 notes TEXT,
                 created_by TEXT,
@@ -2121,6 +2604,7 @@ def _ensure_table_document_adjustments_postgres(connection) -> None:
             """
             CREATE TABLE IF NOT EXISTS document_adjustments (
                 id SERIAL PRIMARY KEY,
+                tenant_id INTEGER REFERENCES tenants(id),
                 doc_type TEXT NOT NULL,
                 doc_id INTEGER NOT NULL,
                 adjustment_type TEXT NOT NULL,
@@ -2145,6 +2629,7 @@ def _ensure_table_document_adjustments_postgres(connection) -> None:
             """
         )
     )
+    _ensure_column_postgres(connection, "document_adjustments", "tenant_id", "INTEGER")
 
 
 def _ensure_table_product_audit_logs_postgres(connection) -> None:
@@ -2193,8 +2678,8 @@ def _ensure_table_sale_number_reservations_postgres(connection) -> None:
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 status TEXT NOT NULL DEFAULT 'reserved',
-                sale_number INTEGER NOT NULL UNIQUE,
-                document_number TEXT NOT NULL UNIQUE,
+                sale_number INTEGER NOT NULL,
+                document_number TEXT NOT NULL,
                 pos_name TEXT,
                 station_id TEXT REFERENCES pos_stations(id),
                 reserved_by_user_id INTEGER REFERENCES pos_users(id),
@@ -2426,6 +2911,250 @@ def _ensure_table_schedule_shifts_postgres(connection) -> None:
     connection.execute(
         text(
             "CREATE INDEX IF NOT EXISTS schedule_shifts_employee_idx ON schedule_shifts(employee_id)"
+        )
+    )
+
+
+def _ensure_table_tenants(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                lifecycle_stage TEXT NOT NULL DEFAULT 'active',
+                trial_started_at TIMESTAMP,
+                trial_ends_at TIMESTAMP,
+                converted_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_tenants_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                id SERIAL PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                lifecycle_stage TEXT NOT NULL DEFAULT 'active',
+                trial_started_at TIMESTAMP,
+                trial_ends_at TIMESTAMP,
+                converted_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _seed_default_tenant_sqlite(connection) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO tenants (
+                slug, name, is_active, lifecycle_stage, created_at, updated_at
+            )
+            VALUES (
+                'kensar', 'Kensar Electronic', 1, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(slug) DO NOTHING
+            """
+        )
+    )
+
+
+def _seed_default_tenant_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO tenants (
+                slug, name, is_active, lifecycle_stage, created_at, updated_at
+            )
+            VALUES (
+                'kensar', 'Kensar Electronic', TRUE, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (slug) DO NOTHING
+            """
+        )
+    )
+
+
+def _backfill_legacy_users_to_default_tenant_sqlite(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE pos_users
+            SET tenant_id = (SELECT id FROM tenants WHERE slug = 'kensar' LIMIT 1)
+            WHERE tenant_id IS NULL
+              AND EXISTS (SELECT 1 FROM tenants WHERE slug = 'kensar')
+            """
+        )
+    )
+
+
+def _backfill_legacy_users_to_default_tenant_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE pos_users
+            SET tenant_id = t.id
+            FROM tenants t
+            WHERE pos_users.tenant_id IS NULL
+              AND t.slug = 'kensar'
+            """
+        )
+    )
+
+
+def _ensure_table_demo_signup_audits(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS demo_signup_audits (
+                id INTEGER PRIMARY KEY,
+                tenant_id INTEGER,
+                email TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_demo_signup_audits_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS demo_signup_audits (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER,
+                email TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE tenants
+            SET
+                name = (
+                    SELECT trim(ps.company_name)
+                    FROM pos_settings ps
+                    WHERE ps.tenant_id = tenants.id
+                      AND ps.company_name IS NOT NULL
+                      AND trim(ps.company_name) <> ''
+                    LIMIT 1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE slug = 'kensar'
+              AND EXISTS (
+                SELECT 1
+                FROM pos_settings ps
+                WHERE ps.tenant_id = tenants.id
+                  AND ps.company_name IS NOT NULL
+                  AND trim(ps.company_name) <> ''
+                  AND trim(ps.company_name) <> tenants.name
+              )
+            """
+        )
+    )
+
+
+def _sync_kensar_tenant_name_from_settings_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE tenants t
+            SET
+                name = trim(ps.company_name),
+                updated_at = CURRENT_TIMESTAMP
+            FROM pos_settings ps
+            WHERE t.slug = 'kensar'
+              AND ps.tenant_id = t.id
+              AND ps.company_name IS NOT NULL
+              AND btrim(ps.company_name) <> ''
+              AND btrim(ps.company_name) <> t.name
+            """
+        )
+    )
+
+
+def _ensure_tenant_fk_postgres(connection, table: str) -> None:
+    connection.execute(
+        text(
+            f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.table_constraints
+                    WHERE constraint_type = 'FOREIGN KEY'
+                      AND constraint_name = '{table}_tenant_id_fkey'
+                ) THEN
+                    ALTER TABLE {table}
+                    ADD CONSTRAINT {table}_tenant_id_fkey
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(id);
+                END IF;
+            END $$;
+            """
+        )
+    )
+
+
+def _ensure_tenant_index_postgres(connection, table: str) -> None:
+    connection.execute(
+        text(
+            f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant_id ON {table}(tenant_id)"
+        )
+    )
+
+
+def _ensure_pos_settings_id_sequence_postgres(connection) -> None:
+    connection.execute(text("CREATE SEQUENCE IF NOT EXISTS pos_settings_id_seq"))
+    connection.execute(
+        text(
+            """
+            ALTER TABLE pos_settings
+            ALTER COLUMN id SET DEFAULT nextval('pos_settings_id_seq')
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER SEQUENCE pos_settings_id_seq
+            OWNED BY pos_settings.id
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            SELECT setval(
+                'pos_settings_id_seq',
+                COALESCE((SELECT MAX(id) FROM pos_settings), 0) + 1,
+                false
+            )
+            """
         )
     )
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import case, func
+from sqlalchemy.exc import IntegrityError
 from typing import Any, Dict, List, Optional
 from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
@@ -208,17 +209,27 @@ def _build_product_changes(
 
 
 @router.get("/", response_model=List[schemas.ProductRead])
-def list_products(skip: int = 0, limit: int = 10000, db: Session = Depends(get_db)):
-    products = crud.get_products(db, skip=skip, limit=limit)
+def list_products(
+    skip: int = 0,
+    limit: int = 10000,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=skip, limit=limit, tenant_id=tenant_id)
     return products
 
 
 @router.get("/catalog-version", response_model=schemas.CatalogVersion)
 def get_catalog_version(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
-    products_ts, groups_ts, updated_at, products_count, groups_count = crud.get_catalog_version(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products_ts, groups_ts, updated_at, products_count, groups_count = crud.get_catalog_version(
+        db,
+        tenant_id=tenant_id,
+    )
     return {
         "products_updated_at": products_ts,
         "groups_updated_at": groups_ts,
@@ -234,17 +245,31 @@ def create_product(
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, actor)
     # Si quieres evitar SKUs duplicados:
     if product_in.sku:
-        existing = crud.get_product_by_sku(db, product_in.sku)
+        existing = crud.get_product_by_sku(db, product_in.sku, tenant_id=tenant_id)
         if existing:
             raise HTTPException(status_code=400, detail="SKU already registered")
     if product_in.barcode:
-        existing_barcode = crud.get_product_by_barcode(db, product_in.barcode)
+        existing_barcode = crud.get_product_by_barcode(
+            db,
+            product_in.barcode,
+            tenant_id=tenant_id,
+        )
         if existing_barcode:
             raise HTTPException(status_code=400, detail="Barcode already registered")
 
-    product = crud.create_product(db, product_in)
+    try:
+        product = crud.create_product(db, product_in, tenant_id=tenant_id)
+    except IntegrityError as exc:
+        db.rollback()
+        message = str(getattr(exc, "orig", exc)).lower()
+        if "sku" in message:
+            raise HTTPException(status_code=400, detail="SKU already registered") from exc
+        if "barcode" in message:
+            raise HTTPException(status_code=400, detail="Barcode already registered") from exc
+        raise HTTPException(status_code=400, detail="No se pudo crear el producto por restricción de datos.") from exc
     crud.create_product_audit_log(
         db,
         product_id=product.id,
@@ -269,25 +294,39 @@ def update_product(
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
-    db_product = crud.get_product(db, product_id)
+    tenant_id = crud.resolve_user_tenant_id(db, actor)
+    db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
 
     # Si cambia el SKU, comprobamos duplicado
     if product_in.sku and product_in.sku != db_product.sku:
-        existing = crud.get_product_by_sku(db, product_in.sku)
+        existing = crud.get_product_by_sku(db, product_in.sku, tenant_id=tenant_id)
         if existing:
             raise HTTPException(status_code=400, detail="SKU already registered")
     if (
         product_in.barcode
         and product_in.barcode != db_product.barcode
     ):
-        existing_barcode = crud.get_product_by_barcode(db, product_in.barcode)
+        existing_barcode = crud.get_product_by_barcode(
+            db,
+            product_in.barcode,
+            tenant_id=tenant_id,
+        )
         if existing_barcode:
             raise HTTPException(status_code=400, detail="Barcode already registered")
 
     changes = _build_product_changes(db_product, product_in)
-    updated = crud.update_product(db, db_product, product_in)
+    try:
+        updated = crud.update_product(db, db_product, product_in)
+    except IntegrityError as exc:
+        db.rollback()
+        message = str(getattr(exc, "orig", exc)).lower()
+        if "sku" in message:
+            raise HTTPException(status_code=400, detail="SKU already registered") from exc
+        if "barcode" in message:
+            raise HTTPException(status_code=400, detail="Barcode already registered") from exc
+        raise HTTPException(status_code=400, detail="No se pudo actualizar el producto por restricción de datos.") from exc
     crud.create_product_audit_log(
         db,
         product_id=updated.id,
@@ -305,7 +344,8 @@ def delete_product(
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
-    db_product = crud.get_product(db, product_id)
+    tenant_id = crud.resolve_user_tenant_id(db, actor)
+    db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -332,25 +372,31 @@ def get_product_audit_log(
     product_id: int,
     limit: int = 100,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
-    db_product = crud.get_product(db, product_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
-    return crud.list_product_audit_logs(db, product_id=product_id, limit=limit)
+    return crud.list_product_audit_logs(db, product_id=product_id, limit=limit, tenant_id=tenant_id)
 
 
 @router.get("/audit/recent", response_model=List[schemas.ProductAuditLogRead])
 def get_recent_product_audit_logs(
     limit: int = 10,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.view")),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
-    return crud.list_recent_product_audit_logs(db, limit=limit)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_recent_product_audit_logs(db, limit=limit, tenant_id=tenant_id)
 
 @router.get("/export/csv")
-def export_products_csv(db: Session = Depends(get_db)):
-    products = crud.get_products(db, skip=0, limit=100000)
+def export_products_csv(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=0, limit=100000, tenant_id=tenant_id)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -447,8 +493,10 @@ def export_products_xlsx(db: Session = Depends(get_db)):
 def export_products_xlsx_custom(
     payload: ExportProductsRequest,
     db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
-    products = crud.get_products(db, skip=0, limit=100000)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=0, limit=100000, tenant_id=tenant_id)
     filtered = _filter_products(products, payload)
     header, rows = _build_export_rows(db, filtered, payload.columns)
 
@@ -474,8 +522,10 @@ def export_products_xlsx_custom(
 def export_products_csv_custom(
     payload: ExportProductsRequest,
     db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
-    products = crud.get_products(db, skip=0, limit=100000)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=0, limit=100000, tenant_id=tenant_id)
     filtered = _filter_products(products, payload)
     header, rows = _build_export_rows(db, filtered, payload.columns)
 
@@ -498,7 +548,7 @@ def export_products_csv_custom(
 async def import_products_xlsx(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("products.import")),
+    current_user: models.PosUser = Depends(require_permission("products.import")),
 ):
     """
     Importa productos desde un Excel con columnas:
@@ -613,23 +663,28 @@ async def import_products_xlsx(
             supplier=supplier,
         )
 
-        existing = crud.get_product_by_sku(db, sku)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        existing = crud.get_product_by_sku(db, sku, tenant_id=tenant_id)
         if existing:
             crud.update_product(db, existing, product_data)
             updated += 1
         else:
-            crud.create_product(db, product_data)
+            crud.create_product(db, product_data, tenant_id=tenant_id)
             created += 1
 
     return {"created": created, "updated": updated}
 
 @router.get("/export/xlsx")
-def export_products_xlsx(db: Session = Depends(get_db)):
+def export_products_xlsx(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
     """
     Exporta todos los productos a un archivo Excel (.xlsx)
     con las mismas columnas que usamos para importar.
     """
-    products = crud.get_products(db, skip=0, limit=1_000_000)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=0, limit=1_000_000, tenant_id=tenant_id)
 
     data = []
     for p in products:
@@ -669,11 +724,15 @@ def export_products_xlsx(db: Session = Depends(get_db)):
 
 
 @router.get("/export/csv")
-def export_products_csv(db: Session = Depends(get_db)):
+def export_products_csv(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
     """
     Exporta todos los productos a un archivo CSV.
     """
-    products = crud.get_products(db, skip=0, limit=1_000_000)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    products = crud.get_products(db, skip=0, limit=1_000_000, tenant_id=tenant_id)
 
     data = []
     for p in products:

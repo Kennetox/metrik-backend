@@ -40,14 +40,15 @@ class ReportPdfExportRequest(BaseModel):
 def send_report_email(
     payload: schemas.ReportEmailRequest,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("reports.view")),
+    current_user: models.PosUser = Depends(require_permission("reports.view")),
 ):
     if not payload.recipients:
         raise HTTPException(status_code=400, detail="Debe indicar al menos un destinatario")
     if not payload.document_html:
         raise HTTPException(status_code=400, detail="El HTML del reporte es requerido")
 
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
 
     if payload.message:
         html_body = f"<p>{escape(payload.message)}</p>"
@@ -266,7 +267,7 @@ def _resolve_ticket_logo_path(settings: Optional[models.PosSettings]) -> Optiona
 def export_report_xlsx(
     payload: schemas.ReportExportRequest,
     db: Session = Depends(get_db),
-    _: object = Depends(require_permission("reports.view")),
+    current_user: models.PosUser = Depends(require_permission("reports.view")),
 ):
     if not payload.table.columns:
         raise HTTPException(status_code=400, detail="La tabla del reporte no tiene columnas.")
@@ -318,7 +319,8 @@ def export_report_xlsx(
     )
     row_idx += 2
 
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     logo_path = _resolve_ticket_logo_path(settings)
     if logo_path is not None:
         try:

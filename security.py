@@ -53,12 +53,20 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_access_token(
-    user_id: int, role: str, ttl: int = POS_TOKEN_TTL_SECONDS
+    user_id: int,
+    role: str,
+    ttl: int = POS_TOKEN_TTL_SECONDS,
+    subject_type: str = "pos",
 ) -> str:
+    now = int(time.time())
     payload = {
         "sub": user_id,
         "role": role,
-        "exp": int(time.time()) + ttl,
+        "kind": subject_type,
+        "iat": now,
+        "exp": now + ttl,
+        # Avoid deterministic token collisions for rapid successive logins.
+        "jti": secrets.token_hex(8),
     }
     serialized = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     payload_b64 = _b64encode(serialized)

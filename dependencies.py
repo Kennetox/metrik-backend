@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Sequence
 from datetime import datetime, timedelta
 
@@ -42,6 +43,11 @@ def require_pos_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario no autorizado",
+        )
+    if user.tenant_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario sin empresa asignada",
         )
 
     session = crud.get_session_by_token(db, token)
@@ -101,12 +107,31 @@ def get_current_active_user(
     return user
 
 
+def get_current_tenant_id(
+    user: models.PosUser = Depends(require_pos_auth),
+    db: Session = Depends(get_db),
+) -> int:
+    tenant_id = crud.resolve_user_tenant_id(db, user)
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario sin empresa asignada",
+        )
+    return tenant_id
+
+
 def require_permission(permission_id: str):
     def _permission_checker(
         user: models.PosUser = Depends(require_pos_auth),
         db: Session = Depends(get_db),
     ):
-        matrix = crud.get_role_permissions(db)
+        tenant_id = crud.resolve_user_tenant_id(db, user)
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Usuario sin empresa asignada",
+            )
+        matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
         if not permissions.role_has_permission(matrix, permission_id, user.role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -115,3 +140,84 @@ def require_permission(permission_id: str):
         return user
 
     return _permission_checker
+
+
+def require_any_permission(*permission_ids: str):
+    def _permission_checker(
+        user: models.PosUser = Depends(require_pos_auth),
+        db: Session = Depends(get_db),
+    ):
+        tenant_id = crud.resolve_user_tenant_id(db, user)
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Usuario sin empresa asignada",
+            )
+        matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
+        if not any(
+            permissions.role_has_permission(matrix, permission_id, user.role)
+            for permission_id in permission_ids
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No autorizado para esta acción",
+            )
+        return user
+
+    return _permission_checker
+
+
+def require_platform_auth(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+) -> models.PlatformUser:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token de plataforma requerido",
+        )
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = verify_access_token(token)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+
+    if payload.get("kind") != "platform":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token de plataforma inválido",
+        )
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
+        )
+    user = crud.get_platform_user(db, int(user_id))
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario de plataforma no autorizado",
+        )
+    return user
+
+
+def require_platform_admin(
+    user: models.PlatformUser = Depends(require_platform_auth),
+) -> models.PlatformUser:
+    configured = {
+        item.strip().lower()
+        for item in os.getenv("PLATFORM_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    user_email = (user.email or "").strip().lower()
+    if configured and user_email not in configured:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para administración de plataforma",
+        )
+    return user

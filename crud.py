@@ -10,13 +10,14 @@ import string
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import String, cast, func, or_, text
+from sqlalchemy import String, case, cast, func, or_, text, true
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
 
 import models, schemas
 from services import permissions
+from services import tenant_modules
 from security import hash_password, verify_password
 
 
@@ -30,6 +31,467 @@ def _clean_field(value):
 
 def _session_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def get_tenant_by_slug(db: Session, slug: str) -> Optional[models.Tenant]:
+    return (
+        db.query(models.Tenant)
+        .filter(models.Tenant.slug == slug)
+        .first()
+    )
+
+
+def get_platform_user_by_email(db: Session, email: str) -> Optional[models.PlatformUser]:
+    return (
+        db.query(models.PlatformUser)
+        .filter(func.lower(models.PlatformUser.email) == email.lower())
+        .first()
+    )
+
+
+def get_platform_user(db: Session, user_id: int) -> Optional[models.PlatformUser]:
+    return (
+        db.query(models.PlatformUser)
+        .filter(models.PlatformUser.id == user_id)
+        .first()
+    )
+
+
+def create_platform_user(
+    db: Session,
+    *,
+    email: str,
+    password: str,
+    name: str,
+) -> models.PlatformUser:
+    existing = get_platform_user_by_email(db, email)
+    if existing:
+        raise ValueError("Ya existe un usuario de plataforma con ese correo")
+    user = models.PlatformUser(
+        email=email.strip().lower(),
+        name=name.strip(),
+        password_hash=hash_password(password),
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def ensure_platform_user(
+    db: Session,
+    *,
+    email: str,
+    password: str,
+    name: str,
+) -> models.PlatformUser:
+    existing = get_platform_user_by_email(db, email)
+    if existing:
+        return existing
+    return create_platform_user(db, email=email, password=password, name=name)
+
+
+def get_default_tenant_id(db: Session) -> Optional[int]:
+    tenant = get_tenant_by_slug(db, "kensar")
+    return tenant.id if tenant else None
+
+
+def resolve_user_tenant_id(db: Session, user: Optional[models.PosUser]) -> Optional[int]:
+    if user is None:
+        return None
+    tenant_id = getattr(user, "tenant_id", None)
+    if tenant_id is None:
+        return None
+    return int(tenant_id)
+
+
+def list_tenants(db: Session) -> list[models.Tenant]:
+    return (
+        db.query(models.Tenant)
+        .order_by(models.Tenant.created_at.desc(), models.Tenant.id.desc())
+        .all()
+    )
+
+
+def get_tenant(db: Session, tenant_id: int) -> Optional[models.Tenant]:
+    return (
+        db.query(models.Tenant)
+        .filter(models.Tenant.id == tenant_id)
+        .first()
+    )
+
+
+def get_tenant_trial_days_remaining(tenant: Optional[models.Tenant]) -> Optional[int]:
+    if not tenant or not tenant.trial_ends_at:
+        return None
+    delta = tenant.trial_ends_at - datetime.utcnow()
+    return max(0, int((delta.total_seconds() + 86399) // 86400))
+
+
+def get_tenant_enabled_modules(tenant: Optional[models.Tenant]) -> List[str]:
+    if not tenant:
+        return tenant_modules.normalize_enabled_modules(None)
+    return tenant_modules.normalize_enabled_modules(tenant.enabled_modules)
+
+
+def build_tenant_session_read(tenant: Optional[models.Tenant]) -> Optional[schemas.TenantSessionRead]:
+    if not tenant:
+        return None
+    return schemas.TenantSessionRead(
+        id=tenant.id,
+        slug=tenant.slug,
+        name=tenant.name,
+        lifecycle_stage=(tenant.lifecycle_stage or "active"),
+        trial_started_at=tenant.trial_started_at,
+        trial_ends_at=tenant.trial_ends_at,
+        trial_days_remaining=get_tenant_trial_days_remaining(tenant),
+        enabled_modules=get_tenant_enabled_modules(tenant),
+    )
+
+
+def get_tenant_access_issue(tenant: Optional[models.Tenant]) -> Optional[str]:
+    if not tenant or not tenant.is_active:
+        return "Empresa inválida o inactiva"
+    stage = tenant.lifecycle_stage or "active"
+    if stage == "suspended":
+        return "Esta empresa está suspendida. Contáctanos para reactivar el acceso."
+    if stage == "inactive":
+        return "Esta empresa está inactiva. Contáctanos para reactivar el acceso."
+    if stage == "archived":
+        return "Esta empresa fue archivada y ya no está disponible."
+    if stage == "demo" and tenant.trial_ends_at and tenant.trial_ends_at < datetime.utcnow():
+        return "Tu demo expiró. Contáctanos para activar tu empresa."
+    return None
+
+
+def record_demo_signup_audit(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    email: str,
+    ip_address: Optional[str],
+    user_agent: Optional[str],
+) -> models.DemoSignupAudit:
+    row = models.DemoSignupAudit(
+        tenant_id=tenant_id,
+        email=email.strip().lower(),
+        ip_address=_clean_field(ip_address),
+        user_agent=_clean_field(user_agent),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_recent_demo_signups_by_email(
+    db: Session,
+    email: str,
+    *,
+    since: datetime,
+) -> list[models.DemoSignupAudit]:
+    return (
+        db.query(models.DemoSignupAudit)
+        .filter(func.lower(models.DemoSignupAudit.email) == email.lower())
+        .filter(models.DemoSignupAudit.created_at >= since)
+        .order_by(models.DemoSignupAudit.created_at.desc())
+        .all()
+    )
+
+
+def count_recent_demo_signups_by_ip(
+    db: Session,
+    ip_address: str,
+    *,
+    since: datetime,
+) -> int:
+    return int(
+        db.query(func.count(models.DemoSignupAudit.id))
+        .filter(models.DemoSignupAudit.ip_address == ip_address)
+        .filter(models.DemoSignupAudit.created_at >= since)
+        .scalar()
+        or 0
+    )
+
+
+def get_active_demo_by_email(
+    db: Session,
+    email: str,
+) -> Optional[models.PosUser]:
+    user = get_pos_user_by_email_global(db, email)
+    if not user or not user.tenant_id:
+        return None
+    tenant = get_tenant(db, int(user.tenant_id))
+    if not tenant:
+        return None
+    if tenant.lifecycle_stage != "demo":
+        return None
+    if tenant.trial_ends_at and tenant.trial_ends_at < datetime.utcnow():
+        return None
+    return user
+
+
+def get_tenant_primary_admin(
+    db: Session,
+    tenant_id: int,
+) -> Optional[models.PosUser]:
+    admin = (
+        db.query(models.PosUser)
+        .filter(models.PosUser.tenant_id == tenant_id)
+        .filter(models.PosUser.role == "Administrador")
+        .order_by(models.PosUser.created_at.asc(), models.PosUser.id.asc())
+        .first()
+    )
+    if admin:
+        return admin
+    return (
+        db.query(models.PosUser)
+        .filter(models.PosUser.tenant_id == tenant_id)
+        .order_by(models.PosUser.created_at.asc(), models.PosUser.id.asc())
+        .first()
+    )
+
+
+def get_tenant_company_settings(
+    db: Session,
+    tenant_id: int,
+) -> Optional[models.PosSettings]:
+    return (
+        db.query(models.PosSettings)
+        .filter(models.PosSettings.tenant_id == tenant_id)
+        .order_by(models.PosSettings.id.asc())
+        .first()
+    )
+
+
+def build_platform_tenant_read(
+    db: Session,
+    tenant: models.Tenant,
+) -> schemas.PlatformTenantRead:
+    admin_user = get_tenant_primary_admin(db, tenant.id)
+    settings = get_tenant_company_settings(db, tenant.id)
+    return schemas.PlatformTenantRead(
+        id=tenant.id,
+        slug=tenant.slug,
+        name=tenant.name,
+        is_active=tenant.is_active,
+        lifecycle_stage=(tenant.lifecycle_stage or "active"),
+        trial_started_at=tenant.trial_started_at,
+        trial_ends_at=tenant.trial_ends_at,
+        converted_at=tenant.converted_at,
+        created_at=tenant.created_at,
+        updated_at=tenant.updated_at,
+        trial_days_remaining=get_tenant_trial_days_remaining(tenant),
+        enabled_modules=get_tenant_enabled_modules(tenant),
+        module_catalog=tenant_modules.get_tenant_module_catalog(),
+        admin_user=(
+            schemas.PlatformTenantAdminRead(
+                id=admin_user.id,
+                name=admin_user.name,
+                email=admin_user.email,
+                phone=admin_user.phone,
+                status=admin_user.status,
+                created_at=admin_user.created_at,
+            )
+            if admin_user
+            else None
+        ),
+        company_details=(
+            schemas.PlatformTenantCompanyRead(
+                company_name=settings.company_name or tenant.name,
+                tax_id=settings.tax_id,
+                address=settings.address,
+                contact_email=settings.contact_email,
+                contact_phone=settings.contact_phone,
+            )
+            if settings
+            else None
+        ),
+    )
+
+
+def list_platform_tenant_reads(db: Session) -> list[schemas.PlatformTenantRead]:
+    tenants = list_tenants(db)
+    return [build_platform_tenant_read(db, tenant) for tenant in tenants]
+
+
+def create_tenant_with_admin(
+    db: Session,
+    payload: schemas.PlatformTenantCreateRequest,
+) -> tuple[models.Tenant, models.PosUser]:
+    slug = payload.slug.strip().lower()
+    name = payload.name.strip()
+
+    existing_tenant = get_tenant_by_slug(db, slug)
+    if existing_tenant:
+        raise ValueError("Ya existe una empresa con ese slug")
+
+    existing_user = (
+        db.query(models.PosUser)
+        .filter(func.lower(models.PosUser.email) == payload.admin_email.lower())
+        .first()
+    )
+    if existing_user:
+        raise ValueError("Ya existe un usuario con ese correo")
+
+    tenant = models.Tenant(
+        slug=slug,
+        name=name,
+        is_active=True,
+        lifecycle_stage="active",
+        enabled_modules=tenant_modules.normalize_enabled_modules([]),
+    )
+    db.add(tenant)
+    db.flush()
+
+    admin_user = models.PosUser(
+        tenant_id=tenant.id,
+        name=payload.admin_name.strip(),
+        email=payload.admin_email.strip().lower(),
+        role="Administrador",
+        status="Activo",
+        is_active=True,
+        password_hash=hash_password(payload.admin_password),
+        phone=_clean_field(payload.admin_phone),
+    )
+    db.add(admin_user)
+
+    settings = models.PosSettings(
+        tenant_id=tenant.id,
+        company_name=name,
+    )
+    db.add(settings)
+
+    db.commit()
+    db.refresh(tenant)
+    db.refresh(admin_user)
+    return tenant, admin_user
+
+
+def update_tenant(
+    db: Session,
+    tenant: models.Tenant,
+    payload: schemas.PlatformTenantUpdateRequest,
+) -> models.Tenant:
+    data = payload.model_dump(exclude_unset=True)
+    name_changed = False
+    if "name" in data and data["name"] is not None:
+        tenant.name = data["name"].strip()
+        name_changed = True
+    if "is_active" in data and data["is_active"] is not None:
+        tenant.is_active = bool(data["is_active"])
+    if "lifecycle_stage" in data and data["lifecycle_stage"] is not None:
+        tenant.lifecycle_stage = data["lifecycle_stage"]
+        if tenant.lifecycle_stage == "active":
+            tenant.converted_at = tenant.converted_at or datetime.utcnow()
+    if "enabled_modules" in data and data["enabled_modules"] is not None:
+        tenant.enabled_modules = tenant_modules.normalize_enabled_modules(
+            data["enabled_modules"]
+        )
+
+    if name_changed:
+        settings = (
+            db.query(models.PosSettings)
+            .filter(models.PosSettings.tenant_id == tenant.id)
+            .first()
+        )
+        if settings:
+            settings.company_name = tenant.name
+
+    db.commit()
+    db.refresh(tenant)
+    return tenant
+
+
+def create_demo_tenant_with_admin(
+    db: Session,
+    payload: schemas.DemoStartRequest,
+) -> tuple[models.Tenant, models.PosUser]:
+    name = payload.company_name.strip()
+    slug = re.sub(r"[^a-z0-9-]+", "-", payload.company_name.strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")[:64] or "demo"
+    base_slug = slug
+    suffix = 2
+    while get_tenant_by_slug(db, slug):
+        slug = f"{base_slug[: max(1, 64 - len(str(suffix)) - 1)]}-{suffix}"
+        suffix += 1
+
+    existing_user = (
+        db.query(models.PosUser)
+        .filter(func.lower(models.PosUser.email) == payload.admin_email.lower())
+        .first()
+    )
+    if existing_user:
+        raise ValueError("Ya existe un usuario con ese correo")
+
+    now = datetime.utcnow()
+    tenant = models.Tenant(
+        slug=slug,
+        name=name,
+        is_active=True,
+        lifecycle_stage="demo",
+        trial_started_at=now,
+        trial_ends_at=now + timedelta(days=7),
+        enabled_modules=tenant_modules.normalize_enabled_modules([]),
+    )
+    db.add(tenant)
+    db.flush()
+
+    admin_user = models.PosUser(
+        tenant_id=tenant.id,
+        name=payload.admin_name.strip(),
+        email=payload.admin_email.strip().lower(),
+        role="Administrador",
+        status="Activo",
+        is_active=True,
+        password_hash=hash_password(payload.password),
+        phone=_clean_field(payload.admin_phone),
+    )
+    db.add(admin_user)
+    db.add(
+        models.PosSettings(
+            tenant_id=tenant.id,
+            company_name=name,
+            contact_email=payload.admin_email.strip().lower(),
+            contact_phone=_clean_field(payload.company_phone) or _clean_field(payload.admin_phone),
+            address=_clean_field(payload.company_city),
+            ticket_footer=(
+                f"Demo {payload.business_type.strip()}"
+                if payload.business_type and payload.business_type.strip()
+                else None
+            ),
+        )
+    )
+    db.commit()
+    db.refresh(tenant)
+    db.refresh(admin_user)
+    return tenant, admin_user
+
+
+def extend_tenant_trial(
+    db: Session,
+    tenant: models.Tenant,
+    *,
+    extra_days: int,
+) -> models.Tenant:
+    base = tenant.trial_ends_at if tenant.trial_ends_at and tenant.trial_ends_at > datetime.utcnow() else datetime.utcnow()
+    tenant.trial_ends_at = base + timedelta(days=extra_days)
+    tenant.trial_started_at = tenant.trial_started_at or datetime.utcnow()
+    tenant.lifecycle_stage = "demo"
+    tenant.is_active = True
+    db.commit()
+    db.refresh(tenant)
+    return tenant
+
+
+def convert_tenant_to_active(db: Session, tenant: models.Tenant) -> models.Tenant:
+    tenant.lifecycle_stage = "active"
+    tenant.is_active = True
+    tenant.converted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(tenant)
+    return tenant
 
 
 def _build_proportional_payments(
@@ -85,12 +547,18 @@ def create_receiving_lot(
     payload: schemas.ReceivingLotCreate,
     created_by_user_id: int | None = None,
 ) -> models.ReceivingLot:
+    effective_tenant_id = get_default_tenant_id(db)
+    if created_by_user_id:
+        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
+        if creator:
+            effective_tenant_id = resolve_user_tenant_id(db, creator)
     source_reference = _clean_field(payload.source_reference)
     supplier_name = _clean_field(payload.supplier_name)
     invoice_reference = _clean_field(payload.invoice_reference)
     if payload.purchase_type == "invoice" and not source_reference:
         source_reference = invoice_reference
     lot = models.ReceivingLot(
+        tenant_id=effective_tenant_id,
         purchase_type=payload.purchase_type,
         origin_name=payload.origin_name.strip(),
         source_reference=source_reference,
@@ -111,23 +579,28 @@ def create_receiving_lot(
     return lot
 
 
-def get_receiving_lot(db: Session, lot_id: int) -> Optional[models.ReceivingLot]:
-    return (
-        db.query(models.ReceivingLot)
-        .filter(models.ReceivingLot.id == lot_id)
-        .first()
-    )
+def get_receiving_lot(
+    db: Session,
+    lot_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.ReceivingLot]:
+    query = db.query(models.ReceivingLot).filter(models.ReceivingLot.id == lot_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLot.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def get_receiving_lot_by_number(
     db: Session,
     lot_number: str,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.ReceivingLot]:
-    return (
-        db.query(models.ReceivingLot)
-        .filter(models.ReceivingLot.lot_number == lot_number)
-        .first()
-    )
+    query = db.query(models.ReceivingLot).filter(models.ReceivingLot.lot_number == lot_number)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLot.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def list_receiving_lots(
@@ -135,8 +608,12 @@ def list_receiving_lots(
     status: str | None = None,
     skip: int = 0,
     limit: int = 50,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ReceivingLot]:
     query = db.query(models.ReceivingLot)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLot.tenant_id == effective_tenant_id)
     if status:
         query = query.filter(models.ReceivingLot.status == status)
     return (
@@ -150,8 +627,12 @@ def list_receiving_lots(
 def count_receiving_lots(
     db: Session,
     status: str | None = None,
+    tenant_id: Optional[int] = None,
 ) -> int:
     query = db.query(func.count(models.ReceivingLot.id))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLot.tenant_id == effective_tenant_id)
     if status:
         query = query.filter(models.ReceivingLot.status == status)
     return int(query.scalar() or 0)
@@ -160,11 +641,14 @@ def count_receiving_lots(
 def list_receiving_lot_items(
     db: Session,
     lot_id: int,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ReceivingLotItem]:
+    query = db.query(models.ReceivingLotItem).filter(models.ReceivingLotItem.lot_id == lot_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLotItem.tenant_id == effective_tenant_id)
     return (
-        db.query(models.ReceivingLotItem)
-        .filter(models.ReceivingLotItem.lot_id == lot_id)
-        .order_by(models.ReceivingLotItem.created_at.asc(), models.ReceivingLotItem.id.asc())
+        query.order_by(models.ReceivingLotItem.created_at.asc(), models.ReceivingLotItem.id.asc())
         .all()
     )
 
@@ -173,23 +657,31 @@ def get_receiving_lot_item(
     db: Session,
     lot_id: int,
     item_id: int,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.ReceivingLotItem]:
-    return (
+    query = (
         db.query(models.ReceivingLotItem)
         .filter(
             models.ReceivingLotItem.id == item_id,
             models.ReceivingLotItem.lot_id == lot_id,
         )
-        .first()
     )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ReceivingLotItem.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def search_receiving_products(
     db: Session,
     q: str,
     limit: int = 20,
+    tenant_id: Optional[int] = None,
 ) -> List[models.Product]:
     query = db.query(models.Product).filter(models.Product.active.is_(True))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
     term = (q or "").strip()
     if term:
         like = f"%{term}%"
@@ -227,17 +719,23 @@ def _next_numeric_code(values: List[str]) -> str:
     return next_str
 
 
-def get_next_product_codes(db: Session) -> tuple[str, str]:
+def get_next_product_codes(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> tuple[str, str]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     sku_values = [
         row[0]
         for row in db.query(models.Product.sku)
         .filter(models.Product.sku.isnot(None))
+        .filter(models.Product.tenant_id == effective_tenant_id if effective_tenant_id is not None else true())
         .all()
     ]
     barcode_values = [
         row[0]
         for row in db.query(models.Product.barcode)
         .filter(models.Product.barcode.isnot(None))
+        .filter(models.Product.tenant_id == effective_tenant_id if effective_tenant_id is not None else true())
         .all()
     ]
     return _next_numeric_code(sku_values), _next_numeric_code(barcode_values)
@@ -253,11 +751,13 @@ def _acquire_product_codes_lock(db: Session) -> None:
 def create_receiving_product_quick(
     db: Session,
     payload: schemas.ReceivingProductQuickCreate,
+    tenant_id: Optional[int] = None,
 ) -> models.Product:
     _acquire_product_codes_lock(db)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
 
     for _ in range(8):
-        next_sku, next_barcode = get_next_product_codes(db)
+        next_sku, next_barcode = get_next_product_codes(db, tenant_id=effective_tenant_id)
         product_data = schemas.ProductCreate(
             sku=next_sku,
             name=payload.name.strip(),
@@ -279,7 +779,7 @@ def create_receiving_product_quick(
         )
 
         try:
-            return create_product(db, product_data)
+            return create_product(db, product_data, tenant_id=effective_tenant_id)
         except IntegrityError:
             db.rollback()
             continue
@@ -297,16 +797,21 @@ def add_receiving_lot_item(
     unit_cost: float | None = None,
     notes: str | None = None,
 ) -> models.ReceivingLotItem:
-    existing = (
+    effective_tenant_id = lot.tenant_id if lot.tenant_id is not None else get_default_tenant_id(db)
+    existing_query = (
         db.query(models.ReceivingLotItem)
         .filter(
             models.ReceivingLotItem.lot_id == lot.id,
             models.ReceivingLotItem.product_id == product.id,
         )
-        .first()
     )
+    if effective_tenant_id is not None:
+        existing_query = existing_query.filter(models.ReceivingLotItem.tenant_id == effective_tenant_id)
+    existing = existing_query.first()
 
     if existing:
+        if existing.tenant_id is None and effective_tenant_id is not None:
+            existing.tenant_id = effective_tenant_id
         existing.qty_received = float(existing.qty_received or 0) + float(qty_received)
         if unit_cost is not None:
             existing.unit_cost_snapshot = float(unit_cost)
@@ -317,6 +822,7 @@ def add_receiving_lot_item(
         return existing
 
     item = models.ReceivingLotItem(
+        tenant_id=effective_tenant_id,
         lot_id=lot.id,
         product_id=product.id,
         product_name_snapshot=product.name,
@@ -452,7 +958,12 @@ def create_pos_session(
     station_id: str | None = None,
     device_id: str | None = None,
 ) -> models.PosSession:
+    user = db.query(models.PosUser).filter(models.PosUser.id == user_id).first()
+    effective_tenant_id = (
+        user.tenant_id if user and user.tenant_id is not None else get_default_tenant_id(db)
+    )
     session = models.PosSession(
+        tenant_id=effective_tenant_id,
         user_id=user_id,
         token_hash=_session_token_hash(token),
         session_type=session_type,
@@ -477,13 +988,44 @@ def get_session_by_token(db: Session, token: str) -> models.PosSession | None:
     )
 
 
+def get_active_pos_session_conflict(
+    db: Session,
+    user_id: int,
+    current_station_id: str | None = None,
+    session_types: Sequence[str] | None = ("pos", "tablet"),
+) -> models.PosSession | None:
+    now = datetime.utcnow()
+    query = db.query(models.PosSession).filter(
+        models.PosSession.user_id == user_id,
+        models.PosSession.revoked_at.is_(None),
+        models.PosSession.expires_at > now,
+    )
+    if session_types:
+        query = query.filter(models.PosSession.session_type.in_(list(session_types)))
+    if current_station_id:
+        query = query.filter(
+            or_(
+                models.PosSession.station_id.is_(None),
+                models.PosSession.station_id != current_station_id,
+            )
+        )
+    return query.order_by(models.PosSession.created_at.desc()).first()
+
+
 # ===================== PRODUCTS =====================
 
 
-def get_products(db: Session, skip: int = 0, limit: int = 100):
+def get_products(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.Product)
+    if tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == tenant_id)
     products = (
-        db.query(models.Product)
-        .order_by(models.Product.id.asc())
+        query.order_by(models.Product.id.asc())
         .offset(skip)
         .limit(limit)
         .all()
@@ -491,11 +1033,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100):
     group_names = {p.group_name for p in products if p.group_name}
     group_map = {}
     if group_names:
-        groups = (
-            db.query(models.ProductGroup)
-            .filter(models.ProductGroup.path.in_(group_names))
-            .all()
-        )
+        groups_query = db.query(models.ProductGroup).filter(models.ProductGroup.path.in_(group_names))
+        if tenant_id is not None:
+            groups_query = groups_query.filter(models.ProductGroup.tenant_id == tenant_id)
+        groups = groups_query.all()
         group_map = {g.path: g for g in groups}
 
     for product in products:
@@ -504,11 +1045,20 @@ def get_products(db: Session, skip: int = 0, limit: int = 100):
     return products
 
 
-def get_catalog_version(db: Session):
-    products_ts = db.query(func.max(models.Product.updated_at)).scalar()
-    groups_ts = db.query(func.max(models.ProductGroup.updated_at)).scalar()
-    products_count = db.query(func.count(models.Product.id)).scalar()
-    groups_count = db.query(func.count(models.ProductGroup.id)).scalar()
+def get_catalog_version(
+    db: Session,
+    tenant_id: Optional[int] = None,
+):
+    products_query = db.query(models.Product)
+    groups_query = db.query(models.ProductGroup)
+    if tenant_id is not None:
+        products_query = products_query.filter(models.Product.tenant_id == tenant_id)
+        groups_query = groups_query.filter(models.ProductGroup.tenant_id == tenant_id)
+
+    products_ts = products_query.with_entities(func.max(models.Product.updated_at)).scalar()
+    groups_ts = groups_query.with_entities(func.max(models.ProductGroup.updated_at)).scalar()
+    products_count = products_query.with_entities(func.count(models.Product.id)).scalar()
+    groups_count = groups_query.with_entities(func.count(models.ProductGroup.id)).scalar()
     updated_at = max(
         [ts for ts in [products_ts, groups_ts] if ts is not None],
         default=None,
@@ -516,12 +1066,28 @@ def get_catalog_version(db: Session):
     return products_ts, groups_ts, updated_at, products_count, groups_count
 
 
-def get_product_by_sku(db: Session, sku: str):
-    return db.query(models.Product).filter(models.Product.sku == sku).first()
+def get_product_by_sku(
+    db: Session,
+    sku: str,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.Product).filter(models.Product.sku == sku)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_product_by_barcode(db: Session, barcode: str):
-    return db.query(models.Product).filter(models.Product.barcode == barcode).first()
+def get_product_by_barcode(
+    db: Session,
+    barcode: str,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.Product).filter(models.Product.barcode == barcode)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 # 🔹 Obtener producto por ID
@@ -531,20 +1097,32 @@ def _attach_group_meta(db: Session, product: Optional[models.Product]):
     if not getattr(product, "group_name", None):
         product.group_meta = None
         return product
-    group = get_product_group_by_path(db, product.group_name)
+    group = get_product_group_by_path(db, product.group_name, tenant_id=product.tenant_id)
     product.group_meta = group
     return product
 
 
-def get_product(db: Session, product_id: int):
-    product = (
-        db.query(models.Product).filter(models.Product.id == product_id).first()
-    )
+def get_product(
+    db: Session,
+    product_id: int,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.Product).filter(models.Product.id == product_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+    product = query.first()
     return _attach_group_meta(db, product)
 
 
-def create_product(db: Session, product_in: schemas.ProductCreate):
+def create_product(
+    db: Session,
+    product_in: schemas.ProductCreate,
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     db_product = models.Product(
+        tenant_id=effective_tenant_id,
         sku=product_in.sku,
         name=product_in.name,
         price=product_in.price,
@@ -600,7 +1178,11 @@ def create_product_audit_log(
     actor_user: Optional[models.PosUser] = None,
     changes: Optional[Dict[str, Any]] = None,
 ) -> models.ProductAuditLog:
+    effective_tenant_id = (
+        actor_user.tenant_id if actor_user and actor_user.tenant_id is not None else get_default_tenant_id(db)
+    )
     entry = models.ProductAuditLog(
+        tenant_id=effective_tenant_id,
         product_id=product_id,
         action=action,
         actor_user_id=actor_user.id if actor_user else None,
@@ -619,29 +1201,28 @@ def list_product_audit_logs(
     *,
     product_id: int,
     limit: int = 100,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ProductAuditLog]:
     safe_limit = min(max(limit, 1), 200)
-    return (
-        db.query(models.ProductAuditLog)
-        .filter(models.ProductAuditLog.product_id == product_id)
-        .order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc())
-        .limit(safe_limit)
-        .all()
-    )
+    query = db.query(models.ProductAuditLog).filter(models.ProductAuditLog.product_id == product_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductAuditLog.tenant_id == effective_tenant_id)
+    return query.order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc()).limit(safe_limit).all()
 
 
 def list_recent_product_audit_logs(
     db: Session,
     *,
     limit: int = 10,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ProductAuditLog]:
     safe_limit = min(max(limit, 1), 200)
-    return (
-        db.query(models.ProductAuditLog)
-        .order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc())
-        .limit(safe_limit)
-        .all()
-    )
+    query = db.query(models.ProductAuditLog)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductAuditLog.tenant_id == effective_tenant_id)
+    return query.order_by(models.ProductAuditLog.created_at.desc(), models.ProductAuditLog.id.desc()).limit(safe_limit).all()
 
 
 # ===================== PAYMENT METHODS =====================
@@ -651,8 +1232,14 @@ def _normalize_slug(slug: str) -> str:
     return slug.strip().lower()
 
 
-def list_payment_methods(db: Session, include_deleted: bool = False):
+def list_payment_methods(
+    db: Session,
+    include_deleted: bool = False,
+    tenant_id: Optional[int] = None,
+):
     query = db.query(models.PaymentMethod)
+    if tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == tenant_id)
     if not include_deleted:
         query = query.filter(models.PaymentMethod.deleted_at.is_(None))
     return (
@@ -661,51 +1248,88 @@ def list_payment_methods(db: Session, include_deleted: bool = False):
     )
 
 
-def get_payment_method(db: Session, method_id: int):
-    return (
-        db.query(models.PaymentMethod)
-        .filter(models.PaymentMethod.id == method_id)
-        .first()
-    )
+def get_payment_method(
+    db: Session,
+    method_id: int,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.PaymentMethod).filter(models.PaymentMethod.id == method_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_payment_method_by_slug(db: Session, slug: str):
-    return (
-        db.query(models.PaymentMethod)
-        .filter(models.PaymentMethod.slug == slug)
-        .first()
-    )
+def get_payment_method_by_slug(
+    db: Session,
+    slug: str,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.PaymentMethod).filter(models.PaymentMethod.slug == slug)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def _count_active_payment_methods(db: Session, exclude_id: Optional[int] = None) -> int:
+def _count_active_payment_methods(
+    db: Session,
+    exclude_id: Optional[int] = None,
+    tenant_id: Optional[int] = None,
+) -> int:
     query = db.query(models.PaymentMethod).filter(
         models.PaymentMethod.is_active.is_(True),
         models.PaymentMethod.deleted_at.is_(None),
     )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
     if exclude_id is not None:
         query = query.filter(models.PaymentMethod.id != exclude_id)
     return query.count()
 
 
-def _ensure_slug_available(db: Session, slug: str, current_id: Optional[int] = None) -> None:
+def _ensure_slug_available(
+    db: Session,
+    slug: str,
+    current_id: Optional[int] = None,
+    tenant_id: Optional[int] = None,
+) -> None:
     normalized = _normalize_slug(slug)
     query = db.query(models.PaymentMethod).filter(models.PaymentMethod.slug == normalized)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
     if current_id is not None:
         query = query.filter(models.PaymentMethod.id != current_id)
     if query.first():
         raise ValueError("Ya existe un método con ese slug")
 
 
-def _next_order_index(db: Session) -> int:
-    max_value = db.query(func.max(models.PaymentMethod.order_index)).scalar()
+def _next_order_index(db: Session, tenant_id: Optional[int] = None) -> int:
+    query = db.query(func.max(models.PaymentMethod.order_index))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
+    max_value = query.scalar()
     return int(max_value or 0) + 10
 
 
-def create_payment_method(db: Session, payload: schemas.PaymentMethodCreate):
+def create_payment_method(
+    db: Session,
+    payload: schemas.PaymentMethodCreate,
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     slug = _normalize_slug(payload.slug)
-    _ensure_slug_available(db, slug)
-    order_index = payload.order_index if payload.order_index is not None else _next_order_index(db)
+    _ensure_slug_available(db, slug, tenant_id=effective_tenant_id)
+    order_index = (
+        payload.order_index
+        if payload.order_index is not None
+        else _next_order_index(db, tenant_id=effective_tenant_id)
+    )
     method = models.PaymentMethod(
+        tenant_id=effective_tenant_id,
         name=payload.name.strip(),
         slug=slug,
         description=payload.description,
@@ -716,7 +1340,13 @@ def create_payment_method(db: Session, payload: schemas.PaymentMethodCreate):
         icon=payload.icon,
     )
     db.add(method)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "payment_methods" in str(exc).lower() and "slug" in str(exc).lower():
+            raise ValueError("Ya existe un método con ese slug") from exc
+        raise
     db.refresh(method)
     return method
 
@@ -725,22 +1355,39 @@ def update_payment_method(
     db: Session,
     method: models.PaymentMethod,
     payload: schemas.PaymentMethodUpdate,
+    tenant_id: Optional[int] = None,
 ):
+    effective_tenant_id = tenant_id if tenant_id is not None else method.tenant_id
     data = payload.model_dump(exclude_unset=True)
     if "slug" in data:
         slug = _normalize_slug(data["slug"])
-        _ensure_slug_available(db, slug, current_id=method.id)
+        _ensure_slug_available(
+            db,
+            slug,
+            current_id=method.id,
+            tenant_id=effective_tenant_id,
+        )
         data["slug"] = slug
     if "name" in data and data["name"] is not None:
         data["name"] = data["name"].strip()
 
     if "is_active" in data and data["is_active"] is False and method.is_active:
-        if _count_active_payment_methods(db, exclude_id=method.id) == 0:
+        if _count_active_payment_methods(
+            db,
+            exclude_id=method.id,
+            tenant_id=effective_tenant_id,
+        ) == 0:
             raise ValueError("Debe existir al menos un método de pago activo")
 
     for field, value in data.items():
         setattr(method, field, value)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if "payment_methods" in str(exc).lower() and "slug" in str(exc).lower():
+            raise ValueError("Ya existe un método con ese slug") from exc
+        raise
     db.refresh(method)
     return method
 
@@ -749,9 +1396,15 @@ def toggle_payment_method(
     db: Session,
     method: models.PaymentMethod,
     is_active: bool,
+    tenant_id: Optional[int] = None,
 ):
+    effective_tenant_id = tenant_id if tenant_id is not None else method.tenant_id
     if not is_active and method.is_active:
-        if _count_active_payment_methods(db, exclude_id=method.id) == 0:
+        if _count_active_payment_methods(
+            db,
+            exclude_id=method.id,
+            tenant_id=effective_tenant_id,
+        ) == 0:
             raise ValueError("Debe existir al menos un método de pago activo")
     method.is_active = is_active
     db.commit()
@@ -762,24 +1415,34 @@ def toggle_payment_method(
 def reorder_payment_methods(
     db: Session,
     reorder_items: List[schemas.PaymentMethodReorderItem],
+    tenant_id: Optional[int] = None,
 ):
     ids = [item.id for item in reorder_items]
-    methods = (
-        db.query(models.PaymentMethod)
-        .filter(models.PaymentMethod.id.in_(ids))
-        .all()
-    )
+    query = db.query(models.PaymentMethod).filter(models.PaymentMethod.id.in_(ids))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PaymentMethod.tenant_id == effective_tenant_id)
+    methods = query.all()
     methods_map = {m.id: m for m in methods}
     if len(methods_map) != len(ids):
         raise ValueError("Algún método de pago no existe")
     for item in reorder_items:
         methods_map[item.id].order_index = item.order_index
     db.commit()
-    return list_payment_methods(db)
+    return list_payment_methods(db, tenant_id=effective_tenant_id)
 
 
-def delete_payment_method(db: Session, method: models.PaymentMethod):
-    if method.is_active and _count_active_payment_methods(db, exclude_id=method.id) == 0:
+def delete_payment_method(
+    db: Session,
+    method: models.PaymentMethod,
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else method.tenant_id
+    if method.is_active and _count_active_payment_methods(
+        db,
+        exclude_id=method.id,
+        tenant_id=effective_tenant_id,
+    ) == 0:
         raise ValueError("Debe existir al menos un método de pago activo")
     method.deleted_at = datetime.utcnow()
     method.is_active = False
@@ -794,38 +1457,51 @@ def list_product_groups(
     db: Session,
     skip: int = 0,
     limit: int = 100,
+    tenant_id: Optional[int] = None,
 ):
-    return (
-        db.query(models.ProductGroup)
-        .order_by(models.ProductGroup.path.asc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    query = db.query(models.ProductGroup)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductGroup.tenant_id == effective_tenant_id)
+    return query.order_by(models.ProductGroup.path.asc()).offset(skip).limit(limit).all()
 
 
-def get_product_group(db: Session, group_id: int):
-    return (
-        db.query(models.ProductGroup)
-        .filter(models.ProductGroup.id == group_id)
-        .first()
-    )
+def get_product_group(
+    db: Session,
+    group_id: int,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.ProductGroup).filter(models.ProductGroup.id == group_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductGroup.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_product_group_by_path(db: Session, path: str):
-    return (
-        db.query(models.ProductGroup)
-        .filter(models.ProductGroup.path == path)
-        .first()
-    )
+def get_product_group_by_path(
+    db: Session,
+    path: str,
+    tenant_id: Optional[int] = None,
+):
+    query = db.query(models.ProductGroup).filter(models.ProductGroup.path == path)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductGroup.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def create_product_group(db: Session, group_in: schemas.ProductGroupCreate):
-    existing = get_product_group_by_path(db, group_in.path)
+def create_product_group(
+    db: Session,
+    group_in: schemas.ProductGroupCreate,
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    existing = get_product_group_by_path(db, group_in.path, tenant_id=effective_tenant_id)
     if existing:
         raise ValueError("Ya existe un grupo con ese path")
 
     group = models.ProductGroup(
+        tenant_id=effective_tenant_id,
         path=group_in.path,
         display_name=group_in.display_name,
         parent_path=group_in.parent_path,
@@ -846,7 +1522,7 @@ def update_product_group(
 ):
     data = group_in.model_dump(exclude_unset=True)
     if "path" in data and data["path"] != group.path:
-        existing = get_product_group_by_path(db, data["path"])
+        existing = get_product_group_by_path(db, data["path"], tenant_id=group.tenant_id)
         if existing:
             raise ValueError("Ya existe un grupo con ese path")
 
@@ -994,6 +1670,12 @@ def create_sale(
     else:
         main_method = "mixed"
 
+    effective_tenant_id = get_default_tenant_id(db)
+    if created_by_user_id:
+        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
+        if creator:
+            effective_tenant_id = resolve_user_tenant_id(db, creator)
+
     reservation_id = getattr(sale_in, "reservation_id", None)
     reservation: Optional[models.SaleNumberReservation] = None
     reserved_document_number: Optional[str] = None
@@ -1003,6 +1685,11 @@ def create_sale(
             .filter(
                 models.SaleNumberReservation.id == reservation_id,
                 models.SaleNumberReservation.status == "reserved",
+                (
+                    models.SaleNumberReservation.tenant_id == effective_tenant_id
+                    if effective_tenant_id is not None
+                    else true()
+                ),
             )
             .first()
         )
@@ -1015,7 +1702,14 @@ def create_sale(
     if sale_number_preassigned is not None:
         existing_sale_number = (
             db.query(models.Sale)
-            .filter(models.Sale.sale_number == sale_number_preassigned)
+            .filter(
+                models.Sale.sale_number == sale_number_preassigned,
+                (
+                    models.Sale.tenant_id == effective_tenant_id
+                    if effective_tenant_id is not None
+                    else true()
+                ),
+            )
             .first()
         )
         if existing_sale_number:
@@ -1028,6 +1722,11 @@ def create_sale(
                 .filter(
                     models.SaleNumberReservation.sale_number == sale_number_preassigned,
                     models.SaleNumberReservation.status == "reserved",
+                    (
+                        models.SaleNumberReservation.tenant_id == effective_tenant_id
+                        if effective_tenant_id is not None
+                        else true()
+                    ),
                 )
                 .first()
             )
@@ -1038,16 +1737,24 @@ def create_sale(
 
     # 3) Crear la venta (aún sin sale_number / document_number)
     pos_name = _clean_field(getattr(sale_in, "pos_name", None))
-    station_id = _resolve_station_id(db, getattr(sale_in, "station_id", None))
+    station_id = _resolve_station_id(
+        db,
+        getattr(sale_in, "station_id", None),
+        tenant_id=effective_tenant_id,
+    )
     is_pos_web = _is_pos_web_name(pos_name)
 
     if station_id and is_pos_web:
         raise ValueError("POS Web no puede registrar estación")
     if not station_id and not is_pos_web:
-        station_id = _resolve_station_id_from_pos_name(db, pos_name)
-    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name, tenant_id=effective_tenant_id)
+    if not station_id and not is_pos_web and _tenant_requires_station(
+        db, tenant_id=effective_tenant_id
+    ):
         raise ValueError("Debe seleccionar una estación para registrar la venta")
-    if reservation is None:
+    if reservation is None and _tenant_requires_station(
+        db, tenant_id=effective_tenant_id
+    ):
         raise ValueError("Debe reservar el número de venta antes de registrar.")
     if reservation:
         if reservation.station_id != station_id:
@@ -1056,6 +1763,7 @@ def create_sale(
             raise ValueError("La reserva no corresponde a este POS")
 
     sale = models.Sale(
+        tenant_id=effective_tenant_id,
         total=sale_total,
         paid_amount=total_paid,
         change_amount=change_amount,
@@ -1081,7 +1789,34 @@ def create_sale(
     )
 
     db.add(sale)
-    db.flush()  # para obtener sale.id
+    try:
+        db.flush()  # para obtener sale.id
+    except IntegrityError as exc:
+        db.rollback()
+        error_text = str(exc).lower()
+        if "sales" in error_text and "document_number" in error_text:
+            detail = str(exc)
+            document_match = re.search(r"\(document_number\)=\(([^)]+)\)", detail)
+            document_number = (
+                document_match.group(1).strip()
+                if document_match
+                else (reserved_document_number or f"V-{sale_number_preassigned or 0:06d}")
+            )
+            raise ValueError(
+                f"El ticket {document_number} ya existe en esta empresa. Actualiza y vuelve a intentar."
+            ) from exc
+        if "sales" in error_text and "sale_number" in error_text:
+            detail = str(exc)
+            sale_match = re.search(r"\(sale_number\)=\(([^)]+)\)", detail)
+            sale_number_value = (
+                sale_match.group(1).strip()
+                if sale_match
+                else str(sale_number_preassigned or "")
+            )
+            raise ValueError(
+                f"El número de ticket {sale_number_value} ya existe en esta empresa."
+            ) from exc
+        raise
 
     # 3b) Generar número de ticket y documento basados en id
     if sale.sale_number is None:
@@ -1104,6 +1839,7 @@ def create_sale(
 
     for item_data in items_calc:
         db_item = models.SaleItem(
+            tenant_id=effective_tenant_id,
             sale_id=sale.id,
             product_id=item_data["product_id"],
             product_sku=item_data["product_sku"],
@@ -1120,6 +1856,7 @@ def create_sale(
 
         if not product_flags.get(item_data["product_id"], False):
             movement = models.InventoryMovement(
+                tenant_id=effective_tenant_id,
                 product_id=item_data["product_id"],
                 qty_delta=-abs(float(item_data["quantity"])),
                 reason="sale",
@@ -1133,6 +1870,7 @@ def create_sale(
     #    Dejamos el PRIMERO como is_primary=True por ahora.
     for idx, pay in enumerate(payments_data):
         db_payment = models.SalePayment(
+            tenant_id=effective_tenant_id,
             sale_id=sale.id,
             method=pay.method,
             amount=pay.amount,
@@ -1145,7 +1883,20 @@ def create_sale(
         reservation.sale_id = sale.id
         db.add(reservation)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        error_text = str(exc).lower()
+        if "sales" in error_text and "document_number" in error_text:
+            raise ValueError(
+                f"El ticket {sale.document_number} ya existe en esta empresa. Actualiza y vuelve a intentar."
+            ) from exc
+        if "sales" in error_text and "sale_number" in error_text:
+            raise ValueError(
+                f"El número de ticket {sale.sale_number} ya existe en esta empresa."
+            ) from exc
+        raise
     db.refresh(sale)
     return sale
 
@@ -1176,6 +1927,7 @@ def create_separated_order(
     )
 
     order = models.SeparatedOrder(
+        tenant_id=sale.tenant_id or get_default_tenant_id(db),
         sale_id=sale.id,
         customer_id=sale.customer_id,
         customer_name=sale.customer_name,
@@ -1199,12 +1951,16 @@ def create_separated_order(
     return order
 
 
-def get_separated_order(db: Session, order_id: int) -> Optional[models.SeparatedOrder]:
-    return (
-        db.query(models.SeparatedOrder)
-        .filter(models.SeparatedOrder.id == order_id)
-        .first()
-    )
+def get_separated_order(
+    db: Session,
+    order_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.SeparatedOrder]:
+    query = db.query(models.SeparatedOrder).filter(models.SeparatedOrder.id == order_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SeparatedOrder.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def list_separated_orders(
@@ -1215,8 +1971,12 @@ def list_separated_orders(
     sale_number: Optional[int] = None,
     customer: Optional[str] = None,
     status: Optional[str] = None,
+    tenant_id: Optional[int] = None,
 ) -> List[models.SeparatedOrder]:
     query = db.query(models.SeparatedOrder)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SeparatedOrder.tenant_id == effective_tenant_id)
     if barcode:
         normalized = barcode.strip()
         query = query.filter(
@@ -1262,16 +2022,23 @@ def add_separated_order_payment(
     if amount - float(order.balance or 0.0) > 0.01:
         raise ValueError("El abono supera el saldo pendiente")
 
-    station_id = _resolve_station_id(db, payment_in.station_id)
+    effective_tenant_id = order.tenant_id if order.tenant_id is not None else get_default_tenant_id(db)
+    station_id = _resolve_station_id(db, payment_in.station_id, tenant_id=effective_tenant_id)
     if not station_id and order.sale.station_id:
-        station_id = _resolve_station_id(db, order.sale.station_id)
+        station_id = _resolve_station_id(db, order.sale.station_id, tenant_id=effective_tenant_id)
     is_pos_web = _is_pos_web_name(order.sale.pos_name)
 
     if station_id and is_pos_web:
         raise ValueError("POS Web no puede registrar estación")
     if not station_id and not is_pos_web:
-        station_id = _resolve_station_id_from_pos_name(db, order.sale.pos_name)
-    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(
+            db,
+            order.sale.pos_name,
+            tenant_id=effective_tenant_id,
+        )
+    if not station_id and not is_pos_web and _tenant_requires_station(
+        db, tenant_id=effective_tenant_id
+    ):
         raise ValueError("Debe seleccionar una estación para registrar el abono")
 
     payment = models.SeparatedOrderPayment(
@@ -1335,8 +2102,12 @@ def get_sales(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    tenant_id: Optional[int] = None,
 ):
     query = db.query(models.Sale)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Sale.tenant_id == effective_tenant_id)
     if date_from is not None:
         query = query.filter(models.Sale.created_at >= date_from)
     if date_to is not None:
@@ -1359,8 +2130,12 @@ def get_sales_history_page(
     customer: Optional[str] = None,
     payment_method: Optional[str] = None,
     pos_name: Optional[str] = None,
+    tenant_id: Optional[int] = None,
 ) -> tuple[list[models.Sale], int]:
     query = db.query(models.Sale)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Sale.tenant_id == effective_tenant_id)
 
     if date_from is not None:
         query = query.filter(models.Sale.created_at >= date_from)
@@ -1423,14 +2198,27 @@ def get_sales_history_page(
     return rows, int(total)
 
 
-def get_next_sale_number(db: Session, pos_id: Optional[str] = None) -> int:
+def get_next_sale_number(
+    db: Session,
+    pos_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+) -> int:
     """Return the next available sale_number. pos_id reserved for future use."""
 
-    max_sale_number = db.query(func.max(models.Sale.sale_number)).scalar()
-    max_sale_id = db.query(func.max(models.Sale.id)).scalar()
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    sales_query = db.query(models.Sale)
+    if effective_tenant_id is not None:
+        sales_query = sales_query.filter(models.Sale.tenant_id == effective_tenant_id)
+    max_sale_number = sales_query.with_entities(func.max(models.Sale.sale_number)).scalar()
+    max_sale_id = sales_query.with_entities(func.max(models.Sale.id)).scalar()
     max_reserved_number = (
         db.query(func.max(models.SaleNumberReservation.sale_number))
         .filter(models.SaleNumberReservation.status == "reserved")
+        .filter(
+            models.SaleNumberReservation.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
         .scalar()
     )
 
@@ -1449,16 +2237,20 @@ def reserve_sale_number(
     station_id: Optional[str] = None,
     reserved_by_user_id: Optional[int] = None,
     min_sale_number: Optional[int] = None,
+    tenant_id: Optional[int] = None,
 ) -> models.SaleNumberReservation:
     pos_name_clean = _clean_field(pos_name)
-    station_id = _resolve_station_id(db, station_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    station_id = _resolve_station_id(db, station_id, tenant_id=effective_tenant_id)
     is_pos_web = _is_pos_web_name(pos_name_clean)
 
     if station_id and is_pos_web:
         raise ValueError("POS Web no puede registrar estación")
     if not station_id and not is_pos_web:
-        station_id = _resolve_station_id_from_pos_name(db, pos_name_clean)
-    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name_clean, tenant_id=effective_tenant_id)
+    if not station_id and not is_pos_web and _tenant_requires_station(
+        db, tenant_id=effective_tenant_id
+    ):
         raise ValueError("Debe seleccionar una estación para registrar la venta")
 
     # Cancelar reservas antiguas para evitar saltos por reservas fantasma.
@@ -1475,6 +2267,10 @@ def reserve_sale_number(
         cleanup_query = cleanup_query.filter(
             models.SaleNumberReservation.pos_name == pos_name_clean
         )
+    if effective_tenant_id is not None:
+        cleanup_query = cleanup_query.filter(
+            models.SaleNumberReservation.tenant_id == effective_tenant_id
+        )
     if cleanup_query.count() > 0:
         cleanup_query.update(
             {models.SaleNumberReservation.status: "cancelled"},
@@ -1483,7 +2279,7 @@ def reserve_sale_number(
         db.commit()
 
     min_value = min_sale_number or 0
-    base_next = get_next_sale_number(db, pos_id=station_id)
+    base_next = get_next_sale_number(db, pos_id=station_id, tenant_id=effective_tenant_id)
     candidate = min_value if min_value > 0 else base_next
 
     for _ in range(50):
@@ -1491,6 +2287,11 @@ def reserve_sale_number(
         existing_sale = (
             db.query(models.Sale)
             .filter(models.Sale.sale_number == next_number)
+            .filter(
+                models.Sale.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            )
             .first()
         )
         if existing_sale:
@@ -1501,6 +2302,11 @@ def reserve_sale_number(
             .filter(
                 models.SaleNumberReservation.sale_number == next_number,
                 models.SaleNumberReservation.status == "reserved",
+                (
+                    models.SaleNumberReservation.tenant_id == effective_tenant_id
+                    if effective_tenant_id is not None
+                    else true()
+                ),
             )
             .first()
         )
@@ -1529,7 +2335,14 @@ def reserve_sale_number(
 
         existing_cancelled = (
             db.query(models.SaleNumberReservation)
-            .filter(models.SaleNumberReservation.sale_number == next_number)
+            .filter(
+                models.SaleNumberReservation.sale_number == next_number,
+                (
+                    models.SaleNumberReservation.tenant_id == effective_tenant_id
+                    if effective_tenant_id is not None
+                    else true()
+                ),
+            )
             .first()
         )
         if existing_cancelled and existing_cancelled.status == "cancelled":
@@ -1550,6 +2363,7 @@ def reserve_sale_number(
 
         document_number = f"V-{next_number:06d}"
         reservation = models.SaleNumberReservation(
+            tenant_id=effective_tenant_id,
             sale_number=next_number,
             document_number=document_number,
             pos_name=pos_name_clean,
@@ -1573,10 +2387,19 @@ def reserve_sale_number(
 def cancel_sale_reservation(
     db: Session,
     reservation_id: int,
+    tenant_id: Optional[int] = None,
 ) -> models.SaleNumberReservation:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     reservation = (
         db.query(models.SaleNumberReservation)
-        .filter(models.SaleNumberReservation.id == reservation_id)
+        .filter(
+            models.SaleNumberReservation.id == reservation_id,
+            (
+                models.SaleNumberReservation.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
     if not reservation:
@@ -1588,24 +2411,40 @@ def cancel_sale_reservation(
     db.refresh(reservation)
     return reservation
 
-def get_sale(db: Session, sale_id: int) -> Optional[models.Sale]:
-    return db.query(models.Sale).filter(models.Sale.id == sale_id).first()
+def get_sale(
+    db: Session,
+    sale_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.Sale]:
+    query = db.query(models.Sale).filter(models.Sale.id == sale_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Sale.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_sale_by_document(db: Session, document_number: str) -> Optional[models.Sale]:
-    return (
-        db.query(models.Sale)
-        .filter(models.Sale.document_number == document_number)
-        .first()
-    )
+def get_sale_by_document(
+    db: Session,
+    document_number: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.Sale]:
+    query = db.query(models.Sale).filter(models.Sale.document_number == document_number)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Sale.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_sale_return(db: Session, return_id: int) -> Optional[models.SaleReturn]:
-    return (
-        db.query(models.SaleReturn)
-        .filter(models.SaleReturn.id == return_id)
-        .first()
-    )
+def get_sale_return(
+    db: Session,
+    return_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.SaleReturn]:
+    query = db.query(models.SaleReturn).filter(models.SaleReturn.id == return_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SaleReturn.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def list_returns(
@@ -1614,8 +2453,12 @@ def list_returns(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    tenant_id: Optional[int] = None,
 ):
     query = db.query(models.SaleReturn).options(joinedload(models.SaleReturn.sale))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SaleReturn.tenant_id == effective_tenant_id)
     if date_from is not None:
         query = query.filter(models.SaleReturn.created_at >= date_from)
     if date_to is not None:
@@ -1634,8 +2477,12 @@ def list_changes(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    tenant_id: Optional[int] = None,
 ):
     query = db.query(models.SaleChange)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SaleChange.tenant_id == effective_tenant_id)
     if date_from is not None:
         query = query.filter(models.SaleChange.created_at >= date_from)
     if date_to is not None:
@@ -1648,23 +2495,36 @@ def list_changes(
     )
 
 
-def get_sale_change(db: Session, change_id: int) -> Optional[models.SaleChange]:
-    return (
-        db.query(models.SaleChange)
-        .filter(models.SaleChange.id == change_id)
-        .first()
-    )
+def get_sale_change(
+    db: Session,
+    change_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.SaleChange]:
+    query = db.query(models.SaleChange).filter(models.SaleChange.id == change_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SaleChange.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.SaleReturn:
+def create_return(
+    db: Session,
+    return_in: schemas.SaleReturnCreate,
+    tenant_id: Optional[int] = None,
+) -> models.SaleReturn:
     if not return_in.items or len(return_in.items) == 0:
         raise ValueError("La devolución debe incluir al menos un ítem")
 
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     sale: Optional[models.Sale] = None
     if return_in.sale_id is not None:
-        sale = get_sale(db, return_in.sale_id)
+        sale = get_sale(db, return_in.sale_id, tenant_id=effective_tenant_id)
     elif return_in.sale_document_number:
-        sale = get_sale_by_document(db, return_in.sale_document_number)
+        sale = get_sale_by_document(
+            db,
+            return_in.sale_document_number,
+            tenant_id=effective_tenant_id,
+        )
 
     if not sale:
         raise ValueError(
@@ -1805,7 +2665,11 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
         payments_payload = list(return_in.payments)
     else:
         source_payments: list[tuple[str, float]] = []
-        payment_adjustments, _ = _collect_sale_adjustments(db, [sale.id])
+        payment_adjustments, _ = _collect_sale_adjustments(
+            db,
+            [sale.id],
+            tenant_id=sale.tenant_id if sale.tenant_id is not None else effective_tenant_id,
+        )
         latest_payment_adjustment = payment_adjustments.get(sale.id)
         adjusted_payments = (
             _parse_adjustment_payments(latest_payment_adjustment.payload)
@@ -1839,6 +2703,7 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
     status = return_in.status or "confirmed"
 
     sale_return = models.SaleReturn(
+        tenant_id=sale.tenant_id or get_default_tenant_id(db),
         sale_id=sale.id,
         status=status,
         notes=return_in.notes,
@@ -1854,6 +2719,7 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
     for item_data in items_data:
         sale_item = item_data["sale_item"]
         db_return_item = models.SaleReturnItem(
+            tenant_id=sale_return.tenant_id,
             return_id=sale_return.id,
             sale_item_id=sale_item.id,
             product_id=sale_item.product_id,
@@ -1872,6 +2738,7 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
 
     for idx, payment in enumerate(payments_payload):
         db_payment = models.SaleReturnPayment(
+            tenant_id=sale_return.tenant_id,
             return_id=sale_return.id,
             method=payment.method,
             amount=payment.amount,
@@ -1887,17 +2754,26 @@ def create_return(db: Session, return_in: schemas.SaleReturnCreate) -> models.Sa
     return sale_return
 
 
-def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.SaleChange:
+def create_change(
+    db: Session,
+    change_in: schemas.SaleChangeCreate,
+    tenant_id: Optional[int] = None,
+) -> models.SaleChange:
     if not change_in.return_items or len(change_in.return_items) == 0:
         raise ValueError("El cambio debe incluir al menos un ítem devuelto")
     if not change_in.new_items or len(change_in.new_items) == 0:
         raise ValueError("El cambio debe incluir al menos un ítem nuevo")
 
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     sale: Optional[models.Sale] = None
     if change_in.sale_id is not None:
-        sale = get_sale(db, change_in.sale_id)
+        sale = get_sale(db, change_in.sale_id, tenant_id=effective_tenant_id)
     elif change_in.sale_document_number:
-        sale = get_sale_by_document(db, change_in.sale_document_number)
+        sale = get_sale_by_document(
+            db,
+            change_in.sale_document_number,
+            tenant_id=effective_tenant_id,
+        )
 
     if not sale:
         raise ValueError(
@@ -2000,7 +2876,18 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
         requested_qty = float(item_in.quantity or 0.0)
         if requested_qty <= 0:
             raise ValueError("La cantidad del nuevo producto debe ser mayor a cero")
-        product = db.query(models.Product).filter(models.Product.id == item_in.product_id).first()
+        product = (
+            db.query(models.Product)
+            .filter(
+                models.Product.id == item_in.product_id,
+                (
+                    models.Product.tenant_id == sale.tenant_id
+                    if sale.tenant_id is not None
+                    else true()
+                ),
+            )
+            .first()
+        )
         if not product:
             raise ValueError(
                 f"No encontramos el producto {item_in.product_id} para el cambio"
@@ -2044,6 +2931,7 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
     status = change_in.status or "confirmed"
 
     sale_change = models.SaleChange(
+        tenant_id=sale.tenant_id or get_default_tenant_id(db),
         sale_id=sale.id,
         status=status,
         notes=change_in.notes,
@@ -2066,6 +2954,7 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
     for item_data in returned_items_data:
         sale_item = item_data["sale_item"]
         db_return_item = models.SaleChangeReturnItem(
+            tenant_id=sale_change.tenant_id,
             change_id=sale_change.id,
             sale_item_id=sale_item.id,
             product_id=sale_item.product_id,
@@ -2085,6 +2974,7 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
     for item_data in new_items_data:
         product = item_data["product"]
         db_new_item = models.SaleChangeNewItem(
+            tenant_id=sale_change.tenant_id,
             change_id=sale_change.id,
             product_id=product.id,
             product_name=product.name,
@@ -2098,6 +2988,7 @@ def create_change(db: Session, change_in: schemas.SaleChangeCreate) -> models.Sa
 
     for payment in payments_payload:
         db_payment = models.SaleChangePayment(
+            tenant_id=sale_change.tenant_id,
             change_id=sale_change.id,
             method=payment.method,
             amount=payment.amount,
@@ -2204,8 +3095,15 @@ def create_document_adjustment(
     is_post_closure: bool,
     original_closure_id: Optional[int],
     user: models.PosUser,
+    tenant_id: Optional[int] = None,
 ) -> models.DocumentAdjustment:
+    effective_tenant_id = (
+        tenant_id
+        if tenant_id is not None
+        else (user.tenant_id if user and user.tenant_id is not None else get_default_tenant_id(db))
+    )
     adjustment = models.DocumentAdjustment(
+        tenant_id=effective_tenant_id,
         doc_type=doc_type,
         doc_id=doc_id,
         adjustment_type=adjustment_type,
@@ -2228,11 +3126,20 @@ def list_document_adjustments(
     db: Session,
     doc_type: str,
     doc_id: int,
+    tenant_id: Optional[int] = None,
 ) -> List[models.DocumentAdjustment]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.DocumentAdjustment)
-        .filter(models.DocumentAdjustment.doc_type == doc_type)
-        .filter(models.DocumentAdjustment.doc_id == doc_id)
+        .filter(
+            models.DocumentAdjustment.doc_type == doc_type,
+            models.DocumentAdjustment.doc_id == doc_id,
+            (
+                models.DocumentAdjustment.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .order_by(models.DocumentAdjustment.created_at.desc())
         .all()
     )
@@ -2242,13 +3149,22 @@ def list_document_adjustments_for_docs(
     db: Session,
     doc_type: str,
     doc_ids: List[int],
+    tenant_id: Optional[int] = None,
 ) -> List[models.DocumentAdjustment]:
     if not doc_ids:
         return []
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.DocumentAdjustment)
-        .filter(models.DocumentAdjustment.doc_type == doc_type)
-        .filter(models.DocumentAdjustment.doc_id.in_(doc_ids))
+        .filter(
+            models.DocumentAdjustment.doc_type == doc_type,
+            models.DocumentAdjustment.doc_id.in_(doc_ids),
+            (
+                models.DocumentAdjustment.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .order_by(models.DocumentAdjustment.created_at.desc())
         .all()
     )
@@ -2280,6 +3196,7 @@ def _collect_sale_adjustments(
     db: Session,
     sale_ids: list[int],
     range_end: datetime | None = None,
+    tenant_id: Optional[int] = None,
 ) -> tuple[dict[int, models.DocumentAdjustment], dict[int, float]]:
     if not sale_ids:
         return {}, {}
@@ -2288,6 +3205,9 @@ def _collect_sale_adjustments(
         .filter(models.DocumentAdjustment.doc_type == "sale")
         .filter(models.DocumentAdjustment.doc_id.in_(sale_ids))
     )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.DocumentAdjustment.tenant_id == effective_tenant_id)
     if range_end is not None:
         query = query.filter(models.DocumentAdjustment.created_at <= range_end)
     adjustments = query.order_by(models.DocumentAdjustment.created_at.desc()).all()
@@ -2308,12 +3228,13 @@ def _collect_sale_adjustments(
 def get_separated_order_payment(
     db: Session,
     payment_id: int,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.SeparatedOrderPayment]:
-    return (
-        db.query(models.SeparatedOrderPayment)
-        .filter(models.SeparatedOrderPayment.id == payment_id)
-        .first()
-    )
+    query = db.query(models.SeparatedOrderPayment).filter(models.SeparatedOrderPayment.id == payment_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.SeparatedOrderPayment.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def void_separated_order_payment(
@@ -2361,10 +3282,18 @@ def void_separated_order_payment(
 # ===================== POS SETTINGS =====================
 
 
-def get_pos_settings(db: Session) -> models.PosSettings:
-    settings = db.query(models.PosSettings).order_by(models.PosSettings.id.asc()).first()
+def get_pos_settings(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> models.PosSettings:
+    if tenant_id is None:
+        tenant_id = get_default_tenant_id(db)
+    query = db.query(models.PosSettings)
+    if tenant_id is not None:
+        query = query.filter(models.PosSettings.tenant_id == tenant_id)
+    settings = query.order_by(models.PosSettings.id.asc()).first()
     if not settings:
-        settings = models.PosSettings()
+        settings = models.PosSettings(tenant_id=tenant_id)
         db.add(settings)
         db.commit()
         db.refresh(settings)
@@ -2376,7 +3305,7 @@ def get_pos_settings(db: Session) -> models.PosSettings:
     settings.smtp_port = settings.smtp_port or 0
     settings.smtp_user = settings.smtp_user or ""
     settings.smtp_password = settings.smtp_password or ""
-    settings.email_from = settings.email_from or ""
+    settings.email_from = settings.email_from or None
     if settings.web_pos_send_closure_email is None:
         settings.web_pos_send_closure_email = True
     settings.station_closure_email_overrides = (
@@ -2406,13 +3335,20 @@ def update_pos_settings(
     return settings
 
 
-def get_role_permissions(db: Session):
-    settings = get_pos_settings(db)
+def get_role_permissions(
+    db: Session,
+    tenant_id: Optional[int] = None,
+):
+    settings = get_pos_settings(db, tenant_id=tenant_id)
     return permissions.ensure_permissions(settings.role_permissions)
 
 
-def update_role_permissions(db: Session, modules: List[Dict[str, Any]]):
-    settings = get_pos_settings(db)
+def update_role_permissions(
+    db: Session,
+    modules: List[Dict[str, Any]],
+    tenant_id: Optional[int] = None,
+):
+    settings = get_pos_settings(db, tenant_id=tenant_id)
     cleaned = permissions.ensure_permissions(modules)
     settings.role_permissions = cleaned
     db.commit()
@@ -2427,8 +3363,12 @@ def list_pos_users(
     db: Session,
     status: Optional[str] = None,
     role: Optional[str] = None,
+    tenant_id: Optional[int] = None,
 ):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     query = db.query(models.PosUser)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosUser.tenant_id == effective_tenant_id)
     if status:
         query = query.filter(models.PosUser.status == status)
     if role:
@@ -2436,14 +3376,38 @@ def list_pos_users(
     return query.order_by(models.PosUser.created_at.desc()).all()
 
 
-def get_pos_user(db: Session, user_id: int) -> Optional[models.PosUser]:
-    return db.query(models.PosUser).filter(models.PosUser.id == user_id).first()
+def get_pos_user(
+    db: Session,
+    user_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosUser]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.PosUser).filter(models.PosUser.id == user_id)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosUser.tenant_id == effective_tenant_id)
+    return query.first()
 
 
-def get_pos_user_by_email(db: Session, email: str) -> Optional[models.PosUser]:
+def get_pos_user_by_email(
+    db: Session,
+    email: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosUser]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.PosUser).filter(func.lower(models.PosUser.email) == email.lower())
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosUser.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def get_pos_user_by_email_global(
+    db: Session,
+    email: str,
+) -> Optional[models.PosUser]:
     return (
         db.query(models.PosUser)
         .filter(func.lower(models.PosUser.email) == email.lower())
+        .order_by(models.PosUser.id.asc())
         .first()
     )
 
@@ -2452,8 +3416,13 @@ def get_pos_user_by_pin(
     db: Session,
     pin: str,
     exclude_user_id: Optional[int] = None,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.PosUser]:
-    users = db.query(models.PosUser).filter(models.PosUser.pin_hash.isnot(None)).all()
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.PosUser).filter(models.PosUser.pin_hash.isnot(None))
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosUser.tenant_id == effective_tenant_id)
+    users = query.all()
     matches: list[models.PosUser] = []
     for user in users:
         if exclude_user_id and user.id == exclude_user_id:
@@ -2465,39 +3434,71 @@ def get_pos_user_by_pin(
     return matches[0] if matches else None
 
 
-def _count_active_admins(db: Session) -> int:
-    return (
+def _count_active_admins(db: Session, tenant_id: Optional[int] = None) -> int:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = (
         db.query(models.PosUser)
         .filter(models.PosUser.role == "Administrador")
         .filter(models.PosUser.status == "Activo")
-        .count()
     )
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosUser.tenant_id == effective_tenant_id)
+    return query.count()
 
 
-def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUser:
-    existing = get_pos_user_by_email(db, user_in.email)
+def create_pos_user(
+    db: Session,
+    user_in: schemas.PosUserCreate,
+    tenant_id: Optional[int] = None,
+) -> models.PosUser:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    existing = get_pos_user_by_email(db, user_in.email, tenant_id=effective_tenant_id)
     if existing:
         raise ValueError("Ya existe un usuario con ese email")
 
     raw_password = user_in.password or secrets.token_urlsafe(16)
     pin_plain = user_in.pin_plain
     if pin_plain:
-        existing_pin = get_pos_user_by_pin(db, pin_plain)
+        existing_pin = get_pos_user_by_pin(db, pin_plain, tenant_id=effective_tenant_id)
         if existing_pin:
             raise ValueError("Ya existe un usuario con ese PIN")
-    if user_in.employee_id:
-        employee = get_hr_employee(db, user_in.employee_id)
+    linked_employee_id = user_in.employee_id
+    if linked_employee_id:
+        employee = get_hr_employee(db, user_in.employee_id, tenant_id=effective_tenant_id)
         if not employee:
             raise ValueError("Empleado HR no encontrado")
         linked = (
             db.query(models.PosUser)
             .filter(models.PosUser.employee_id == user_in.employee_id)
+            .filter(
+                models.PosUser.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            )
             .first()
         )
         if linked:
             raise ValueError("Ese empleado HR ya tiene un usuario vinculado")
+    elif user_in.create_hr_profile:
+        employee = models.HREmployee(
+            tenant_id=effective_tenant_id,
+            name=user_in.name,
+            email=user_in.email,
+            status="Activo",
+            phone=user_in.phone,
+            position=user_in.position,
+            notes=user_in.notes,
+            avatar_url=user_in.avatar_url,
+            birth_date=user_in.birth_date,
+            location=user_in.location,
+            bio=user_in.bio,
+        )
+        db.add(employee)
+        db.flush()
+        linked_employee_id = employee.id
 
     user = models.PosUser(
+        tenant_id=effective_tenant_id,
         name=user_in.name,
         email=user_in.email,
         role=user_in.role,
@@ -2508,13 +3509,13 @@ def create_pos_user(db: Session, user_in: schemas.PosUserCreate) -> models.PosUs
         phone=user_in.phone,
         position=user_in.position,
         notes=user_in.notes,
-        employee_id=user_in.employee_id,
+        employee_id=linked_employee_id,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
     if user.employee_id:
-        employee = get_hr_employee(db, user.employee_id)
+        employee = get_hr_employee(db, user.employee_id, tenant_id=effective_tenant_id)
         if employee:
             employee.name = user.name
             employee.email = user.email
@@ -2539,17 +3540,22 @@ def update_pos_user(
 
     if "email" in data:
         new_email = data["email"]
-        existing = get_pos_user_by_email(db, new_email)
+        existing = get_pos_user_by_email(db, new_email, tenant_id=user.tenant_id)
         if existing and existing.id != user.id:
             raise ValueError("Ya existe un usuario con ese email")
     if "employee_id" in data and data["employee_id"] is not None:
-        employee = get_hr_employee(db, data["employee_id"])
+        employee = get_hr_employee(db, data["employee_id"], tenant_id=user.tenant_id)
         if not employee:
             raise ValueError("Empleado HR no encontrado")
         linked = (
             db.query(models.PosUser)
             .filter(models.PosUser.employee_id == data["employee_id"])
             .filter(models.PosUser.id != user.id)
+            .filter(
+                models.PosUser.tenant_id == user.tenant_id
+                if user.tenant_id is not None
+                else true()
+            )
             .first()
         )
         if linked:
@@ -2562,7 +3568,7 @@ def update_pos_user(
     will_be_active_admin = new_role == "Administrador" and new_status == "Activo"
 
     if was_active_admin and not will_be_active_admin:
-        if _count_active_admins(db) <= 1:
+        if _count_active_admins(db, tenant_id=user.tenant_id) <= 2:
             raise ValueError("No se puede desactivar o cambiar al último Administrador activo")
 
     for field, value in data.items():
@@ -2571,7 +3577,12 @@ def update_pos_user(
             continue
         if field == "pin_plain":
             if value:
-                existing_pin = get_pos_user_by_pin(db, value, exclude_user_id=user.id)
+                existing_pin = get_pos_user_by_pin(
+                    db,
+                    value,
+                    exclude_user_id=user.id,
+                    tenant_id=user.tenant_id,
+                )
                 if existing_pin:
                     raise ValueError("Ya existe un usuario con ese PIN")
                 user.pin_hash = hash_password(value)
@@ -2585,7 +3596,7 @@ def update_pos_user(
     db.commit()
     db.refresh(user)
     if user.employee_id:
-        employee = get_hr_employee(db, user.employee_id)
+        employee = get_hr_employee(db, user.employee_id, tenant_id=user.tenant_id)
         if employee:
             employee.name = user.name
             employee.email = user.email
@@ -2603,10 +3614,19 @@ def update_pos_user(
 def list_user_documents(
     db: Session,
     user_id: int,
+    tenant_id: Optional[int] = None,
 ) -> list[models.PosUserDocument]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.PosUserDocument)
-        .filter(models.PosUserDocument.user_id == user_id)
+        .filter(
+            models.PosUserDocument.user_id == user_id,
+            (
+                models.PosUserDocument.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .order_by(models.PosUserDocument.created_at.desc())
         .all()
     )
@@ -2619,8 +3639,16 @@ def create_user_document(
     file_url: str,
     file_size: int,
     note: str | None,
+    tenant_id: Optional[int] = None,
 ) -> models.PosUserDocument:
+    user = db.query(models.PosUser).filter(models.PosUser.id == user_id).first()
+    effective_tenant_id = (
+        tenant_id
+        if tenant_id is not None
+        else (user.tenant_id if user and user.tenant_id is not None else get_default_tenant_id(db))
+    )
     doc = models.PosUserDocument(
+        tenant_id=effective_tenant_id,
         user_id=user_id,
         file_name=file_name,
         file_url=file_url,
@@ -2637,11 +3665,18 @@ def delete_user_document(
     db: Session,
     user_id: int,
     doc_id: int,
+    tenant_id: Optional[int] = None,
 ) -> bool:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     doc = (
         db.query(models.PosUserDocument)
         .filter(models.PosUserDocument.user_id == user_id)
         .filter(models.PosUserDocument.id == doc_id)
+        .filter(
+            models.PosUserDocument.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
         .first()
     )
     if not doc:
@@ -2651,8 +3686,15 @@ def delete_user_document(
     return True
 
 
-def list_hr_employees(db: Session, status: str | None = None):
+def list_hr_employees(
+    db: Session,
+    status: str | None = None,
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     query = db.query(models.HREmployee)
+    if effective_tenant_id is not None:
+        query = query.filter(models.HREmployee.tenant_id == effective_tenant_id)
     if status:
         query = query.filter(models.HREmployee.status == status)
     return (
@@ -2662,11 +3704,23 @@ def list_hr_employees(db: Session, status: str | None = None):
     )
 
 
-def get_hr_employee(db: Session, employee_id: int) -> models.HREmployee | None:
+def get_hr_employee(
+    db: Session,
+    employee_id: int,
+    tenant_id: Optional[int] = None,
+) -> models.HREmployee | None:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.HREmployee)
         .options(joinedload(models.HREmployee.system_user))
-        .filter(models.HREmployee.id == employee_id)
+        .filter(
+            models.HREmployee.id == employee_id,
+            (
+                models.HREmployee.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
 
@@ -2674,8 +3728,13 @@ def get_hr_employee(db: Session, employee_id: int) -> models.HREmployee | None:
 def create_hr_employee(
     db: Session,
     payload: schemas.HREmployeeCreate,
+    tenant_id: Optional[int] = None,
 ) -> models.HREmployee:
-    employee = models.HREmployee(**payload.model_dump())
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    employee = models.HREmployee(
+        tenant_id=effective_tenant_id,
+        **payload.model_dump(),
+    )
     db.add(employee)
     db.commit()
     db.refresh(employee)
@@ -2711,10 +3770,19 @@ def update_hr_employee(
 def list_hr_employee_documents(
     db: Session,
     employee_id: int,
+    tenant_id: Optional[int] = None,
 ) -> list[models.HREmployeeDocument]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.HREmployeeDocument)
-        .filter(models.HREmployeeDocument.employee_id == employee_id)
+        .filter(
+            models.HREmployeeDocument.employee_id == employee_id,
+            (
+                models.HREmployeeDocument.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .order_by(models.HREmployeeDocument.created_at.desc())
         .all()
     )
@@ -2727,8 +3795,16 @@ def create_hr_employee_document(
     file_url: str,
     file_size: int,
     note: str | None,
+    tenant_id: Optional[int] = None,
 ) -> models.HREmployeeDocument:
+    employee = db.query(models.HREmployee).filter(models.HREmployee.id == employee_id).first()
+    effective_tenant_id = (
+        tenant_id
+        if tenant_id is not None
+        else (employee.tenant_id if employee and employee.tenant_id is not None else get_default_tenant_id(db))
+    )
     doc = models.HREmployeeDocument(
+        tenant_id=effective_tenant_id,
         employee_id=employee_id,
         file_name=file_name,
         file_url=file_url,
@@ -2745,11 +3821,18 @@ def delete_hr_employee_document(
     db: Session,
     employee_id: int,
     doc_id: int,
+    tenant_id: Optional[int] = None,
 ) -> bool:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     doc = (
         db.query(models.HREmployeeDocument)
         .filter(models.HREmployeeDocument.id == doc_id)
         .filter(models.HREmployeeDocument.employee_id == employee_id)
+        .filter(
+            models.HREmployeeDocument.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
         .first()
     )
     if not doc:
@@ -2814,11 +3897,20 @@ def _validate_schedule_shift_fields(
 def get_schedule_week_by_start(
     db: Session,
     week_start: date,
+    tenant_id: Optional[int] = None,
 ) -> models.ScheduleWeek | None:
     normalized_start = _start_of_week(week_start)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.ScheduleWeek)
-        .filter(models.ScheduleWeek.week_start == normalized_start)
+        .filter(
+            models.ScheduleWeek.week_start == normalized_start,
+            (
+                models.ScheduleWeek.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
 
@@ -2826,10 +3918,19 @@ def get_schedule_week_by_start(
 def get_schedule_week(
     db: Session,
     week_id: int,
+    tenant_id: Optional[int] = None,
 ) -> models.ScheduleWeek | None:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.ScheduleWeek)
-        .filter(models.ScheduleWeek.id == week_id)
+        .filter(
+            models.ScheduleWeek.id == week_id,
+            (
+                models.ScheduleWeek.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
 
@@ -2840,7 +3941,8 @@ def get_or_create_schedule_week(
     notes: str | None = None,
 ) -> models.ScheduleWeek:
     normalized_start = _start_of_week(week_start)
-    week = get_schedule_week_by_start(db, normalized_start)
+    effective_tenant_id = get_default_tenant_id(db)
+    week = get_schedule_week_by_start(db, normalized_start, tenant_id=effective_tenant_id)
     if week:
         if notes is not None:
             week.notes = notes
@@ -2849,6 +3951,7 @@ def get_or_create_schedule_week(
         return week
 
     week = models.ScheduleWeek(
+        tenant_id=effective_tenant_id,
         week_start=normalized_start,
         status="draft",
         notes=notes,
@@ -2878,8 +3981,12 @@ def publish_schedule_week(
 def list_schedule_templates(
     db: Session,
     include_inactive: bool = True,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ScheduleTemplate]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     query = db.query(models.ScheduleTemplate)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ScheduleTemplate.tenant_id == effective_tenant_id)
     if not include_inactive:
         query = query.filter(models.ScheduleTemplate.is_active.is_(True))
     return (
@@ -2894,10 +4001,19 @@ def list_schedule_templates(
 def get_schedule_template(
     db: Session,
     template_id: int,
+    tenant_id: Optional[int] = None,
 ) -> models.ScheduleTemplate | None:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.ScheduleTemplate)
-        .filter(models.ScheduleTemplate.id == template_id)
+        .filter(
+            models.ScheduleTemplate.id == template_id,
+            (
+                models.ScheduleTemplate.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
 
@@ -2906,7 +4022,11 @@ def create_schedule_template(
     db: Session,
     payload: schemas.ScheduleTemplateCreate,
 ) -> models.ScheduleTemplate:
-    template = models.ScheduleTemplate(**payload.model_dump())
+    effective_tenant_id = get_default_tenant_id(db)
+    template = models.ScheduleTemplate(
+        tenant_id=effective_tenant_id,
+        **payload.model_dump(),
+    )
     db.add(template)
     db.commit()
     db.refresh(template)
@@ -2929,11 +4049,20 @@ def update_schedule_template(
 def list_schedule_shifts_for_week(
     db: Session,
     week_id: int,
+    tenant_id: Optional[int] = None,
 ) -> List[models.ScheduleShift]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.ScheduleShift)
         .options(selectinload(models.ScheduleShift.employee))
-        .filter(models.ScheduleShift.week_id == week_id)
+        .filter(
+            models.ScheduleShift.week_id == week_id,
+            (
+                models.ScheduleShift.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .order_by(
             models.ScheduleShift.shift_date.asc(),
             models.ScheduleShift.employee_id.asc(),
@@ -2946,9 +4075,10 @@ def upsert_schedule_shift(
     db: Session,
     payload: schemas.ScheduleShiftUpsertRequest,
 ) -> models.ScheduleShift:
+    effective_tenant_id = get_default_tenant_id(db)
     week: models.ScheduleWeek | None = None
     if payload.week_id is not None:
-        week = get_schedule_week(db, payload.week_id)
+        week = get_schedule_week(db, payload.week_id, tenant_id=effective_tenant_id)
         if not week:
             raise ValueError("Semana no encontrada")
     else:
@@ -2956,7 +4086,7 @@ def upsert_schedule_shift(
             raise ValueError("Debes indicar week_id o week_start")
         week = get_or_create_schedule_week(db, payload.week_start)
 
-    employee = get_hr_employee(db, payload.employee_id)
+    employee = get_hr_employee(db, payload.employee_id, tenant_id=effective_tenant_id)
     if not employee:
         raise ValueError("Empleado no encontrado")
 
@@ -2973,7 +4103,14 @@ def upsert_schedule_shift(
 
     shift = (
         db.query(models.ScheduleShift)
-        .filter(models.ScheduleShift.week_id == week.id)
+        .filter(
+            models.ScheduleShift.week_id == week.id,
+            (
+                models.ScheduleShift.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .filter(models.ScheduleShift.employee_id == payload.employee_id)
         .filter(models.ScheduleShift.shift_date == normalized_shift_date)
         .first()
@@ -2987,6 +4124,7 @@ def upsert_schedule_shift(
             setattr(shift, field, value)
     else:
         shift = models.ScheduleShift(
+            tenant_id=week.tenant_id or employee.tenant_id or get_default_tenant_id(db),
             week_id=week.id,
             **data,
         )
@@ -2999,11 +4137,20 @@ def upsert_schedule_shift(
 def get_schedule_shift(
     db: Session,
     shift_id: int,
+    tenant_id: Optional[int] = None,
 ) -> models.ScheduleShift | None:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.ScheduleShift)
         .options(selectinload(models.ScheduleShift.employee))
-        .filter(models.ScheduleShift.id == shift_id)
+        .filter(
+            models.ScheduleShift.id == shift_id,
+            (
+                models.ScheduleShift.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
         .first()
     )
 
@@ -3127,6 +4274,7 @@ def _station_label_from_pos_name(pos_name: Optional[str]) -> Optional[str]:
 def _resolve_station_id_from_pos_name(
     db: Session,
     pos_name: Optional[str],
+    tenant_id: Optional[int] = None,
 ) -> Optional[str]:
     label = _station_label_from_pos_name(pos_name)
     if not label:
@@ -3136,6 +4284,11 @@ def _resolve_station_id_from_pos_name(
         .filter(
             func.lower(models.PosStation.label) == label.lower(),
             models.PosStation.is_active.is_(True),
+            (
+                models.PosStation.tenant_id == (tenant_id if tenant_id is not None else get_default_tenant_id(db))
+                if (tenant_id if tenant_id is not None else get_default_tenant_id(db)) is not None
+                else true()
+            ),
         )
         .all()
     )
@@ -3144,15 +4297,34 @@ def _resolve_station_id_from_pos_name(
     return None
 
 
+def _tenant_requires_station(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> bool:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.PosStation).filter(models.PosStation.is_active.is_(True))
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
+    return query.count() > 0
+
+
 def _resolve_station_id(
     db: Session,
     station_id: Optional[str],
+    tenant_id: Optional[int] = None,
 ) -> Optional[str]:
     if not station_id:
         return None
     station = (
         db.query(models.PosStation)
-        .filter(models.PosStation.id == station_id)
+        .filter(
+            models.PosStation.id == station_id,
+            (
+                models.PosStation.tenant_id == (tenant_id if tenant_id is not None else get_default_tenant_id(db))
+                if (tenant_id if tenant_id is not None else get_default_tenant_id(db)) is not None
+                else true()
+            ),
+        )
         .first()
     )
     if not station or not station.is_active:
@@ -3165,34 +4337,93 @@ def _generate_station_pin(length: int = 6) -> str:
     return "".join(secrets.choice(digits) for _ in range(length))
 
 
-def list_pos_stations(db: Session) -> List[models.PosStation]:
+def list_pos_stations(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> List[models.PosStation]:
+    query = db.query(models.PosStation)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
     return (
-        db.query(models.PosStation)
-        .options(selectinload(models.PosStation.user))
+        query
+        .options(
+            selectinload(models.PosStation.user),
+            selectinload(models.PosStation.parent_station),
+        )
         .order_by(models.PosStation.created_at.desc())
         .all()
     )
 
 
-def get_pos_station(db: Session, station_id: str) -> Optional[models.PosStation]:
+def get_pos_station(
+    db: Session,
+    station_id: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosStation]:
+    query = (
+        db.query(models.PosStation)
+        .options(
+            selectinload(models.PosStation.user),
+            selectinload(models.PosStation.parent_station),
+        )
+        .filter(models.PosStation.id == station_id)
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def get_pos_station_any(
+    db: Session,
+    station_id: str,
+) -> Optional[models.PosStation]:
     return (
         db.query(models.PosStation)
-        .options(selectinload(models.PosStation.user))
+        .options(
+            selectinload(models.PosStation.user),
+            selectinload(models.PosStation.parent_station),
+        )
         .filter(models.PosStation.id == station_id)
         .first()
     )
 
 
-def get_pos_station_by_label(db: Session, label: str) -> Optional[models.PosStation]:
-    return (
+def get_pos_station_by_label(
+    db: Session,
+    label: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosStation]:
+    query = (
         db.query(models.PosStation)
-        .options(selectinload(models.PosStation.user))
+        .options(
+            selectinload(models.PosStation.user),
+            selectinload(models.PosStation.parent_station),
+        )
         .filter(func.lower(models.PosStation.label) == label.lower())
-        .first()
     )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def get_pos_station_by_email(
+    db: Session,
+    station_email: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosStation]:
+    query = db.query(models.PosStation).filter(
+        func.lower(models.PosStation.station_email) == station_email.lower()
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def get_pos_station_by_email_any(
     db: Session,
     station_email: str,
 ) -> Optional[models.PosStation]:
@@ -3206,14 +4437,37 @@ def get_pos_station_by_email(
 def create_pos_station(
     db: Session,
     payload: schemas.PosStationCreate,
+    tenant_id: Optional[int] = None,
 ) -> tuple[models.PosStation, str]:
-    existing = get_pos_station_by_email(db, payload.station_email)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    existing = get_pos_station_by_email(
+        db,
+        payload.station_email,
+        tenant_id=effective_tenant_id,
+    )
     if existing:
         raise ValueError("Ya existe una estación con ese correo")
 
+    parent_station_id = payload.parent_station_id
+    if payload.station_type != "tablet":
+        parent_station_id = None
+    if payload.station_type == "tablet":
+        if not parent_station_id:
+            raise ValueError("Las estaciones tablet deben vincularse a una estación desktop activa")
+        parent_station = get_pos_station(db, parent_station_id, tenant_id=effective_tenant_id)
+        if not parent_station or not parent_station.is_active:
+            raise ValueError("La estación principal vinculada no existe o está inactiva")
+        if (parent_station.station_type or "desktop") != "desktop":
+            raise ValueError("Solo puedes vincular tablets a estaciones desktop")
+    if payload.station_type == "desktop" and payload.parent_station_id:
+        raise ValueError("Solo las estaciones tablet se pueden vincular a una estación principal")
+
     station = models.PosStation(
         id=str(uuid4()),
+        tenant_id=effective_tenant_id,
         label=payload.label,
+        station_type=payload.station_type,
+        parent_station_id=parent_station_id,
         station_email=payload.station_email,
         station_password_hash=hash_password(payload.station_password),
         pin_hash=None,
@@ -3229,18 +4483,59 @@ def update_pos_station(
     db: Session,
     station: models.PosStation,
     payload: schemas.PosStationUpdate,
+    tenant_id: Optional[int] = None,
 ) -> tuple[models.PosStation, Optional[str]]:
+    effective_tenant_id = tenant_id if tenant_id is not None else station.tenant_id
     data = payload.model_dump(exclude_unset=True)
     pin_plain: Optional[str] = None
     if "label" in data and data["label"] is not None:
         station.label = data["label"]
+    if "station_type" in data and data["station_type"] is not None:
+        station.station_type = data["station_type"]
+        if station.station_type != "tablet":
+            station.parent_station_id = None
     if "is_active" in data and data["is_active"] is not None:
         station.is_active = data["is_active"]
     if "station_email" in data and data["station_email"]:
-        existing = get_pos_station_by_email(db, data["station_email"])
+        existing = get_pos_station_by_email(
+            db,
+            data["station_email"],
+            tenant_id=effective_tenant_id,
+        )
         if existing and existing.id != station.id:
             raise ValueError("Ya existe una estación con ese correo")
         station.station_email = data["station_email"]
+    if "parent_station_id" in data:
+        next_parent_id = data["parent_station_id"]
+        if station.station_type != "tablet" and next_parent_id:
+            raise ValueError("Solo las estaciones tablet se pueden vincular a una estación principal")
+        if station.station_type != "tablet":
+            station.parent_station_id = None
+        elif not next_parent_id:
+            station.parent_station_id = None
+        else:
+            parent_station = get_pos_station(db, next_parent_id, tenant_id=effective_tenant_id)
+            if not parent_station or not parent_station.is_active:
+                raise ValueError("La estación principal vinculada no existe o está inactiva")
+            if parent_station.id == station.id:
+                raise ValueError("Una estación no se puede vincular a sí misma")
+            if (parent_station.station_type or "desktop") != "desktop":
+                raise ValueError("Solo puedes vincular tablets a estaciones desktop")
+            station.parent_station_id = parent_station.id
+    if station.station_type == "tablet":
+        if not station.parent_station_id:
+            raise ValueError("Las estaciones tablet deben vincularse a una estación desktop activa")
+        parent_station = get_pos_station(
+            db,
+            station.parent_station_id,
+            tenant_id=effective_tenant_id,
+        )
+        if not parent_station or not parent_station.is_active:
+            raise ValueError("La estación principal vinculada no existe o está inactiva")
+        if parent_station.id == station.id:
+            raise ValueError("Una estación no se puede vincular a sí misma")
+        if (parent_station.station_type or "desktop") != "desktop":
+            raise ValueError("Solo puedes vincular tablets a estaciones desktop")
     if "station_password" in data and data["station_password"]:
         station.station_password_hash = hash_password(data["station_password"])
     if payload.pin_plain:
@@ -3315,12 +4610,19 @@ def get_pos_station_notice(
     db: Session,
     station_id: str,
     notice_id: int,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.PosStationNotice]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     return (
         db.query(models.PosStationNotice)
         .filter(
             models.PosStationNotice.station_id == station_id,
             models.PosStationNotice.id == notice_id,
+            (
+                models.PosStationNotice.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
         )
         .first()
     )
@@ -3348,6 +4650,7 @@ def create_pos_station_notice(
         )
     )
     notice = models.PosStationNotice(
+        tenant_id=station.tenant_id or user.tenant_id or get_default_tenant_id(db),
         station_id=station.id,
         message=message,
         created_by_user_id=user.id,
@@ -3395,6 +4698,7 @@ def create_password_reset_token(
     expires_at: datetime,
 ) -> models.PasswordReset:
     reset = models.PasswordReset(
+        tenant_id=user.tenant_id or get_default_tenant_id(db),
         user_id=user.id,
         token_hash=_password_reset_token_hash(token),
         expires_at=expires_at,
@@ -3408,13 +4712,13 @@ def create_password_reset_token(
 def get_password_reset_by_token(
     db: Session,
     token: str,
+    tenant_id: Optional[int] = None,
 ) -> Optional[models.PasswordReset]:
     token_hash = _password_reset_token_hash(token)
-    return (
-        db.query(models.PasswordReset)
-        .filter(models.PasswordReset.token_hash == token_hash)
-        .first()
-    )
+    query = db.query(models.PasswordReset).filter(models.PasswordReset.token_hash == token_hash)
+    if tenant_id is not None:
+        query = query.filter(models.PasswordReset.tenant_id == tenant_id)
+    return query.first()
 
 
 def complete_password_reset(
@@ -3441,8 +4745,12 @@ def list_pos_customers(
     skip: int = 0,
     limit: int = 100,
     include_inactive: bool = False,
+    tenant_id: Optional[int] = None,
 ):
     query = db.query(models.PosCustomer)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
     if not include_inactive:
         query = query.filter(models.PosCustomer.is_active.is_(True))
 
@@ -3469,12 +4777,24 @@ def list_pos_frequent_customers(
     db: Session,
     min_sales: int = 5,
     limit: int = 10,
+    tenant_id: Optional[int] = None,
 ):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     count_expr = func.count(models.Sale.id)
     query = (
         db.query(models.PosCustomer, count_expr.label("sales_count"))
         .join(models.Sale, models.Sale.customer_id == models.PosCustomer.id)
         .filter(models.PosCustomer.is_active.is_(True))
+        .filter(
+            models.PosCustomer.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .filter(
+            models.Sale.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
         .group_by(models.PosCustomer.id)
         .having(count_expr >= min_sales)
         .order_by(count_expr.desc(), func.lower(models.PosCustomer.name).asc())
@@ -3499,19 +4819,26 @@ def list_pos_frequent_customers(
     return results
 
 
-def get_pos_customer(db: Session, customer_id: int) -> Optional[models.PosCustomer]:
-    return (
-        db.query(models.PosCustomer)
-        .filter(models.PosCustomer.id == customer_id)
-        .first()
-    )
+def get_pos_customer(
+    db: Session,
+    customer_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosCustomer]:
+    query = db.query(models.PosCustomer).filter(models.PosCustomer.id == customer_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def create_pos_customer(
     db: Session,
     customer_in: schemas.PosCustomerCreate,
+    tenant_id: Optional[int] = None,
 ) -> models.PosCustomer:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     customer = models.PosCustomer(
+        tenant_id=effective_tenant_id,
         name=customer_in.name,
         phone=customer_in.phone,
         email=customer_in.email,
@@ -3553,29 +4880,116 @@ def soft_delete_pos_customer(db: Session, customer: models.PosCustomer):
 # ===================== POS CLOSURES =====================
 
 
+def _resolve_closure_station_scope(
+    db: Session,
+    station_id: Optional[str],
+    tenant_id: Optional[int] = None,
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    if not station_id:
+        return [], {}
+    _, scoped = get_closure_station_scope(db, station_id, tenant_id=tenant_id)
+    ids = [item["station_id"] for item in scoped]
+    meta = {
+        item["station_id"]: {
+            "label": item["station_label"],
+            "type": item["station_type"],
+        }
+        for item in scoped
+    }
+    return ids, meta
+
+
+def get_closure_station_scope(
+    db: Session,
+    station_id: str,
+    tenant_id: Optional[int] = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    resolved_station_id = _resolve_station_id(db, station_id, tenant_id=effective_tenant_id)
+    station = get_pos_station(db, resolved_station_id, tenant_id=effective_tenant_id)
+    if not station:
+        raise ValueError("Estación inválida o inactiva")
+
+    primary_id = station.id
+    if (station.station_type or "desktop") == "tablet" and station.parent_station_id:
+        parent = get_pos_station(db, station.parent_station_id, tenant_id=effective_tenant_id)
+        if parent and parent.is_active and (parent.station_type or "desktop") == "desktop":
+            primary_id = parent.id
+
+    scoped = (
+        db.query(models.PosStation.id, models.PosStation.label, models.PosStation.station_type)
+        .filter(
+            or_(
+                models.PosStation.id == primary_id,
+                models.PosStation.parent_station_id == primary_id,
+            ),
+            models.PosStation.is_active.is_(True),
+            (
+                models.PosStation.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            ),
+        )
+        .order_by(
+            case((models.PosStation.id == primary_id, 0), else_=1),
+            models.PosStation.created_at.asc(),
+        )
+        .all()
+    )
+    if not scoped:
+        primary_station = get_pos_station(db, primary_id, tenant_id=effective_tenant_id)
+        label = primary_station.label if primary_station else primary_id
+        station_type = (primary_station.station_type if primary_station else "desktop") or "desktop"
+        return primary_id, [
+            {
+                "station_id": primary_id,
+                "station_label": label,
+                "station_type": station_type,
+                "is_primary": True,
+            }
+        ]
+
+    return primary_id, [
+        {
+            "station_id": item[0],
+            "station_label": item[1] or item[0],
+            "station_type": item[2] or "desktop",
+            "is_primary": item[0] == primary_id,
+        }
+        for item in scoped
+    ]
+
+
 def create_pos_closure(
     db: Session,
     closure_in: schemas.PosClosureCreate,
     user: models.PosUser,
 ) -> models.PosClosure:
+    effective_tenant_id = resolve_user_tenant_id(db, user)
     pos_name = closure_in.pos_name.strip() if closure_in.pos_name else None
-    station_id = _resolve_station_id(db, closure_in.station_id)
+    station_id = _resolve_station_id(db, closure_in.station_id, tenant_id=effective_tenant_id)
     is_pos_web = _is_pos_web_name(pos_name)
 
     if station_id and is_pos_web:
         raise ValueError("POS Web no puede cerrar con estación")
     if not station_id and not is_pos_web:
-        station_id = _resolve_station_id_from_pos_name(db, pos_name)
-    if not station_id and not is_pos_web:
+        station_id = _resolve_station_id_from_pos_name(db, pos_name, tenant_id=effective_tenant_id)
+    if not station_id and not is_pos_web and _tenant_requires_station(
+        db, tenant_id=effective_tenant_id
+    ):
         raise ValueError("Debe seleccionar una estación para cerrar caja")
+    scoped_station_ids, scoped_station_meta = _resolve_closure_station_scope(
+        db, station_id, tenant_id=effective_tenant_id
+    )
 
     pending_sales_query = db.query(models.Sale).filter(
+        models.Sale.tenant_id == effective_tenant_id,
         models.Sale.closure_id.is_(None),
         or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
     )
-    if station_id:
+    if scoped_station_ids:
         pending_sales_query = pending_sales_query.filter(
-            models.Sale.station_id == station_id
+            models.Sale.station_id.in_(scoped_station_ids)
         )
     elif pos_name:
         pending_sales_query = _filter_pos_name(
@@ -3589,6 +5003,7 @@ def create_pos_closure(
 
     if not pending_sales and station_id and user.role == "Administrador":
         fallback_query = db.query(models.Sale).filter(
+            models.Sale.tenant_id == effective_tenant_id,
             models.Sale.closure_id.is_(None),
             models.Sale.station_id.is_(None),
             or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
@@ -3611,13 +5026,14 @@ def create_pos_closure(
         db.query(models.SaleReturn)
         .join(models.Sale, models.SaleReturn.sale_id == models.Sale.id)
         .filter(
+            models.SaleReturn.tenant_id == effective_tenant_id,
             models.SaleReturn.closure_id.is_(None),
             models.SaleReturn.status == "confirmed",
         )
     )
-    if station_id:
+    if scoped_station_ids:
         pending_returns_query = pending_returns_query.filter(
-            models.Sale.station_id == station_id
+            models.Sale.station_id.in_(scoped_station_ids)
         )
     elif pos_name:
         pending_returns_query = _filter_pos_name(
@@ -3631,13 +5047,14 @@ def create_pos_closure(
     pending_changes_base = (
         db.query(models.SaleChange)
         .filter(
+            models.SaleChange.tenant_id == effective_tenant_id,
             models.SaleChange.closure_id.is_(None),
             models.SaleChange.status == "confirmed",
         )
     )
-    if station_id:
+    if scoped_station_ids:
         pending_changes_base = pending_changes_base.filter(
-            models.SaleChange.station_id == station_id
+            models.SaleChange.station_id.in_(scoped_station_ids)
         )
     elif pos_name:
         pending_changes_base = _filter_pos_name(
@@ -3653,6 +5070,7 @@ def create_pos_closure(
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
+            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -3660,11 +5078,11 @@ def create_pos_closure(
             ),
         )
     )
-    if station_id:
+    if scoped_station_ids:
         sep_paid_at = sep_paid_at.filter(
             or_(
-                models.SeparatedOrderPayment.station_id == station_id,
-                models.Sale.station_id == station_id,
+                models.SeparatedOrderPayment.station_id.in_(scoped_station_ids),
+                models.Sale.station_id.in_(scoped_station_ids),
             )
         )
     elif pos_name:
@@ -3718,6 +5136,7 @@ def create_pos_closure(
         db,
         sale_ids,
         range_end=range_end,
+        tenant_id=effective_tenant_id,
     )
     total_amount = sum(
         float(sale.total or 0.0) + float(total_delta_by_sale.get(sale.id, 0.0))
@@ -3742,7 +5161,40 @@ def create_pos_closure(
         "daviplata": "daviplata",
         "credit": "credit",
     }
+    station_totals: dict[str, dict[str, Any]] = {}
+
+    def _station_bucket(station_ref: Optional[str]) -> dict[str, Any]:
+        key = station_ref or "__unassigned__"
+        if key not in station_totals:
+            meta = scoped_station_meta.get(station_ref or "")
+            station_totals[key] = {
+                "station_id": station_ref,
+                "station_label": (
+                    meta.get("label")
+                    if meta
+                    else ("Sin estación" if not station_ref else station_ref)
+                ),
+                "station_type": meta.get("type") if meta else None,
+                "sales_count": 0,
+                "total_amount": 0.0,
+                "total_refunds": 0.0,
+                "total_cash": 0.0,
+                "total_card": 0.0,
+                "total_qr": 0.0,
+                "total_nequi": 0.0,
+                "total_daviplata": 0.0,
+                "total_credit": 0.0,
+                "change_extra_total": 0.0,
+                "change_refund_total": 0.0,
+                "net_amount": 0.0,
+            }
+        return station_totals[key]
     for sale in pending_sales:
+        station_bucket = _station_bucket(sale.station_id)
+        station_bucket["sales_count"] += 1
+        station_bucket["total_amount"] += float(sale.total or 0.0) + float(
+            total_delta_by_sale.get(sale.id, 0.0)
+        )
         adjustment = payment_adjustments.get(sale.id)
         adjusted_payments = (
             _parse_adjustment_payments(adjustment.payload) if adjustment else []
@@ -3764,28 +5216,52 @@ def create_pos_closure(
             key = method_map.get((method or "").lower())
             if key:
                 payment_totals[key] += float(amount or 0.0)
+                station_bucket[f"total_{key}"] += float(amount or 0.0)
+
+        # El cambio de la venta (vuelto) siempre sale de caja en efectivo.
+        # Se descuenta del total de efectivo para no inflar cifras en cierre.
+        sale_change_amount = max(float(sale.change_amount or 0.0), 0.0)
+        if sale_change_amount > 0:
+            payment_totals["cash"] -= sale_change_amount
+            station_bucket["total_cash"] -= sale_change_amount
 
     if pending_returns:
+        for ret in pending_returns:
+            station_bucket = _station_bucket(ret.sale.station_id if ret.sale else None)
+            station_bucket["total_refunds"] += float(ret.total_refund or 0.0)
         return_ids = [ret.id for ret in pending_returns]
         return_rows = (
-            db.query(models.SaleReturnPayment.method, func.sum(models.SaleReturnPayment.amount))
+            db.query(
+                models.Sale.station_id,
+                models.SaleReturnPayment.method,
+                func.sum(models.SaleReturnPayment.amount),
+            )
+            .join(models.SaleReturn, models.SaleReturnPayment.return_id == models.SaleReturn.id)
+            .join(models.Sale, models.SaleReturn.sale_id == models.Sale.id)
             .filter(models.SaleReturnPayment.return_id.in_(return_ids))
-            .group_by(models.SaleReturnPayment.method)
+            .group_by(models.Sale.station_id, models.SaleReturnPayment.method)
             .all()
         )
-        for method, amount in return_rows:
+        for ret_station_id, method, amount in return_rows:
             key = method_map.get((method or "").lower())
             if key:
                 payment_totals[key] -= float(amount or 0.0)
+                station_bucket = _station_bucket(ret_station_id)
+                station_bucket[f"total_{key}"] -= float(amount or 0.0)
 
     sep_payment_filter = (
         db.query(
+            func.coalesce(
+                models.SeparatedOrderPayment.station_id,
+                models.Sale.station_id,
+            ).label("resolved_station_id"),
             models.SeparatedOrderPayment.method,
             func.sum(models.SeparatedOrderPayment.amount),
         )
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
+            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -3798,6 +5274,7 @@ def create_pos_closure(
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
+            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -3805,17 +5282,17 @@ def create_pos_closure(
             ),
         )
     )
-    if station_id:
+    if scoped_station_ids:
         sep_payment_filter = sep_payment_filter.filter(
             or_(
-                models.SeparatedOrderPayment.station_id == station_id,
-                models.Sale.station_id == station_id,
+                models.SeparatedOrderPayment.station_id.in_(scoped_station_ids),
+                models.Sale.station_id.in_(scoped_station_ids),
             )
         )
         sep_ids_query = sep_ids_query.filter(
             or_(
-                models.SeparatedOrderPayment.station_id == station_id,
-                models.Sale.station_id == station_id,
+                models.SeparatedOrderPayment.station_id.in_(scoped_station_ids),
+                models.Sale.station_id.in_(scoped_station_ids),
             )
         )
     elif pos_name:
@@ -3830,13 +5307,18 @@ def create_pos_closure(
             pos_name,
         )
 
-    sep_rows = sep_payment_filter.group_by(models.SeparatedOrderPayment.method).all()
+    sep_rows = sep_payment_filter.group_by(
+        "resolved_station_id",
+        models.SeparatedOrderPayment.method,
+    ).all()
     sep_payment_ids = [row[0] for row in sep_ids_query.all()]
 
-    for method, amount in sep_rows:
+    for sep_station_id, method, amount in sep_rows:
         key = method_map.get((method or "").lower())
         if key:
             payment_totals[key] += float(amount or 0.0)
+            station_bucket = _station_bucket(sep_station_id)
+            station_bucket[f"total_{key}"] += float(amount or 0.0)
 
     pending_changes = [
         change
@@ -3848,19 +5330,56 @@ def create_pos_closure(
     change_count = len(pending_changes)
 
     for change in pending_changes:
+        station_bucket = _station_bucket(change.station_id)
+        station_bucket["change_extra_total"] += float(change.extra_payment or 0.0)
+        station_bucket["change_refund_total"] += float(change.refund_due or 0.0)
         for payment in change.payments:
             key = method_map.get((payment.method or "").lower())
             if key:
                 payment_totals[key] += float(payment.amount or 0.0)
+                station_bucket[f"total_{key}"] += float(payment.amount or 0.0)
         if float(change.refund_due or 0.0) > 0:
             payment_totals["cash"] -= float(change.refund_due or 0.0)
+            station_bucket["total_cash"] -= float(change.refund_due or 0.0)
 
     net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
+    station_breakdown: list[dict[str, Any]] = []
+    for row in station_totals.values():
+        row["net_amount"] = (
+            float(row["total_amount"] or 0.0)
+            - float(row["total_refunds"] or 0.0)
+            + float(row["change_extra_total"] or 0.0)
+            - float(row["change_refund_total"] or 0.0)
+        )
+        has_movement = (
+            int(row["sales_count"] or 0) > 0
+            or abs(float(row["total_amount"] or 0.0)) > 0.009
+            or abs(float(row["total_refunds"] or 0.0)) > 0.009
+            or abs(float(row["change_extra_total"] or 0.0)) > 0.009
+            or abs(float(row["change_refund_total"] or 0.0)) > 0.009
+            or abs(float(row["total_cash"] or 0.0)) > 0.009
+            or abs(float(row["total_card"] or 0.0)) > 0.009
+            or abs(float(row["total_qr"] or 0.0)) > 0.009
+            or abs(float(row["total_nequi"] or 0.0)) > 0.009
+            or abs(float(row["total_daviplata"] or 0.0)) > 0.009
+            or abs(float(row["total_credit"] or 0.0)) > 0.009
+        )
+        if has_movement:
+            station_breakdown.append(row)
+
+    if station_breakdown:
+        station_breakdown.sort(
+            key=lambda value: (
+                0 if station_id and value.get("station_id") == station_id else 1,
+                str(value.get("station_label") or ""),
+            )
+        )
 
     difference = float(closure_in.counted_cash or 0.0) - payment_totals["cash"]
     total_surcharge = sum(float(sale.surcharge_amount or 0.0) for sale in pending_sales)
 
     closure = models.PosClosure(
+        tenant_id=effective_tenant_id,
         pos_name=pos_name,
         pos_identifier=closure_in.pos_identifier,
         station_id=station_id,
@@ -3885,6 +5404,7 @@ def create_pos_closure(
         change_refund_total=change_refund_total,
         change_count=change_count,
         total_surcharge=total_surcharge,
+        station_breakdown=station_breakdown,
     )
     db.add(closure)
     db.flush()
@@ -3926,12 +5446,16 @@ def create_pos_closure(
     return closure
 
 
-def get_pos_closure(db: Session, closure_id: int) -> Optional[models.PosClosure]:
-    return (
-        db.query(models.PosClosure)
-        .filter(models.PosClosure.id == closure_id)
-        .first()
-    )
+def get_pos_closure(
+    db: Session,
+    closure_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosClosure]:
+    query = db.query(models.PosClosure).filter(models.PosClosure.id == closure_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosClosure.tenant_id == effective_tenant_id)
+    return query.first()
 
 
 def list_pos_closures(
@@ -3941,8 +5465,12 @@ def list_pos_closures(
     pos_name: Optional[str] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    tenant_id: Optional[int] = None,
 ) -> List[models.PosClosure]:
     query = db.query(models.PosClosure)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosClosure.tenant_id == effective_tenant_id)
     if pos_name:
         query = query.filter(models.PosClosure.pos_name == pos_name)
     if date_from:

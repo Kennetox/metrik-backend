@@ -94,44 +94,77 @@ def _build_logo_url(filename: str) -> str:
     return f"{storage_path.rstrip('/')}/{filename}"
 
 
-def _get_avatar_dir() -> Path:
-    return Path(os.getenv("USER_AVATAR_UPLOAD_DIR", "uploads/user-avatars"))
+def _get_avatar_dir(tenant_id: Optional[int] = None) -> Path:
+    base = Path(os.getenv("USER_AVATAR_UPLOAD_DIR", "uploads/user-avatars"))
+    if tenant_id is not None:
+        return base / str(tenant_id)
+    return base
 
 
-def _build_avatar_url(filename: str) -> str:
+def _build_avatar_url(filename: str, tenant_id: Optional[int] = None) -> str:
     base_url = os.getenv("USER_AVATAR_BASE_URL")
     if base_url:
+        if tenant_id is not None:
+            return f"{base_url.rstrip('/')}/{tenant_id}/{filename}"
         return f"{base_url.rstrip('/')}/{filename}"
     storage_path = os.getenv("USER_AVATAR_PUBLIC_PATH", "/uploads/user-avatars")
+    if tenant_id is not None:
+        return f"{storage_path.rstrip('/')}/{tenant_id}/{filename}"
     return f"{storage_path.rstrip('/')}/{filename}"
 
 
-def _get_user_documents_dir(user_id: int) -> Path:
+def _get_user_documents_dir(user_id: int, tenant_id: Optional[int] = None) -> Path:
     base = Path(os.getenv("USER_DOC_UPLOAD_DIR", "uploads/user-documents"))
+    if tenant_id is not None:
+        base = base / str(tenant_id)
     return base / str(user_id)
 
 
-def _build_user_document_url(filename: str, user_id: int) -> str:
+def _build_user_document_url(
+    filename: str,
+    user_id: int,
+    tenant_id: Optional[int] = None,
+) -> str:
     base_url = os.getenv("USER_DOC_BASE_URL")
     if base_url:
+        if tenant_id is not None:
+            return f"{base_url.rstrip('/')}/{tenant_id}/{user_id}/{filename}"
         return f"{base_url.rstrip('/')}/{user_id}/{filename}"
     storage_path = os.getenv("USER_DOC_PUBLIC_PATH", "/uploads/user-documents")
+    if tenant_id is not None:
+        return f"{storage_path.rstrip('/')}/{tenant_id}/{user_id}/{filename}"
     return f"{storage_path.rstrip('/')}/{user_id}/{filename}"
 
 
-def _get_receiving_support_dir(lot_id: int) -> Path:
+def _get_receiving_support_dir(
+    lot_id: int,
+    tenant_id: Optional[int] = None,
+) -> Path:
     base = Path(os.getenv("RECEIVING_SUPPORT_UPLOAD_DIR", "uploads/receiving-support"))
+    if tenant_id is not None:
+        base = base / str(tenant_id)
     return base / str(lot_id)
 
-def get_receiving_support_dir(lot_id: int) -> Path:
-    return _get_receiving_support_dir(lot_id)
+def get_receiving_support_dir(
+    lot_id: int,
+    tenant_id: Optional[int] = None,
+) -> Path:
+    return _get_receiving_support_dir(lot_id, tenant_id=tenant_id)
 
 
-def _build_receiving_support_url(filename: str, lot_id: int) -> str:
+def _build_receiving_support_url(
+    filename: str,
+    lot_id: int,
+    tenant_id: Optional[int] = None,
+) -> str:
     base_url = os.getenv("RECEIVING_SUPPORT_BASE_URL")
     if base_url:
+        if tenant_id is not None:
+            return f"{base_url.rstrip('/')}/{tenant_id}/{lot_id}/{filename}"
         return f"{base_url.rstrip('/')}/{lot_id}/{filename}"
     storage_path = os.getenv("RECEIVING_SUPPORT_PUBLIC_PATH", "/uploads/receiving-support")
+    if tenant_id is not None:
+        return f"{storage_path.rstrip('/')}/{tenant_id}/{lot_id}/{filename}"
     return f"{storage_path.rstrip('/')}/{lot_id}/{filename}"
 
 
@@ -185,7 +218,10 @@ async def save_pos_logo(file: UploadFile) -> StoredLogo:
     return StoredLogo(filename=filename, url=url)
 
 
-async def save_user_avatar(file: UploadFile) -> StoredAvatar:
+async def save_user_avatar(
+    file: UploadFile,
+    tenant_id: Optional[int] = None,
+) -> StoredAvatar:
     original_name = file.filename or ""
     extension = Path(original_name).suffix.lower()
     if extension not in AVATAR_ALLOWED_EXTENSIONS:
@@ -196,18 +232,22 @@ async def save_user_avatar(file: UploadFile) -> StoredAvatar:
         raise ValueError("La imagen supera los 2MB permitidos")
 
     filename = f"user-avatar-{uuid4().hex}{extension}"
-    base_dir = _get_avatar_dir()
+    base_dir = _get_avatar_dir(tenant_id=tenant_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     file_path = base_dir / filename
 
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    url = _build_avatar_url(filename)
+    url = _build_avatar_url(filename, tenant_id=tenant_id)
     return StoredAvatar(filename=filename, url=url)
 
 
-async def save_user_document(file: UploadFile, user_id: int) -> StoredUserDocument:
+async def save_user_document(
+    file: UploadFile,
+    user_id: int,
+    tenant_id: Optional[int] = None,
+) -> StoredUserDocument:
     original_name = file.filename or ""
     extension = Path(original_name).suffix.lower()
     if extension not in DOC_ALLOWED_EXTENSIONS:
@@ -218,20 +258,21 @@ async def save_user_document(file: UploadFile, user_id: int) -> StoredUserDocume
         raise ValueError("El archivo supera los 5MB permitidos")
 
     filename = f"user-doc-{uuid4().hex}{extension}"
-    base_dir = _get_user_documents_dir(user_id)
+    base_dir = _get_user_documents_dir(user_id, tenant_id=tenant_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     file_path = base_dir / filename
 
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    url = _build_user_document_url(filename, user_id)
+    url = _build_user_document_url(filename, user_id, tenant_id=tenant_id)
     return StoredUserDocument(filename=original_name, url=url, size=len(contents))
 
 
 async def save_receiving_support_file(
     file: UploadFile,
     lot_id: int,
+    tenant_id: Optional[int] = None,
 ) -> StoredReceivingSupportFile:
     original_name = file.filename or ""
     extension = Path(original_name).suffix.lower()
@@ -243,12 +284,12 @@ async def save_receiving_support_file(
         raise ValueError("El archivo supera los 5MB permitidos")
 
     filename = f"receiving-support-{uuid4().hex}{extension}"
-    base_dir = _get_receiving_support_dir(lot_id)
+    base_dir = _get_receiving_support_dir(lot_id, tenant_id=tenant_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     file_path = base_dir / filename
 
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    url = _build_receiving_support_url(filename, lot_id)
+    url = _build_receiving_support_url(filename, lot_id, tenant_id=tenant_id)
     return StoredReceivingSupportFile(filename=original_name, url=url, size=len(contents))

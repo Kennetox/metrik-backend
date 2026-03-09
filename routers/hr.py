@@ -22,27 +22,30 @@ router = APIRouter(
 def list_hr_employees(
     status: str | None = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.view")),
+    current_user: models.PosUser = Depends(require_permission("hr.view")),
 ):
-    return crud.list_hr_employees(db, status=status)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_hr_employees(db, status=status, tenant_id=tenant_id)
 
 
 @router.post("/employees", response_model=schemas.HREmployeeRead, status_code=201)
 def create_hr_employee(
     payload: schemas.HREmployeeCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    return crud.create_hr_employee(db, payload)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.create_hr_employee(db, payload, tenant_id=tenant_id)
 
 
 @router.get("/employees/{employee_id}", response_model=schemas.HREmployeeRead)
 def get_hr_employee(
     employee_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.view")),
+    current_user: models.PosUser = Depends(require_permission("hr.view")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     return employee
@@ -53,9 +56,10 @@ def list_system_users_for_hr(
     q: str | None = None,
     only_unlinked: bool = True,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    users = crud.list_pos_users(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    users = crud.list_pos_users(db, tenant_id=tenant_id)
     query = (q or "").strip().lower()
     rows: list[models.PosUser] = []
     for user in users:
@@ -75,9 +79,10 @@ def update_hr_employee(
     employee_id: int,
     payload: schemas.HREmployeeUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     return crud.update_hr_employee(db, employee, payload)
@@ -88,9 +93,10 @@ def create_system_user_for_employee(
     employee_id: int,
     payload: schemas.HREmployeeCreateSystemUserRequest,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     if employee.system_user:
@@ -110,6 +116,7 @@ def create_system_user_for_employee(
                 pin_plain=payload.pin_plain,
                 employee_id=employee.id,
             ),
+            tenant_id=tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -121,15 +128,16 @@ def link_system_user_to_employee(
     employee_id: int,
     payload: schemas.HREmployeeLinkSystemUserRequest,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     if employee.system_user:
         raise HTTPException(status_code=400, detail="El empleado ya tiene un usuario vinculado")
 
-    user = crud.get_pos_user(db, payload.user_id)
+    user = crud.get_pos_user(db, payload.user_id, tenant_id=tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     if user.employee_id:
@@ -147,7 +155,8 @@ def deactivate_system_user_for_employee(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     user = employee.system_user
@@ -167,7 +176,8 @@ def delete_system_user_for_employee(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     user = employee.system_user
@@ -193,13 +203,14 @@ async def upload_hr_employee_avatar(
     employee_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     try:
-        result = await storage.save_user_avatar(file)
+        result = await storage.save_user_avatar(file, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
@@ -216,9 +227,10 @@ async def upload_hr_employee_avatar(
 def clear_hr_employee_avatar(
     employee_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     employee.avatar_url = None
@@ -236,12 +248,13 @@ def clear_hr_employee_avatar(
 def list_hr_employee_documents(
     employee_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.view")),
+    current_user: models.PosUser = Depends(require_permission("hr.view")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    hr_docs = crud.list_hr_employee_documents(db, employee_id)
+    hr_docs = crud.list_hr_employee_documents(db, employee_id, tenant_id=tenant_id)
     merged: list[schemas.HREmployeeDocumentRead] = [
         schemas.HREmployeeDocumentRead(
             id=doc.id,
@@ -258,7 +271,7 @@ def list_hr_employee_documents(
     ]
 
     if employee.system_user:
-        profile_docs = crud.list_user_documents(db, employee.system_user.id)
+        profile_docs = crud.list_user_documents(db, employee.system_user.id, tenant_id=tenant_id)
         merged.extend(
             schemas.HREmployeeDocumentRead(
                 id=doc.id,
@@ -288,17 +301,22 @@ async def upload_hr_employee_document(
     file: UploadFile = File(...),
     note: str | None = Form(None),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
-    existing = crud.list_hr_employee_documents(db, employee_id)
+    existing = crud.list_hr_employee_documents(db, employee_id, tenant_id=tenant_id)
     if len(existing) >= 10:
         raise HTTPException(status_code=400, detail="Se alcanzó el límite de 10 documentos.")
 
     try:
-        result = await storage.save_user_document(file, employee_id)
+        result = await storage.save_user_document(
+            file,
+            employee_id,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - filesystem errors
@@ -311,6 +329,7 @@ async def upload_hr_employee_document(
         file_url=result.url,
         file_size=result.size,
         note=note.strip() if note else None,
+        tenant_id=tenant_id,
     )
 
 
@@ -320,17 +339,18 @@ def delete_hr_employee_document(
     doc_id: int,
     source: str = "hr",
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("hr.manage")),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
 ):
-    employee = crud.get_hr_employee(db, employee_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Empleado no encontrado")
     if source == "profile":
         if not employee.system_user:
             raise HTTPException(status_code=400, detail="El empleado no tiene usuario vinculado")
-        deleted = crud.delete_user_document(db, employee.system_user.id, doc_id)
+        deleted = crud.delete_user_document(db, employee.system_user.id, doc_id, tenant_id=tenant_id)
     else:
-        deleted = crud.delete_hr_employee_document(db, employee_id, doc_id)
+        deleted = crud.delete_hr_employee_document(db, employee_id, doc_id, tenant_id=tenant_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     return Response(status_code=204)

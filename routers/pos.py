@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from html import escape
-from typing import List, Optional
+from typing import List, Optional, Literal
 import base64
 import os
 import unicodedata
@@ -22,7 +22,12 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 import schemas, crud, models
 from database import get_db
-from dependencies import get_current_active_user, require_permission, require_role
+from dependencies import (
+    get_current_active_user,
+    require_any_permission,
+    require_permission,
+    require_role,
+)
 from services import email as email_service
 from services import pdf_utils
 from services import permissions as permission_service
@@ -33,6 +38,7 @@ from services.password_reset import (
     build_reset_link,
     generate_token_and_expiry,
 )
+from security import verify_access_token
 
 
 router = APIRouter(
@@ -73,6 +79,17 @@ def _has_required_free_sale_reason(notes: Optional[str]) -> bool:
         return False
     tail = normalized_notes[label_index + len(FREE_SALE_REASON_LABEL) :].strip(" :\n\t\r-")
     return bool(tail)
+
+
+def _smtp_settings_dict(settings: models.PosSettings) -> dict:
+    return {
+        "smtp_host": settings.smtp_host,
+        "smtp_port": settings.smtp_port,
+        "smtp_user": settings.smtp_user,
+        "smtp_password": settings.smtp_password,
+        "smtp_use_tls": settings.smtp_use_tls,
+        "email_from": settings.email_from,
+    }
 
 
 def _load_qz_env(name: str) -> str:
@@ -172,6 +189,13 @@ def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
     return schemas.PosStationRead(
         id=station.id,
         label=station.label,
+        station_type=(station.station_type or "desktop"),
+        parent_station_id=station.parent_station_id,
+        parent_station_label=(
+            station.parent_station.label
+            if getattr(station, "parent_station", None)
+            else None
+        ),
         station_email=email,
         is_active=bool(station.is_active),
         last_login_at=station.last_login_at,
@@ -270,9 +294,10 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
 )
 def list_payment_methods(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods.view")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods.view")),
 ):
-    methods = crud.list_payment_methods(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    methods = crud.list_payment_methods(db, tenant_id=tenant_id)
     return methods
 
 
@@ -284,10 +309,11 @@ def list_payment_methods(
 def create_payment_method(
     payload: schemas.PaymentMethodCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     try:
-        return crud.create_payment_method(db, payload)
+        return crud.create_payment_method(db, payload, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -300,13 +326,14 @@ def update_payment_method(
     method_id: int,
     payload: schemas.PaymentMethodUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods")),
 ):
-    method = crud.get_payment_method(db, method_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    method = crud.get_payment_method(db, method_id, tenant_id=tenant_id)
     if not method or method.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Método no encontrado")
     try:
-        return crud.update_payment_method(db, method, payload)
+        return crud.update_payment_method(db, method, payload, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -319,13 +346,19 @@ def toggle_payment_method(
     method_id: int,
     payload: schemas.PaymentMethodToggleRequest,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods")),
 ):
-    method = crud.get_payment_method(db, method_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    method = crud.get_payment_method(db, method_id, tenant_id=tenant_id)
     if not method or method.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Método no encontrado")
     try:
-        return crud.toggle_payment_method(db, method, payload.is_active)
+        return crud.toggle_payment_method(
+            db,
+            method,
+            payload.is_active,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -337,12 +370,13 @@ def toggle_payment_method(
 def reorder_payment_methods(
     payload: schemas.PaymentMethodReorderRequest,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods")),
 ):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Debes enviar la nueva orden")
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     try:
-        updated = crud.reorder_payment_methods(db, payload.items)
+        updated = crud.reorder_payment_methods(db, payload.items, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated
@@ -352,13 +386,14 @@ def reorder_payment_methods(
 def delete_payment_method(
     method_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.payment_methods")),
+    current_user: models.PosUser = Depends(require_permission("settings.payment_methods")),
 ):
-    method = crud.get_payment_method(db, method_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    method = crud.get_payment_method(db, method_id, tenant_id=tenant_id)
     if not method or method.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Método no encontrado")
     try:
-        crud.delete_payment_method(db, method)
+        crud.delete_payment_method(db, method, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(status_code=204)
@@ -371,11 +406,12 @@ def delete_payment_method(
 def get_next_sale_number(
     pos_id: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
     """Devuelve el siguiente consecutivo disponible."""
 
-    next_number = crud.get_next_sale_number(db, pos_id=pos_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    next_number = crud.get_next_sale_number(db, pos_id=pos_id, tenant_id=tenant_id)
     return schemas.NextSaleNumberResponse(next_sale_number=next_number)
 
 
@@ -391,12 +427,14 @@ def reserve_sale_number(
 ):
     """Reserva un consecutivo para una venta nueva."""
     try:
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
         reservation = crud.reserve_sale_number(
             db,
             pos_name=payload.pos_name,
             station_id=payload.station_id,
             reserved_by_user_id=current_user.id,
             min_sale_number=payload.min_sale_number,
+            tenant_id=tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -415,10 +453,11 @@ def reserve_sale_number(
 def cancel_sale_reservation(
     reservation_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
     try:
-        reservation = crud.cancel_sale_reservation(db, reservation_id)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        reservation = crud.cancel_sale_reservation(db, reservation_id, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return schemas.SaleNumberReservationResponse(
@@ -483,7 +522,9 @@ def list_sales(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view", "reports.view")
+    ),
 ):
     """
     Lista las ventas registradas en el POS.
@@ -491,7 +532,8 @@ def list_sales(
     """
     date_from = None
     date_to = None
-    matrix = crud.get_role_permissions(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
     can_view_history_range = permission_service.role_has_permission(
         matrix, "sales_history.history", current_user.role
     )
@@ -504,6 +546,7 @@ def list_sales(
         limit=limit,
         date_from=date_from,
         date_to=date_to,
+        tenant_id=tenant_id,
     )
     return [_serialize_sale_response(sale) for sale in sales]
 
@@ -519,11 +562,14 @@ def list_sales_history(
     payment_method: Optional[str] = None,
     pos: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view")
+    ),
 ):
     date_from = None
     date_to = None
-    matrix = crud.get_role_permissions(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
     can_view_history_range = permission_service.role_has_permission(
         matrix, "sales_history.history", current_user.role
     )
@@ -545,6 +591,7 @@ def list_sales_history(
         customer=customer,
         payment_method=payment_method,
         pos_name=pos,
+        tenant_id=tenant_id,
     )
     return schemas.SalesHistoryPage(
         total=total,
@@ -558,9 +605,12 @@ def list_sales_history(
 def get_sale(
     sale_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view", "reports.view")
+    ),
 ):
-    sale = crud.get_sale(db, sale_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
     return _serialize_sale_response(sale)
@@ -576,7 +626,8 @@ def void_sale(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("documents.sales.void")),
 ):
-    sale = crud.get_sale(db, sale_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
     try:
@@ -605,7 +656,8 @@ def create_document_adjustment(
     if doc_type != "sale":
         raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
 
-    sale = crud.get_sale(db, doc_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, doc_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
     if sale.status == "voided":
@@ -685,6 +737,7 @@ def create_document_adjustment(
         is_post_closure=is_post_closure,
         original_closure_id=sale.closure_id,
         user=current_user,
+        tenant_id=sale.tenant_id if sale.tenant_id is not None else tenant_id,
     )
     return adjustment
 
@@ -697,14 +750,22 @@ def list_document_adjustments(
     doc_type: str,
     doc_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view", "reports.view")
+    ),
 ):
     if doc_type != "sale":
         raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
-    sale = crud.get_sale(db, doc_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, doc_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
-    return crud.list_document_adjustments(db, doc_type=doc_type, doc_id=doc_id)
+    return crud.list_document_adjustments(
+        db,
+        doc_type=doc_type,
+        doc_id=doc_id,
+        tenant_id=tenant_id,
+    )
 
 
 @router.get(
@@ -715,7 +776,9 @@ def list_document_adjustments_bulk(
     doc_type: str,
     doc_ids: str,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view", "reports.view")
+    ),
 ):
     if doc_type != "sale":
         raise HTTPException(status_code=400, detail="Tipo de documento no soportado")
@@ -725,19 +788,26 @@ def list_document_adjustments_bulk(
         raise HTTPException(status_code=400, detail="doc_ids inválidos") from exc
     if not ids:
         return []
-    return crud.list_document_adjustments_for_docs(db, doc_type=doc_type, doc_ids=ids)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_document_adjustments_for_docs(
+        db,
+        doc_type=doc_type,
+        doc_ids=ids,
+        tenant_id=tenant_id,
+    )
 
 
 @router.post("/returns", response_model=schemas.SaleReturnRead, status_code=201)
 def create_return(
     return_in: schemas.SaleReturnCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(require_permission("pos.returns")),
 ):
     """Registra una devolución parcial o total vinculada a una venta."""
 
     try:
-        sale_return = crud.create_return(db, return_in)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        sale_return = crud.create_return(db, return_in, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -748,12 +818,13 @@ def create_return(
 def create_change(
     change_in: schemas.SaleChangeCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(require_permission("pos.returns")),
 ):
     """Registra un cambio de productos vinculado a una venta."""
 
     try:
-        sale_change = crud.create_change(db, change_in)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        sale_change = crud.create_change(db, change_in, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -772,7 +843,8 @@ def email_sale_ticket(
         require_permission("pos.sales")
     ),
 ):
-    sale = crud.get_sale(db, sale_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
 
@@ -782,10 +854,16 @@ def email_sale_ticket(
             status_code=400, detail="Debe especificar al menos un destinatario"
         )
 
-    settings = crud.get_pos_settings(db)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    mode = (
+        ticket_renderer.CLASSIC_INVOICE_MODE
+        if email_in.document_type == "invoice"
+        else ticket_renderer.TICKET_MODE
+    )
     ticket_html = ticket_renderer.render_sale_ticket_html(
         sale,
         settings=settings,
+        mode=mode,
     )
     body_parts = []
     if email_in.message:
@@ -797,10 +875,12 @@ def email_sale_ticket(
         pdf_bytes = ticket_renderer.render_sale_ticket_pdf(
             sale,
             settings=settings,
+            mode=mode,
         )
+        filename_prefix = "factura" if email_in.document_type == "invoice" else "ticket"
         attachments.append(
             (
-                f"ticket_{sale.sale_number or sale.id}.pdf",
+                f"{filename_prefix}_{sale.sale_number or sale.id}.pdf",
                 pdf_bytes,
                 "application/pdf",
             )
@@ -810,7 +890,11 @@ def email_sale_ticket(
 
     subject = (
         email_in.subject
-        or f"Ticket venta #{sale.sale_number or sale.id}"
+        or (
+            f"Factura venta #{sale.sale_number or sale.id}"
+            if email_in.document_type == "invoice"
+            else f"Ticket venta #{sale.sale_number or sale.id}"
+        )
     )
 
     try:
@@ -820,14 +904,95 @@ def email_sale_ticket(
             html_body="".join(body_parts),
             cc=cc,
             attachments=attachments,
-            smtp_config=settings,
+            smtp_config=_smtp_settings_dict(settings),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except email_service.EmailDeliveryError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return schemas.EmailSendResponse(status="sent")
+    return schemas.EmailSendResponse(status="sent", document_type=email_in.document_type)
+
+
+@router.get(
+    "/sales/{sale_id}/document",
+    response_model=schemas.SaleDocumentResponse,
+)
+def get_sale_document(
+    sale_id: int,
+    document_type: Literal["ticket", "invoice"] = "ticket",
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.sales", "sales_history.view", "reports.view")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    mode = (
+        ticket_renderer.CLASSIC_INVOICE_MODE
+        if document_type == "invoice"
+        else ticket_renderer.TICKET_MODE
+    )
+    document_html = ticket_renderer.render_sale_ticket_html(
+        sale,
+        settings=settings,
+        mode=mode,
+    )
+    prefix = "factura" if document_type == "invoice" else "ticket"
+    return schemas.SaleDocumentResponse(
+        sale_id=sale.id,
+        sale_number=sale.sale_number,
+        document_number=sale.document_number,
+        document_type=document_type,
+        filename=f"{prefix}_{sale.sale_number or sale.id}.html",
+        document_html=document_html,
+    )
+
+
+@router.get("/sales/{sale_id}/document-view", response_class=Response)
+def view_sale_document(
+    sale_id: int,
+    document_type: Literal["ticket", "invoice"] = "ticket",
+    layout: Literal["modern", "thermal"] = "modern",
+    access_token: str = Query(..., min_length=10),
+    db: Session = Depends(get_db),
+):
+    try:
+        token_payload = verify_access_token(access_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    session = crud.get_session_by_token(db, access_token)
+    if not session or session.revoked_at or session.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Sesión inválida o expirada")
+
+    user_id = int(token_payload.get("sub", 0) or 0)
+    user = db.query(models.PosUser).filter(models.PosUser.id == user_id).first()
+    if not user or not user.is_active or user.status != "Activo":
+        raise HTTPException(status_code=401, detail="Usuario inactivo")
+
+    tenant_id = crud.resolve_user_tenant_id(db, user)
+    sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    if document_type == "invoice":
+        mode = ticket_renderer.CLASSIC_INVOICE_MODE
+    elif layout == "thermal":
+        mode = ticket_renderer.THERMAL_TICKET_MODE
+    else:
+        mode = ticket_renderer.TICKET_MODE
+    document_html = ticket_renderer.render_sale_ticket_html(
+        sale,
+        settings=settings,
+        mode=mode,
+    )
+    return Response(content=document_html, media_type="text/html; charset=utf-8")
 
 
 @router.get("/returns", response_model=List[schemas.SaleReturnRead])
@@ -837,14 +1002,16 @@ def list_returns(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(require_permission("pos.returns")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     returns = crud.list_returns(
         db,
         skip=skip,
         limit=limit,
         date_from=date_from,
         date_to=date_to,
+        tenant_id=tenant_id,
     )
     return returns
 
@@ -856,14 +1023,18 @@ def list_changes(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.returns", "sales_history.view", "reports.view")
+    ),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     changes = crud.list_changes(
         db,
         skip=skip,
         limit=limit,
         date_from=date_from,
         date_to=date_to,
+        tenant_id=tenant_id,
     )
     return changes
 
@@ -872,9 +1043,12 @@ def list_changes(
 def get_return(
     return_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.returns", "sales_history.view")
+    ),
 ):
-    sale_return = crud.get_sale_return(db, return_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale_return = crud.get_sale_return(db, return_id, tenant_id=tenant_id)
     if not sale_return:
         raise HTTPException(status_code=404, detail="Devolución no encontrada")
     return sale_return
@@ -890,7 +1064,8 @@ def void_return(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.returns.void")),
 ):
-    sale_return = crud.get_sale_return(db, return_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale_return = crud.get_sale_return(db, return_id, tenant_id=tenant_id)
     if not sale_return:
         raise HTTPException(status_code=404, detail="Devolución no encontrada")
     try:
@@ -904,9 +1079,12 @@ def void_return(
 def get_change(
     change_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.returns")),
+    current_user: models.PosUser = Depends(
+        require_any_permission("pos.returns", "sales_history.view", "reports.view")
+    ),
 ):
-    sale_change = crud.get_sale_change(db, change_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale_change = crud.get_sale_change(db, change_id, tenant_id=tenant_id)
     if not sale_change:
         raise HTTPException(status_code=404, detail="Cambio no encontrado")
     return sale_change
@@ -922,7 +1100,8 @@ def void_change(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.changes.void")),
 ):
-    sale_change = crud.get_sale_change(db, change_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale_change = crud.get_sale_change(db, change_id, tenant_id=tenant_id)
     if not sale_change:
         raise HTTPException(status_code=404, detail="Cambio no encontrado")
     try:
@@ -935,9 +1114,10 @@ def void_change(
 @router.get("/settings", response_model=schemas.PosSettingsRead)
 def get_pos_settings(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.view")),
+    current_user: models.PosUser = Depends(require_permission("settings.view")),
 ):
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     return settings
 
 
@@ -945,9 +1125,10 @@ def get_pos_settings(
 def update_pos_settings(
     settings_in: schemas.PosSettingsUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    current_user: models.PosUser = Depends(require_permission("settings.manage")),
 ):
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     updated = crud.update_pos_settings(db, settings, settings_in)
     return updated
 
@@ -956,13 +1137,14 @@ def update_pos_settings(
 def send_settings_test_email(
     payload: schemas.SmtpTestEmailRequest,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    current_user: models.PosUser = Depends(require_permission("settings.manage")),
 ):
     recipients = list(payload.recipients or [])
     if not recipients:
         raise HTTPException(status_code=400, detail="Agrega al menos un destinatario")
 
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     smtp_config = {
         "smtp_host": payload.smtp_host or settings.smtp_host,
         "smtp_port": payload.smtp_port or settings.smtp_port,
@@ -1057,7 +1239,7 @@ def send_public_contact_request(
             subject=subject,
             html_body=html_body,
             text_body=text_body,
-            smtp_config=settings,
+            smtp_config=_smtp_settings_dict(settings),
         )
     except email_service.EmailDeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1090,7 +1272,7 @@ def sign_qz_request(
 async def upload_logo(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    current_user: models.PosUser = Depends(require_permission("settings.manage")),
 ):
     try:
         result = await storage.save_pos_logo(file)
@@ -1099,7 +1281,8 @@ async def upload_logo(
     except Exception as exc:  # pragma: no cover - filesystem errors
         raise HTTPException(500, detail=f"No se pudo guardar el logo: {exc}") from exc
 
-    settings = crud.get_pos_settings(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     settings.logo_url = result.url
     settings.ticket_logo_url = result.url
     db.commit()
@@ -1113,9 +1296,10 @@ async def upload_logo(
 )
 def get_role_permissions(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.view")),
+    current_user: models.PosUser = Depends(require_permission("settings.view")),
 ):
-    modules = crud.get_role_permissions(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    modules = crud.get_role_permissions(db, tenant_id=tenant_id)
     return schemas.RolePermissionMatrix(modules=modules)
 
 
@@ -1126,10 +1310,11 @@ def get_role_permissions(
 def update_role_permissions(
     payload: schemas.RolePermissionMatrix,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("settings.manage")),
+    current_user: models.PosUser = Depends(require_permission("settings.manage")),
 ):
     modules_payload = [module.model_dump() for module in payload.modules]
-    modules = crud.update_role_permissions(db, modules_payload)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    modules = crud.update_role_permissions(db, modules_payload, tenant_id=tenant_id)
     return schemas.RolePermissionMatrix(modules=modules)
 
 
@@ -1159,7 +1344,8 @@ def update_profile(
     db.commit()
     db.refresh(current_user)
     if current_user.employee_id:
-        employee = crud.get_hr_employee(db, current_user.employee_id)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        employee = crud.get_hr_employee(db, current_user.employee_id, tenant_id=tenant_id)
         if employee:
             employee.name = current_user.name
             employee.email = current_user.email
@@ -1181,7 +1367,8 @@ async def upload_profile_avatar(
     current_user: models.PosUser = Depends(get_current_active_user),
 ):
     try:
-        result = await storage.save_user_avatar(file)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        result = await storage.save_user_avatar(file, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - filesystem errors
@@ -1191,7 +1378,8 @@ async def upload_profile_avatar(
     db.commit()
     db.refresh(current_user)
     if current_user.employee_id:
-        employee = crud.get_hr_employee(db, current_user.employee_id)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        employee = crud.get_hr_employee(db, current_user.employee_id, tenant_id=tenant_id)
         if employee:
             employee.avatar_url = current_user.avatar_url
             db.commit()
@@ -1203,7 +1391,8 @@ def list_profile_documents(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(get_current_active_user),
 ):
-    return crud.list_user_documents(db, current_user.id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_user_documents(db, current_user.id, tenant_id=tenant_id)
 
 
 @router.post("/profile/documents", response_model=schemas.PosUserDocumentRead, status_code=201)
@@ -1213,11 +1402,16 @@ async def upload_profile_document(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(get_current_active_user),
 ):
-    existing = crud.list_user_documents(db, current_user.id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    existing = crud.list_user_documents(db, current_user.id, tenant_id=tenant_id)
     if len(existing) >= 10:
         raise HTTPException(status_code=400, detail="Se alcanzó el límite de 10 documentos.")
     try:
-        result = await storage.save_user_document(file, current_user.id)
+        result = await storage.save_user_document(
+            file,
+            current_user.id,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - filesystem errors
@@ -1230,6 +1424,7 @@ async def upload_profile_document(
         file_url=result.url,
         file_size=result.size,
         note=note.strip() if note else None,
+        tenant_id=tenant_id,
     )
     return doc
 
@@ -1240,7 +1435,13 @@ def delete_profile_document(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(get_current_active_user),
 ):
-    deleted = crud.delete_user_document(db, current_user.id, doc_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    deleted = crud.delete_user_document(
+        db,
+        current_user.id,
+        doc_id,
+        tenant_id=tenant_id,
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     return Response(status_code=204)
@@ -1251,9 +1452,10 @@ def list_pos_users(
     status: Optional[str] = None,
     role: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("users.manage")),
+    current_user: models.PosUser = Depends(require_permission("users.manage")),
 ):
-    users = crud.list_pos_users(db, status=status, role=role)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    users = crud.list_pos_users(db, status=status, role=role, tenant_id=tenant_id)
     return users
 
 
@@ -1261,10 +1463,11 @@ def list_pos_users(
 def create_pos_user(
     user_in: schemas.PosUserCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("users.manage")),
+    current_user: models.PosUser = Depends(require_permission("users.manage")),
 ):
     try:
-        user = crud.create_pos_user(db, user_in)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        user = crud.create_pos_user(db, user_in, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return user
@@ -1275,9 +1478,10 @@ def update_pos_user(
     user_id: int,
     user_in: schemas.PosUserUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("users.manage")),
+    current_user: models.PosUser = Depends(require_permission("users.manage")),
 ):
-    user = crud.get_pos_user(db, user_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    user = crud.get_pos_user(db, user_id, tenant_id=tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
@@ -1292,9 +1496,10 @@ def update_pos_user(
 def invite_pos_user(
     user_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("users.invite")),
+    current_user: models.PosUser = Depends(require_permission("users.invite")),
 ):
-    user = crud.get_pos_user(db, user_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    user = crud.get_pos_user(db, user_id, tenant_id=tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     if not user.email:
@@ -1308,7 +1513,7 @@ def invite_pos_user(
     db.commit()
     db.refresh(user)
 
-    settings = crud.get_pos_settings(db)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     reset_link = build_reset_link(token)
     html_body = (
         f"<p>Hola {user.name or user.email},</p>"
@@ -1323,7 +1528,7 @@ def invite_pos_user(
             recipients=[user.email],
             subject="Invitación a Metrik POS",
             html_body=html_body,
-            smtp_config=settings,
+            smtp_config=_smtp_settings_dict(settings),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1342,9 +1547,10 @@ def invite_pos_user(
 )
 def list_pos_stations(
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("stations.manage")),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
-    stations = crud.list_pos_stations(db)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    stations = crud.list_pos_stations(db, tenant_id=tenant_id)
     return [_station_to_read(station) for station in stations]
 
 
@@ -1356,10 +1562,11 @@ def list_pos_stations(
 def create_pos_station(
     payload: schemas.PosStationCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("stations.manage")),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     try:
-        station, pin_plain = crud.create_pos_station(db, payload)
+        station, pin_plain = crud.create_pos_station(db, payload, tenant_id=tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _station_to_response(station, pin_plain)
@@ -1373,13 +1580,52 @@ def update_pos_station(
     station_id: str,
     payload: schemas.PosStationUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("stations.manage")),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
-    station, pin_plain = crud.update_pos_station(db, station, payload)
+    station, pin_plain = crud.update_pos_station(
+        db,
+        station,
+        payload,
+        tenant_id=tenant_id,
+    )
     return _station_to_response(station, pin_plain)
+
+
+@router.get(
+    "/stations/{station_id}/closure-scope",
+    response_model=schemas.PosClosureStationScopeRead,
+)
+def get_pos_station_closure_scope(
+    station_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    try:
+        primary_station_id, scoped = crud.get_closure_station_scope(
+            db,
+            station_id,
+            tenant_id=tenant_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.PosClosureStationScopeRead(
+        primary_station_id=primary_station_id,
+        station_ids=[item["station_id"] for item in scoped],
+        stations=[
+            schemas.PosClosureStationScopeItem(
+                station_id=item["station_id"],
+                station_label=item["station_label"],
+                station_type=item["station_type"],
+                is_primary=bool(item["is_primary"]),
+            )
+            for item in scoped
+        ],
+    )
 
 
 def _station_notice_to_read(
@@ -1406,7 +1652,8 @@ def create_pos_station_notice(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     notice = crud.create_pos_station_notice(
@@ -1425,9 +1672,10 @@ def create_pos_station_notice(
 def get_pos_station_notice(
     station_id: str,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     notice = crud.get_active_pos_station_notice(db, station_id)
@@ -1443,10 +1691,11 @@ def dismiss_pos_station_notice(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
-    notice = crud.get_pos_station_notice(db, station_id, notice_id)
+    notice = crud.get_pos_station_notice(db, station_id, notice_id, tenant_id=tenant_id)
     if not notice:
         raise HTTPException(status_code=404, detail="Aviso no encontrado")
     crud.dismiss_pos_station_notice(db, notice, current_user)
@@ -1460,9 +1709,10 @@ def dismiss_pos_station_notice(
 def get_station_printer_config(
     station_id: str,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     return _station_printer_config(station)
@@ -1476,9 +1726,10 @@ def update_station_printer_config(
     station_id: str,
     payload: schemas.PosStationPrinterConfigUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.sales")),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     station = crud.update_pos_station_printer_config(db, station, payload)
@@ -1489,9 +1740,10 @@ def update_station_printer_config(
 def deactivate_pos_station(
     station_id: str,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("stations.manage")),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     crud.deactivate_pos_station(db, station)
@@ -1505,9 +1757,10 @@ def deactivate_pos_station(
 def unbind_pos_station(
     station_id: str,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("stations.manage")),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
 ):
-    station = crud.get_pos_station(db, station_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
     if not station:
         raise HTTPException(status_code=404, detail="Estación no encontrada")
     station.bound_device_id = None
@@ -1527,14 +1780,16 @@ def list_pos_customers(
     limit: int = 100,
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.customers")),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     customers = crud.list_pos_customers(
         db,
         search=search,
         skip=skip,
         limit=limit,
         include_inactive=include_inactive,
+        tenant_id=tenant_id,
     )
     return customers
 
@@ -1544,12 +1799,14 @@ def list_pos_frequent_customers(
     min_sales: int = 5,
     limit: int = 12,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.customers")),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     return crud.list_pos_frequent_customers(
         db,
         min_sales=min_sales,
         limit=limit,
+        tenant_id=tenant_id,
     )
 
 
@@ -1561,9 +1818,10 @@ def list_pos_frequent_customers(
 def create_pos_customer(
     customer_in: schemas.PosCustomerCreate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.customers")),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
-    customer = crud.create_pos_customer(db, customer_in)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    customer = crud.create_pos_customer(db, customer_in, tenant_id=tenant_id)
     return customer
 
 
@@ -1572,9 +1830,10 @@ def update_pos_customer(
     customer_id: int,
     customer_in: schemas.PosCustomerUpdate,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.customers")),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
-    customer = crud.get_pos_customer(db, customer_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    customer = crud.get_pos_customer(db, customer_id, tenant_id=tenant_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
     updated = crud.update_pos_customer(db, customer, customer_in)
@@ -1585,9 +1844,10 @@ def update_pos_customer(
 def delete_pos_customer(
     customer_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(require_permission("pos.customers")),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
-    customer = crud.get_pos_customer(db, customer_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    customer = crud.get_pos_customer(db, customer_id, tenant_id=tenant_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
     crud.soft_delete_pos_customer(db, customer)
@@ -1625,11 +1885,12 @@ def email_closure_report(
         require_permission("pos.closures")
     ),
 ):
-    closure = crud.get_pos_closure(db, closure_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    closure = crud.get_pos_closure(db, closure_id, tenant_id=tenant_id)
     if not closure:
         raise HTTPException(status_code=404, detail="Cierre no encontrado")
 
-    settings = crud.get_pos_settings(db)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     recipients = list(email_in.recipients or [])
     if not recipients:
         recipients = list(settings.closure_email_recipients or [])
@@ -1715,7 +1976,7 @@ def email_closure_report(
             html_body="".join(body_parts),
             cc=None,
             attachments=attachments,
-            smtp_config=settings,
+            smtp_config=_smtp_settings_dict(settings),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1736,10 +1997,11 @@ def list_pos_closures(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(
+    current_user: models.PosUser = Depends(
         require_permission("pos.closures")
     ),
 ):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
     closures = crud.list_pos_closures(
         db,
         skip=skip,
@@ -1747,6 +2009,7 @@ def list_pos_closures(
         pos_name=pos_name,
         date_from=date_from,
         date_to=date_to,
+        tenant_id=tenant_id,
     )
     return closures
 
@@ -1758,11 +2021,12 @@ def list_pos_closures(
 def get_pos_closure(
     closure_id: int,
     db: Session = Depends(get_db),
-    _: models.PosUser = Depends(
+    current_user: models.PosUser = Depends(
         require_permission("pos.closures")
     ),
 ):
-    closure = crud.get_pos_closure(db, closure_id)
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    closure = crud.get_pos_closure(db, closure_id, tenant_id=tenant_id)
     if not closure:
         raise HTTPException(status_code=404, detail="Cierre no encontrado")
     return closure
