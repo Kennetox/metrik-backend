@@ -56,6 +56,41 @@ def _ensure_column_postgres(
     )
 
 
+def _table_exists_postgres(connection, table: str) -> bool:
+    row = connection.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = :table
+            ) AS exists
+            """
+        ),
+        {"table": table},
+    ).mappings().first()
+    return bool(row and row.get("exists"))
+
+
+def _column_exists_postgres(connection, table: str, column: str) -> bool:
+    row = connection.execute(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = :table
+                  AND column_name = :column
+            ) AS exists
+            """
+        ),
+        {"table": table, "column": column},
+    ).mappings().first()
+    return bool(row and row.get("exists"))
+
+
 def _has_duplicate_products_code_per_tenant(
     connection,
     backend: str,
@@ -3051,6 +3086,38 @@ def _ensure_table_demo_signup_audits_postgres(connection) -> None:
 
 
 def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
+    if not _table_exists(connection, "pos_settings"):
+        return
+
+    if _column_exists(connection, "pos_settings", "tenant_id"):
+        connection.execute(
+            text(
+                """
+                UPDATE tenants
+                SET
+                    name = (
+                        SELECT trim(ps.company_name)
+                        FROM pos_settings ps
+                        WHERE ps.tenant_id = tenants.id
+                          AND ps.company_name IS NOT NULL
+                          AND trim(ps.company_name) <> ''
+                        LIMIT 1
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE slug = 'kensar'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM pos_settings ps
+                    WHERE ps.tenant_id = tenants.id
+                      AND ps.company_name IS NOT NULL
+                      AND trim(ps.company_name) <> ''
+                      AND trim(ps.company_name) <> tenants.name
+                  )
+                """
+            )
+        )
+        return
+
     connection.execute(
         text(
             """
@@ -3059,8 +3126,7 @@ def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
                 name = (
                     SELECT trim(ps.company_name)
                     FROM pos_settings ps
-                    WHERE ps.tenant_id = tenants.id
-                      AND ps.company_name IS NOT NULL
+                    WHERE ps.company_name IS NOT NULL
                       AND trim(ps.company_name) <> ''
                     LIMIT 1
                 ),
@@ -3069,8 +3135,7 @@ def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
               AND EXISTS (
                 SELECT 1
                 FROM pos_settings ps
-                WHERE ps.tenant_id = tenants.id
-                  AND ps.company_name IS NOT NULL
+                WHERE ps.company_name IS NOT NULL
                   AND trim(ps.company_name) <> ''
                   AND trim(ps.company_name) <> tenants.name
               )
@@ -3080,6 +3145,28 @@ def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
 
 
 def _sync_kensar_tenant_name_from_settings_postgres(connection) -> None:
+    if not _table_exists_postgres(connection, "pos_settings"):
+        return
+
+    if _column_exists_postgres(connection, "pos_settings", "tenant_id"):
+        connection.execute(
+            text(
+                """
+                UPDATE tenants t
+                SET
+                    name = trim(ps.company_name),
+                    updated_at = CURRENT_TIMESTAMP
+                FROM pos_settings ps
+                WHERE t.slug = 'kensar'
+                  AND ps.tenant_id = t.id
+                  AND ps.company_name IS NOT NULL
+                  AND btrim(ps.company_name) <> ''
+                  AND btrim(ps.company_name) <> t.name
+                """
+            )
+        )
+        return
+
     connection.execute(
         text(
             """
@@ -3089,7 +3176,6 @@ def _sync_kensar_tenant_name_from_settings_postgres(connection) -> None:
                 updated_at = CURRENT_TIMESTAMP
             FROM pos_settings ps
             WHERE t.slug = 'kensar'
-              AND ps.tenant_id = t.id
               AND ps.company_name IS NOT NULL
               AND btrim(ps.company_name) <> ''
               AND btrim(ps.company_name) <> t.name
