@@ -444,7 +444,6 @@ def run_schema_upgrades(engine: Engine) -> None:
             if backend == "postgresql":
                 _ensure_table_tenants_postgres(connection)
                 _seed_default_tenant_postgres(connection)
-                _sync_kensar_tenant_name_from_settings_postgres(connection)
                 _ensure_pos_settings_id_sequence_postgres(connection)
                 _ensure_table_document_adjustments_postgres(connection)
                 _ensure_table_product_audit_logs_postgres(connection)
@@ -811,12 +810,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _backfill_legacy_users_to_default_tenant_postgres(connection)
+                _backfill_company_name_from_tenant_postgres(connection)
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
                 _ensure_table_demo_signup_audits(connection)
                 _seed_default_tenant_sqlite(connection)
-                _sync_kensar_tenant_name_from_settings_sqlite(connection)
                 _ensure_column(
                     connection,
                     "sales",
@@ -1059,6 +1058,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "sale_changes", "voided_by_user_id", "INTEGER")
                 _ensure_column(connection, "sale_changes", "void_reason", "TEXT")
                 _ensure_column(connection, "sale_changes", "adjustment_reference", "TEXT")
+                _backfill_company_name_from_tenant_sqlite(connection)
                 _ensure_column(
                     connection,
                     "separated_order_payments",
@@ -3085,33 +3085,38 @@ def _ensure_table_demo_signup_audits_postgres(connection) -> None:
     )
 
 
-def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
+def _backfill_company_name_from_tenant_sqlite(connection) -> None:
     if not _table_exists(connection, "pos_settings"):
         return
 
+    # Legacy safety net:
+    # - keep personalized branding untouched
+    # - only replace placeholders/empty values with the tenant name
     if _column_exists(connection, "pos_settings", "tenant_id"):
         connection.execute(
             text(
                 """
-                UPDATE tenants
-                SET
-                    name = (
-                        SELECT trim(ps.company_name)
-                        FROM pos_settings ps
-                        WHERE ps.tenant_id = tenants.id
-                          AND ps.company_name IS NOT NULL
-                          AND trim(ps.company_name) <> ''
-                        LIMIT 1
-                    ),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE slug = 'kensar'
+                UPDATE pos_settings
+                SET company_name = (
+                    SELECT trim(t.name)
+                    FROM tenants t
+                    WHERE t.id = pos_settings.tenant_id
+                      AND t.name IS NOT NULL
+                      AND trim(t.name) <> ''
+                    LIMIT 1
+                )
+                WHERE pos_settings.tenant_id IS NOT NULL
+                  AND (
+                    pos_settings.company_name IS NULL
+                    OR trim(pos_settings.company_name) = ''
+                    OR lower(trim(pos_settings.company_name)) IN ('mi negocio', 'mi empresa')
+                  )
                   AND EXISTS (
                     SELECT 1
-                    FROM pos_settings ps
-                    WHERE ps.tenant_id = tenants.id
-                      AND ps.company_name IS NOT NULL
-                      AND trim(ps.company_name) <> ''
-                      AND trim(ps.company_name) <> tenants.name
+                    FROM tenants t
+                    WHERE t.id = pos_settings.tenant_id
+                      AND t.name IS NOT NULL
+                      AND trim(t.name) <> ''
                   )
                 """
             )
@@ -3121,47 +3126,54 @@ def _sync_kensar_tenant_name_from_settings_sqlite(connection) -> None:
     connection.execute(
         text(
             """
-            UPDATE tenants
-            SET
-                name = (
-                    SELECT trim(ps.company_name)
-                    FROM pos_settings ps
-                    WHERE ps.company_name IS NOT NULL
-                      AND trim(ps.company_name) <> ''
-                    LIMIT 1
-                ),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE slug = 'kensar'
+            UPDATE pos_settings
+            SET company_name = (
+                SELECT trim(t.name)
+                FROM tenants t
+                WHERE t.slug = 'kensar'
+                  AND t.name IS NOT NULL
+                  AND trim(t.name) <> ''
+                LIMIT 1
+            )
+            WHERE (
+                company_name IS NULL
+                OR trim(company_name) = ''
+                OR lower(trim(company_name)) IN ('mi negocio', 'mi empresa')
+            )
               AND EXISTS (
                 SELECT 1
-                FROM pos_settings ps
-                WHERE ps.company_name IS NOT NULL
-                  AND trim(ps.company_name) <> ''
-                  AND trim(ps.company_name) <> tenants.name
+                FROM tenants t
+                WHERE t.slug = 'kensar'
+                  AND t.name IS NOT NULL
+                  AND trim(t.name) <> ''
               )
             """
         )
     )
 
 
-def _sync_kensar_tenant_name_from_settings_postgres(connection) -> None:
+def _backfill_company_name_from_tenant_postgres(connection) -> None:
     if not _table_exists_postgres(connection, "pos_settings"):
         return
 
+    # Legacy safety net:
+    # - keep personalized branding untouched
+    # - only replace placeholders/empty values with the tenant name
     if _column_exists_postgres(connection, "pos_settings", "tenant_id"):
         connection.execute(
             text(
                 """
-                UPDATE tenants t
-                SET
-                    name = trim(ps.company_name),
-                    updated_at = CURRENT_TIMESTAMP
-                FROM pos_settings ps
-                WHERE t.slug = 'kensar'
-                  AND ps.tenant_id = t.id
-                  AND ps.company_name IS NOT NULL
-                  AND btrim(ps.company_name) <> ''
-                  AND btrim(ps.company_name) <> t.name
+                UPDATE pos_settings ps
+                SET company_name = btrim(t.name)
+                FROM tenants t
+                WHERE ps.tenant_id = t.id
+                  AND t.name IS NOT NULL
+                  AND btrim(t.name) <> ''
+                  AND (
+                    ps.company_name IS NULL
+                    OR btrim(ps.company_name) = ''
+                    OR lower(btrim(ps.company_name)) IN ('mi negocio', 'mi empresa')
+                  )
                 """
             )
         )
@@ -3170,15 +3182,17 @@ def _sync_kensar_tenant_name_from_settings_postgres(connection) -> None:
     connection.execute(
         text(
             """
-            UPDATE tenants t
-            SET
-                name = trim(ps.company_name),
-                updated_at = CURRENT_TIMESTAMP
-            FROM pos_settings ps
+            UPDATE pos_settings ps
+            SET company_name = btrim(t.name)
+            FROM tenants t
             WHERE t.slug = 'kensar'
-              AND ps.company_name IS NOT NULL
-              AND btrim(ps.company_name) <> ''
-              AND btrim(ps.company_name) <> t.name
+              AND t.name IS NOT NULL
+              AND btrim(t.name) <> ''
+              AND (
+                ps.company_name IS NULL
+                OR btrim(ps.company_name) = ''
+                OR lower(btrim(ps.company_name)) IN ('mi negocio', 'mi empresa')
+              )
             """
         )
     )

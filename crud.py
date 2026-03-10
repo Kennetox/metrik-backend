@@ -29,6 +29,23 @@ def _clean_field(value):
     return value
 
 
+def _normalize_label(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _should_sync_company_name_from_tenant(
+    company_name: Optional[str],
+    previous_tenant_name: Optional[str],
+) -> bool:
+    normalized_company = _normalize_label(company_name)
+    if not normalized_company:
+        return True
+    if normalized_company in {"mi negocio", "mi empresa"}:
+        return True
+    previous_normalized = _normalize_label(previous_tenant_name)
+    return bool(previous_normalized and normalized_company == previous_normalized)
+
+
 def _session_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -374,6 +391,7 @@ def update_tenant(
     tenant: models.Tenant,
     payload: schemas.PlatformTenantUpdateRequest,
 ) -> models.Tenant:
+    previous_tenant_name = (tenant.name or "").strip()
     data = payload.model_dump(exclude_unset=True)
     name_changed = False
     if "name" in data and data["name"] is not None:
@@ -397,7 +415,18 @@ def update_tenant(
             .first()
         )
         if settings:
-            settings.company_name = tenant.name
+            if _should_sync_company_name_from_tenant(
+                settings.company_name,
+                previous_tenant_name,
+            ):
+                settings.company_name = tenant.name
+        else:
+            db.add(
+                models.PosSettings(
+                    tenant_id=tenant.id,
+                    company_name=tenant.name,
+                )
+            )
 
     db.commit()
     db.refresh(tenant)
