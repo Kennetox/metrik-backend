@@ -5221,6 +5221,7 @@ def create_pos_closure(
             models.SaleReturn.tenant_id == effective_tenant_id,
             models.SaleReturn.closure_id.is_(None),
             models.SaleReturn.status == "confirmed",
+            models.SaleReturn.adjustment_reference.is_(None),
         )
     )
     if scoped_station_ids:

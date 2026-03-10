@@ -667,6 +667,7 @@ def get_monthly_sales(
         .filter(models.SaleReturn.created_at >= year_start)
         .filter(models.SaleReturn.created_at < year_end)
         .filter(models.SaleReturn.status == "confirmed")
+        .filter(models.SaleReturn.adjustment_reference.is_(None))
         .all()
     )
     changes_year = (
