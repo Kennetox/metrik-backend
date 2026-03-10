@@ -1618,12 +1618,31 @@ class PlatformUserRead(BaseModel):
 class PlatformLoginRequest(BaseModel):
     email: EmailStr
     password: str
+    device_token: Optional[str] = None
+    device_label: Optional[str] = None
 
 
 class PlatformLoginResponse(BaseModel):
     token: str
     user: PlatformUserRead
     expires_at: Optional[datetime] = None
+    trusted_device_token: Optional[str] = None
+
+
+class PlatformLogin2FARequiredResponse(BaseModel):
+    requires_2fa: bool = True
+    challenge_id: int
+    masked_email: str
+    expires_in: int
+    detail: str = "Te enviamos un código de verificación al correo."
+
+
+class PlatformVerify2FARequest(BaseModel):
+    challenge_id: int
+    code: Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]
+    remember_device: bool = False
+    device_token: Optional[str] = None
+    device_label: Optional[str] = None
 
 
 class AuthLoginRequest(BaseModel):

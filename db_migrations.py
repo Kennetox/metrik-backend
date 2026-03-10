@@ -449,6 +449,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_product_audit_logs_postgres(connection)
                 _ensure_table_sale_changes_postgres(connection)
                 _ensure_table_pos_sessions_postgres(connection)
+                _ensure_table_platform_login_2fa_challenges_postgres(connection)
+                _ensure_table_platform_trusted_devices_postgres(connection)
                 _ensure_table_user_documents_postgres(connection)
                 _ensure_table_hr_employees_postgres(connection)
                 _ensure_table_hr_employee_documents_postgres(connection)
@@ -984,6 +986,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                         _ensure_column(connection, table, "tenant_id", "INTEGER")
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
+                _ensure_table_platform_login_2fa_challenges(connection)
+                _ensure_table_platform_trusted_devices(connection)
                 _ensure_table_user_documents(connection)
                 _ensure_table_hr_employees(connection)
                 _ensure_table_hr_employee_documents(connection)
@@ -1734,6 +1738,70 @@ def _ensure_table_pos_sessions(connection) -> None:
         _ensure_column(connection, "pos_sessions", "expires_at", "DATETIME")
         _ensure_column(connection, "pos_sessions", "revoked_at", "DATETIME")
         _ensure_column(connection, "pos_sessions", "revoked_reason", "TEXT")
+
+
+def _ensure_table_platform_login_2fa_challenges(connection) -> None:
+    if not _table_exists(connection, "platform_login_2fa_challenges"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE platform_login_2fa_challenges (
+                    id INTEGER PRIMARY KEY,
+                    platform_user_id INTEGER NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    consumed_at DATETIME,
+                    user_agent TEXT,
+                    ip_address TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(platform_user_id) REFERENCES platform_users(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "platform_login_2fa_challenges", "platform_user_id", "INTEGER")
+        _ensure_column(connection, "platform_login_2fa_challenges", "code_hash", "TEXT")
+        _ensure_column(connection, "platform_login_2fa_challenges", "expires_at", "DATETIME")
+        _ensure_column(connection, "platform_login_2fa_challenges", "attempts", "INTEGER DEFAULT 0")
+        _ensure_column(connection, "platform_login_2fa_challenges", "consumed_at", "DATETIME")
+        _ensure_column(connection, "platform_login_2fa_challenges", "user_agent", "TEXT")
+        _ensure_column(connection, "platform_login_2fa_challenges", "ip_address", "TEXT")
+        _ensure_column(connection, "platform_login_2fa_challenges", "created_at", "DATETIME")
+
+
+def _ensure_table_platform_trusted_devices(connection) -> None:
+    if not _table_exists(connection, "platform_trusted_devices"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE platform_trusted_devices (
+                    id INTEGER PRIMARY KEY,
+                    platform_user_id INTEGER NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    device_label TEXT,
+                    user_agent TEXT,
+                    last_ip TEXT,
+                    expires_at DATETIME NOT NULL,
+                    revoked_at DATETIME,
+                    last_used_at DATETIME,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(platform_user_id) REFERENCES platform_users(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "platform_trusted_devices", "platform_user_id", "INTEGER")
+        _ensure_column(connection, "platform_trusted_devices", "token_hash", "TEXT")
+        _ensure_column(connection, "platform_trusted_devices", "device_label", "TEXT")
+        _ensure_column(connection, "platform_trusted_devices", "user_agent", "TEXT")
+        _ensure_column(connection, "platform_trusted_devices", "last_ip", "TEXT")
+        _ensure_column(connection, "platform_trusted_devices", "expires_at", "DATETIME")
+        _ensure_column(connection, "platform_trusted_devices", "revoked_at", "DATETIME")
+        _ensure_column(connection, "platform_trusted_devices", "last_used_at", "DATETIME")
+        _ensure_column(connection, "platform_trusted_devices", "created_at", "DATETIME")
 
 
 def _ensure_table_user_documents(connection) -> None:
@@ -2741,6 +2809,47 @@ def _ensure_table_pos_sessions_postgres(connection) -> None:
                 expires_at TIMESTAMP NOT NULL,
                 revoked_at TIMESTAMP,
                 revoked_reason TEXT
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_platform_login_2fa_challenges_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS platform_login_2fa_challenges (
+                id SERIAL PRIMARY KEY,
+                platform_user_id INTEGER NOT NULL REFERENCES platform_users(id),
+                code_hash TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                consumed_at TIMESTAMP,
+                user_agent TEXT,
+                ip_address TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
+def _ensure_table_platform_trusted_devices_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS platform_trusted_devices (
+                id SERIAL PRIMARY KEY,
+                platform_user_id INTEGER NOT NULL REFERENCES platform_users(id),
+                token_hash TEXT NOT NULL UNIQUE,
+                device_label TEXT,
+                user_agent TEXT,
+                last_ip TEXT,
+                expires_at TIMESTAMP NOT NULL,
+                revoked_at TIMESTAMP,
+                last_used_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )

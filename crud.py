@@ -4700,6 +4700,169 @@ def dismiss_pos_station_notice(
     db.commit()
 
 
+# ===================== LOGIN 2FA =====================
+
+
+def _login_2fa_code_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _trusted_device_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def invalidate_platform_login_2fa_challenges(db: Session, platform_user_id: int) -> None:
+    now = datetime.utcnow()
+    (
+        db.query(models.PlatformLogin2FAChallenge)
+        .filter(
+            models.PlatformLogin2FAChallenge.platform_user_id == platform_user_id,
+            models.PlatformLogin2FAChallenge.consumed_at.is_(None),
+        )
+        .update(
+            {models.PlatformLogin2FAChallenge.consumed_at: now},
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+
+
+def create_platform_login_2fa_challenge(
+    db: Session,
+    user: models.PlatformUser,
+    *,
+    code: str,
+    expires_at: datetime,
+    user_agent: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> models.PlatformLogin2FAChallenge:
+    invalidate_platform_login_2fa_challenges(db, user.id)
+    challenge = models.PlatformLogin2FAChallenge(
+        platform_user_id=user.id,
+        code_hash=_login_2fa_code_hash(code),
+        expires_at=expires_at,
+        attempts=0,
+        user_agent=_clean_field(user_agent),
+        ip_address=_clean_field(ip_address),
+    )
+    db.add(challenge)
+    db.commit()
+    db.refresh(challenge)
+    return challenge
+
+
+def get_platform_login_2fa_challenge(
+    db: Session,
+    challenge_id: int,
+) -> Optional[models.PlatformLogin2FAChallenge]:
+    return (
+        db.query(models.PlatformLogin2FAChallenge)
+        .filter(models.PlatformLogin2FAChallenge.id == challenge_id)
+        .first()
+    )
+
+
+def verify_platform_login_2fa_code(
+    db: Session,
+    challenge: models.PlatformLogin2FAChallenge,
+    code: str,
+    *,
+    max_attempts: int = 5,
+) -> bool:
+    now = datetime.utcnow()
+    if challenge.consumed_at is not None:
+        return False
+    if challenge.expires_at < now:
+        return False
+    if int(challenge.attempts or 0) >= max_attempts:
+        challenge.consumed_at = now
+        db.commit()
+        return False
+    if challenge.code_hash != _login_2fa_code_hash(code):
+        challenge.attempts = int(challenge.attempts or 0) + 1
+        if int(challenge.attempts or 0) >= max_attempts:
+            challenge.consumed_at = now
+        db.commit()
+        return False
+    challenge.consumed_at = now
+    db.commit()
+    return True
+
+
+def get_platform_trusted_device(
+    db: Session,
+    platform_user_id: int,
+    token: str,
+) -> Optional[models.PlatformTrustedDevice]:
+    token_hash = _trusted_device_token_hash(token)
+    now = datetime.utcnow()
+    device = (
+        db.query(models.PlatformTrustedDevice)
+        .filter(
+            models.PlatformTrustedDevice.platform_user_id == platform_user_id,
+            models.PlatformTrustedDevice.token_hash == token_hash,
+            models.PlatformTrustedDevice.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if not device:
+        return None
+    if device.expires_at < now:
+        device.revoked_at = now
+        db.commit()
+        return None
+    device.last_used_at = now
+    db.commit()
+    db.refresh(device)
+    return device
+
+
+def trust_platform_device(
+    db: Session,
+    user: models.PlatformUser,
+    token: str,
+    *,
+    expires_at: datetime,
+    device_label: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> models.PlatformTrustedDevice:
+    token_hash = _trusted_device_token_hash(token)
+    now = datetime.utcnow()
+    device = (
+        db.query(models.PlatformTrustedDevice)
+        .filter(
+            models.PlatformTrustedDevice.platform_user_id == user.id,
+            models.PlatformTrustedDevice.token_hash == token_hash,
+        )
+        .first()
+    )
+    if not device:
+        device = models.PlatformTrustedDevice(
+            platform_user_id=user.id,
+            token_hash=token_hash,
+            device_label=_clean_field(device_label),
+            user_agent=_clean_field(user_agent),
+            last_ip=_clean_field(ip_address),
+            expires_at=expires_at,
+            last_used_at=now,
+        )
+        db.add(device)
+    else:
+        device.revoked_at = None
+        device.expires_at = expires_at
+        device.last_used_at = now
+        if device_label:
+            device.device_label = device_label.strip()
+        if user_agent:
+            device.user_agent = user_agent.strip()
+        if ip_address:
+            device.last_ip = ip_address.strip()
+    db.commit()
+    db.refresh(device)
+    return device
+
+
 # ===================== PASSWORD RESET TOKENS =====================
 
 

@@ -58,6 +58,39 @@ class PlatformUser(Base):
     )
 
 
+class PlatformLogin2FAChallenge(Base):
+    __tablename__ = "platform_login_2fa_challenges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    platform_user_id = Column(Integer, ForeignKey("platform_users.id"), nullable=False, index=True)
+    code_hash = Column(String(128), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    consumed_at = Column(DateTime, nullable=True)
+    user_agent = Column(Text, nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("PlatformUser")
+
+
+class PlatformTrustedDevice(Base):
+    __tablename__ = "platform_trusted_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    platform_user_id = Column(Integer, ForeignKey("platform_users.id"), nullable=False, index=True)
+    token_hash = Column(String(128), nullable=False, unique=True, index=True)
+    device_label = Column(String(255), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    last_ip = Column(String(64), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("PlatformUser")
+
+
 class DemoSignupAudit(Base):
     __tablename__ = "demo_signup_audits"
 

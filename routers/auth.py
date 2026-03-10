@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
+import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 import schemas, crud
@@ -24,6 +26,45 @@ router = APIRouter(
     prefix="/auth",
     tags=["auth"],
 )
+
+PLATFORM_LOGIN_2FA_CODE_TTL_SECONDS = 10 * 60
+PLATFORM_LOGIN_2FA_MAX_ATTEMPTS = 5
+PLATFORM_TRUSTED_DEVICE_DAYS = 30
+
+
+def _mask_email(email: str) -> str:
+    local, _, domain = email.partition("@")
+    if not local or not domain:
+        return "correo registrado"
+    if len(local) <= 2:
+        masked_local = f"{local[0]}*" if local else "*"
+    else:
+        masked_local = f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}"
+    return f"{masked_local}@{domain}"
+
+
+def _issue_platform_session(
+    db: Session,
+    user,
+    trusted_device_token: str | None = None,
+) -> schemas.PlatformLoginResponse:
+    token = create_access_token(
+        user.id,
+        role="PlatformAdmin",
+        ttl=WEB_TOKEN_TTL_SECONDS,
+        subject_type="platform",
+    )
+    expires_at = datetime.utcnow() + timedelta(seconds=WEB_TOKEN_TTL_SECONDS)
+    user.last_login = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    user_read = schemas.PlatformUserRead.model_validate(user)
+    return schemas.PlatformLoginResponse(
+        token=token,
+        user=user_read,
+        expires_at=expires_at,
+        trusted_device_token=trusted_device_token,
+    )
 
 
 def _build_pos_session_conflict_detail(
@@ -285,6 +326,7 @@ def start_demo(
 @router.post("/platform-login", response_model=schemas.PlatformLoginResponse)
 def platform_login(
     payload: schemas.PlatformLoginRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     user = crud.get_platform_user_by_email(db, payload.email)
@@ -298,18 +340,100 @@ def platform_login(
             detail="Credenciales inválidas",
         )
 
-    token = create_access_token(
-        user.id,
-        role="PlatformAdmin",
-        ttl=WEB_TOKEN_TTL_SECONDS,
-        subject_type="platform",
+    if payload.device_token:
+        trusted = crud.get_platform_trusted_device(db, user.id, payload.device_token)
+        if trusted:
+            return _issue_platform_session(db, user)
+
+    code = f"{secrets.randbelow(900000) + 100000:06d}"
+    expires_at = datetime.utcnow() + timedelta(seconds=PLATFORM_LOGIN_2FA_CODE_TTL_SECONDS)
+    challenge = crud.create_platform_login_2fa_challenge(
+        db,
+        user,
+        code=code,
+        expires_at=expires_at,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=(
+            request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            or (request.client.host if request.client else None)
+        ),
     )
-    expires_at = datetime.utcnow() + timedelta(seconds=WEB_TOKEN_TTL_SECONDS)
-    user.last_login = datetime.utcnow()
-    db.commit()
-    db.refresh(user)
-    user_read = schemas.PlatformUserRead.model_validate(user)
-    return schemas.PlatformLoginResponse(token=token, user=user_read, expires_at=expires_at)
+
+    settings = crud.get_pos_settings(db)
+    try:
+        email_service.send_email(
+            recipients=[user.email],
+            subject="Codigo de verificacion para Platform",
+            html_body=(
+                f"<p>Hola {user.name or user.email},</p>"
+                f"<p>Tu codigo para ingresar a Platform es:</p>"
+                f"<p style='font-size:24px;font-weight:bold;letter-spacing:2px'>{code}</p>"
+                f"<p>Este codigo expira en {PLATFORM_LOGIN_2FA_CODE_TTL_SECONDS // 60} minutos.</p>"
+            ),
+            smtp_config=settings,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except email_service.EmailDeliveryError as exc:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=schemas.PlatformLogin2FARequiredResponse(
+            challenge_id=challenge.id,
+            masked_email=_mask_email(user.email),
+            expires_in=PLATFORM_LOGIN_2FA_CODE_TTL_SECONDS,
+        ).model_dump(),
+    )
+
+
+@router.post("/platform-login/verify-2fa", response_model=schemas.PlatformLoginResponse)
+def platform_verify_login_2fa(
+    payload: schemas.PlatformVerify2FARequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    challenge = crud.get_platform_login_2fa_challenge(db, payload.challenge_id)
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Verificacion no encontrada.")
+    user = challenge.user
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Usuario invalido o inactivo.")
+
+    is_valid = crud.verify_platform_login_2fa_code(
+        db,
+        challenge,
+        payload.code,
+        max_attempts=PLATFORM_LOGIN_2FA_MAX_ATTEMPTS,
+    )
+    if not is_valid:
+        raise HTTPException(
+            status_code=401,
+            detail="Codigo invalido, expirado o con demasiados intentos.",
+        )
+
+    trusted_token_to_return = None
+    if payload.remember_device:
+        trusted_token = payload.device_token.strip() if payload.device_token else secrets.token_urlsafe(32)
+        trusted_token_to_return = trusted_token
+        crud.trust_platform_device(
+            db,
+            user,
+            trusted_token,
+            expires_at=datetime.utcnow() + timedelta(days=PLATFORM_TRUSTED_DEVICE_DAYS),
+            device_label=payload.device_label,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=(
+                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or (request.client.host if request.client else None)
+            ),
+        )
+
+    return _issue_platform_session(
+        db,
+        user,
+        trusted_device_token=trusted_token_to_return,
+    )
 
 
 @router.post("/logout")
