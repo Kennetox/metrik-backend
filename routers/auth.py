@@ -713,6 +713,75 @@ def tablet_email_check(
 
 
 @router.post(
+    "/mobile-stock-email-check",
+    response_model=schemas.AuthTabletEmailCheckResponse,
+)
+def mobile_stock_email_check(
+    payload: schemas.AuthForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    user = crud.get_pos_user_by_email_global(db, payload.email)
+    if not user or not user.is_active or user.status != "Activo":
+        raise HTTPException(status_code=404, detail="Correo no encontrado o inactivo")
+    if user.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+    tenant = crud.get_tenant(db, int(user.tenant_id))
+    access_issue = crud.get_tenant_access_issue(tenant)
+    if access_issue:
+        raise HTTPException(status_code=401, detail=access_issue)
+    return schemas.AuthTabletEmailCheckResponse(
+        exists=True,
+        user=schemas.PosUserRead.model_validate(user),
+    )
+
+
+@router.post("/mobile-stock-login", response_model=schemas.AuthLoginResponse)
+def mobile_stock_login(
+    payload: schemas.AuthPosLoginRequest,
+    db: Session = Depends(get_db),
+):
+    if not payload.email:
+        raise HTTPException(status_code=400, detail="Debes ingresar correo.")
+    if not payload.pin:
+        raise HTTPException(status_code=400, detail="Debes ingresar PIN.")
+    user = crud.get_pos_user_by_email_global(db, payload.email)
+    if not user or not user.is_active or user.status != "Activo":
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    if user.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+    tenant = crud.get_tenant(db, int(user.tenant_id))
+    access_issue = crud.get_tenant_access_issue(tenant)
+    if access_issue:
+        raise HTTPException(status_code=401, detail=access_issue)
+
+    if not user.pin_hash or not verify_password(payload.pin, user.pin_hash):
+        raise HTTPException(status_code=401, detail="PIN inválido")
+
+    crud.revoke_user_sessions(db, user.id, reason="replaced", session_type="stock-mobile")
+    token = create_access_token(user.id, user.role, POS_TOKEN_TTL_SECONDS)
+    expires_at = datetime.utcnow() + timedelta(seconds=POS_TOKEN_TTL_SECONDS)
+    crud.create_pos_session(
+        db,
+        user_id=user.id,
+        token=token,
+        session_type="stock-mobile",
+        expires_at=expires_at,
+        device_id=payload.device_id,
+    )
+    user.last_login = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+
+    user_read = schemas.PosUserRead.model_validate(user)
+    return schemas.AuthLoginResponse(
+        token=token,
+        user=user_read,
+        tenant=crud.build_tenant_session_read(tenant),
+        expires_at=expires_at,
+    )
+
+
+@router.post(
     "/pos-station-login",
     response_model=schemas.AuthPosStationLoginResponse,
 )
