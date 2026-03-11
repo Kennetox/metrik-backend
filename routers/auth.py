@@ -717,7 +717,7 @@ def tablet_email_check(
     response_model=schemas.AuthTabletEmailCheckResponse,
 )
 def mobile_stock_email_check(
-    payload: schemas.AuthForgotPasswordRequest,
+    payload: schemas.AuthMobileStockEmailCheckRequest,
     db: Session = Depends(get_db),
 ):
     user = crud.get_pos_user_by_email_global(db, payload.email)
@@ -737,13 +737,9 @@ def mobile_stock_email_check(
 
 @router.post("/mobile-stock-login", response_model=schemas.AuthLoginResponse)
 def mobile_stock_login(
-    payload: schemas.AuthPosLoginRequest,
+    payload: schemas.AuthMobileStockLoginRequest,
     db: Session = Depends(get_db),
 ):
-    if not payload.email:
-        raise HTTPException(status_code=400, detail="Debes ingresar correo.")
-    if not payload.pin:
-        raise HTTPException(status_code=400, detail="Debes ingresar PIN.")
     user = crud.get_pos_user_by_email_global(db, payload.email)
     if not user or not user.is_active or user.status != "Activo":
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
