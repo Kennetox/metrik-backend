@@ -197,10 +197,12 @@ class InventoryProductRow(BaseModel):
     product_name: str
     sku: Optional[str] = None
     barcode: Optional[str] = None
+    group_name: Optional[str] = None
     qty_on_hand: float
     status: Literal["ok", "low", "critical"]
     cost: float
     price: float
+    last_movement_at: Optional[datetime] = None
 
 
 class InventoryProductPage(BaseModel):
@@ -1731,6 +1733,17 @@ class AuthTabletEmailCheckRequest(BaseModel):
 class AuthTabletEmailCheckResponse(BaseModel):
     exists: bool
     user: Optional[PosUserRead] = None
+
+
+class AuthMobileStockEmailCheckRequest(BaseModel):
+    email: EmailStr
+
+
+class AuthMobileStockLoginRequest(BaseModel):
+    email: EmailStr
+    pin: str
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
 
 
 class RolePermissionAction(BaseModel):
