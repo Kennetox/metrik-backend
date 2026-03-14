@@ -102,6 +102,18 @@ def _validate_invoice_requirements(
             status_code=422,
             detail="Para compras con factura, el proveedor es obligatorio.",
         )
+
+
+def _compute_labels_summary(items: List[models.ReceivingLotItem]) -> schemas.ReceivingLabelsSummary:
+    printed = 0
+    pending = 0
+    for item in items:
+        expected = max(0, int(math.ceil(float(item.qty_received or 0))))
+        printed_item = max(0, int(item.labels_printed_qty or 0))
+        applied_printed = min(expected, printed_item)
+        printed += applied_printed
+        pending += max(expected - applied_printed, 0)
+    return schemas.ReceivingLabelsSummary(pending=pending, printed=printed, error=0)
     if not reference:
         raise HTTPException(
             status_code=422,
@@ -396,6 +408,36 @@ def update_receiving_lot_item(
     return schemas.ReceivingLotItemRead.model_validate(updated)
 
 
+@router.post("/lots/{lot_id}/items/{item_id}/labels/mark-printed", response_model=schemas.ReceivingLotItemRead)
+def mark_receiving_lot_item_labels_printed(
+    lot_id: int,
+    item_id: int,
+    copies: int = Query(default=1, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
+):
+    tenant_id = _require_tenant_id(db, current_user)
+    lot = crud.get_receiving_lot(db, lot_id, tenant_id=tenant_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+
+    item = crud.get_receiving_lot_item(
+        db,
+        lot_id=lot_id,
+        item_id=item_id,
+        tenant_id=tenant_id,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Ítem no encontrado")
+
+    updated = crud.mark_receiving_lot_item_labels_printed(
+        db,
+        item=item,
+        copies=copies,
+    )
+    return schemas.ReceivingLotItemRead.model_validate(updated)
+
+
 @router.delete("/lots/{lot_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_receiving_lot_item(
     lot_id: int,
@@ -580,7 +622,8 @@ def get_receiving_lot(
         lot_id,
         tenant_id=tenant_id,
     )
-    pending_labels = sum(max(0, int(math.ceil(float(item.qty_received or 0)))) for item in items)
+    labels_summary = _compute_labels_summary(items)
+    pending_labels = labels_summary.pending
     warnings: List[schemas.ApiWarning] = []
 
     missing_barcode_count = sum(1 for item in items if not (item.barcode_snapshot or "").strip())
@@ -612,7 +655,7 @@ def get_receiving_lot(
     return schemas.ReceivingLotDetail(
         lot=schemas.ReceivingLotRead.model_validate(lot),
         items=[schemas.ReceivingLotItemRead.model_validate(item) for item in items],
-        labels_summary=schemas.ReceivingLabelsSummary(pending=pending_labels, printed=0, error=0),
+        labels_summary=labels_summary,
         warnings=warnings,
     )
 

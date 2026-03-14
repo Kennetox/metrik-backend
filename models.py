@@ -343,6 +343,7 @@ class ReceivingLotItem(Base):
     qty_received = Column(Float, nullable=False, default=0)
     unit_cost_snapshot = Column(Float, nullable=False, default=0)
     unit_price_snapshot = Column(Float, nullable=False, default=0)
+    labels_printed_qty = Column(Integer, nullable=False, default=0)
     is_new_product = Column(Boolean, nullable=False, default=False)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

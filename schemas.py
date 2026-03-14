@@ -406,6 +406,7 @@ class ReceivingLotItemRead(BaseModel):
     qty_received: float
     unit_cost_snapshot: float
     unit_price_snapshot: float
+    labels_printed_qty: int = 0
     is_new_product: bool
     notes: Optional[str] = None
     created_at: datetime

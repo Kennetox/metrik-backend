@@ -746,6 +746,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_name", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_url", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_size", "INTEGER")
+                _ensure_column_postgres(
+                    connection,
+                    "receiving_lot_items",
+                    "labels_printed_qty",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
                 if _table_exists_postgres(connection, "inventory_recounts"):
                     _ensure_column_postgres(
                         connection,
@@ -960,6 +966,13 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "updated_at",
                     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                 )
+                if _table_exists(connection, "receiving_lot_items"):
+                    _ensure_column(
+                        connection,
+                        "receiving_lot_items",
+                        "labels_printed_qty",
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )
                 if _table_exists(connection, "products"):
                     _ensure_column(connection, "products", "tenant_id", "INTEGER")
                 if _table_exists(connection, "product_groups"):

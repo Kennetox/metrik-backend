@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 import hashlib
 import json
 import logging
+import math
 import re
 import secrets
 import string
@@ -888,10 +889,29 @@ def update_receiving_lot_item(
     notes: str | None = None,
 ) -> models.ReceivingLotItem:
     item.qty_received = float(qty_received)
+    expected_labels = max(0, int(math.ceil(float(item.qty_received or 0))))
+    current_printed = max(0, int(item.labels_printed_qty or 0))
+    if current_printed > expected_labels:
+        item.labels_printed_qty = expected_labels
     if unit_cost is not None:
         item.unit_cost_snapshot = float(unit_cost)
     if notes is not None:
         item.notes = _clean_field(notes)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def mark_receiving_lot_item_labels_printed(
+    db: Session,
+    item: models.ReceivingLotItem,
+    copies: int,
+) -> models.ReceivingLotItem:
+    expected_labels = max(0, int(math.ceil(float(item.qty_received or 0))))
+    current_printed = max(0, int(item.labels_printed_qty or 0))
+    to_add = max(0, int(copies or 0))
+    next_printed = min(expected_labels, current_printed + to_add)
+    item.labels_printed_qty = next_printed
     db.commit()
     db.refresh(item)
     return item
