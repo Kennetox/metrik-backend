@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Dict, Optional, List, Literal, Annotated
+from typing import Any, Dict, Optional, List, Literal, Annotated
 
 from pydantic import BaseModel, EmailStr, constr, Field, field_validator, ConfigDict
 
@@ -172,6 +172,8 @@ class InventoryMovementRead(InventoryMovementBase):
     product_name: str
     created_at: datetime
     created_by_user_id: Optional[int] = None
+    sale_pos_name: Optional[str] = None
+    sale_seller_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -221,12 +223,15 @@ class InventoryProductMovement(BaseModel):
     notes: Optional[str] = None
     reference_type: Optional[str] = None
     reference_id: Optional[int] = None
+    reference_label: Optional[str] = None
     created_at: datetime
 
 
 class InventoryProductHistory(BaseModel):
     product_id: int
     product_name: str
+    unit_cost: float = 0.0
+    unit_price: float = 0.0
     qty_on_hand: float
     total_in: float
     total_out: float
@@ -243,6 +248,105 @@ class InventoryOverview(BaseModel):
     status_rows: List[InventoryStatusRow]
 
 
+class InventoryLatestEntryRead(BaseModel):
+    id: str
+    source: Literal["app", "manual"]
+    product_id: int
+    product_name: str
+    qty_delta: float
+    reason: Optional[InventoryReason] = None
+    reference_type: Optional[str] = None
+    reference_id: Optional[int] = None
+    lot_id: Optional[int] = None
+    lot_number: Optional[str] = None
+    created_at: datetime
+
+
+InventoryRecountStatus = Literal["draft", "counting", "closed", "applied", "cancelled"]
+InventoryRecountScope = Literal["all", "group", "free"]
+InventoryRecountMode = Literal["blind", "visible"]
+InventoryRecountSource = Literal["web", "app"]
+
+
+class InventoryRecountCreate(BaseModel):
+    source: InventoryRecountSource = "web"
+    stock_device_id: Optional[str] = None
+    title: Optional[str] = None
+    scope_type: InventoryRecountScope = "all"
+    scope_value: Optional[str] = None
+    count_mode: InventoryRecountMode = "blind"
+    notes: Optional[str] = None
+
+
+class InventoryRecountLineUpsert(BaseModel):
+    product_id: int
+    counted_qty: float
+    notes: Optional[str] = None
+
+
+class InventoryRecountLineRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    group_name: Optional[str] = None
+    system_qty: float
+    counted_qty: Optional[float] = None
+    diff_qty: Optional[float] = None
+    notes: Optional[str] = None
+    counted_by_user_id: Optional[int] = None
+    counted_at: Optional[datetime] = None
+
+
+class InventoryRecountSummary(BaseModel):
+    total_lines: int
+    counted_lines: int
+    pending_lines: int
+    difference_lines: int
+    total_system_qty: float
+    total_counted_qty: float
+    total_diff_qty: float
+
+
+class InventoryRecountRead(BaseModel):
+    id: int
+    code: str
+    status: InventoryRecountStatus
+    source: InventoryRecountSource
+    stock_device_id: Optional[str] = None
+    stock_device_name: Optional[str] = None
+    scope_type: InventoryRecountScope
+    scope_value: Optional[str] = None
+    count_mode: InventoryRecountMode
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
+    closed_by_user_id: Optional[int] = None
+    closed_by_user_name: Optional[str] = None
+    applied_by_user_id: Optional[int] = None
+    applied_by_user_name: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+    applied_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    summary: InventoryRecountSummary
+
+
+class InventoryRecountPage(BaseModel):
+    items: List[InventoryRecountRead]
+    total: int
+    skip: int
+    limit: int
+
+
+class InventoryRecountDetail(BaseModel):
+    recount: InventoryRecountRead
+    lines: List[InventoryRecountLineRead]
+
+
 # ===================== RECEIVING =====================
 
 
@@ -253,6 +357,7 @@ PurchaseType = Literal["invoice", "cash"]
 class ReceivingLotBase(BaseModel):
     purchase_type: PurchaseType
     origin_name: NonEmptyStr
+    stock_device_id: Optional[str] = None
     source_reference: Optional[str] = None
     supplier_name: Optional[str] = None
     invoice_reference: Optional[str] = None
@@ -275,8 +380,11 @@ class ReceivingLotRead(ReceivingLotBase):
     id: int
     lot_number: str
     status: ReceivingLotStatus
+    stock_device_name: Optional[str] = None
     created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
     closed_by_user_id: Optional[int] = None
+    closed_by_user_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     closed_at: Optional[datetime] = None
@@ -383,6 +491,8 @@ class ReceivingDocumentRead(BaseModel):
     status: ReceivingLotStatus
     purchase_type: PurchaseType
     origin_name: str
+    stock_device_id: Optional[str] = None
+    stock_device_name: Optional[str] = None
     lines_count: int
     units_total: float
     created_at: datetime
@@ -418,6 +528,97 @@ class ReceivingCreatedProductRead(BaseModel):
 
 class ReceivingCreatedProductPage(BaseModel):
     items: List[ReceivingCreatedProductRead]
+    total: int
+    skip: int
+    limit: int
+
+
+ManualMovementKind = Literal["salida_manual", "venta_manual", "ajuste", "perdida_dano"]
+ManualMovementStatus = Literal["open", "closed", "cancelled"]
+
+
+class ManualMovementDocumentBase(BaseModel):
+    kind: ManualMovementKind
+    origin_name: str = "Metrik web"
+    header: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+
+class ManualMovementDocumentCreate(ManualMovementDocumentBase):
+    pass
+
+
+class ManualMovementDocumentHeaderUpdate(BaseModel):
+    header: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+
+class ManualMovementDocumentLineInput(BaseModel):
+    product_id: int
+    qty: float = Field(gt=0)
+    unit_cost: Optional[float] = Field(default=None, ge=0)
+    unit_price: Optional[float] = Field(default=None, ge=0)
+    notes: Optional[str] = None
+
+
+class ManualMovementDocumentLinesUpdate(BaseModel):
+    lines: List[ManualMovementDocumentLineInput] = Field(default_factory=list)
+
+
+class ManualMovementDocumentClose(BaseModel):
+    external_reference_type: Optional[str] = None
+    external_reference_id: Optional[int] = None
+
+
+class ManualMovementDocumentLineRead(BaseModel):
+    id: int
+    document_id: int
+    product_id: int
+    product_name_snapshot: str
+    sku_snapshot: Optional[str] = None
+    barcode_snapshot: Optional[str] = None
+    qty: float
+    unit_cost_snapshot: Optional[float] = None
+    unit_price_snapshot: Optional[float] = None
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ManualMovementDocumentRead(BaseModel):
+    id: int
+    document_number: str
+    kind: ManualMovementKind
+    status: ManualMovementStatus
+    origin_name: str
+    header: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+    external_reference_type: Optional[str] = None
+    external_reference_id: Optional[int] = None
+    created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
+    closed_by_user_id: Optional[int] = None
+    closed_by_user_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
+    lines_count: int = 0
+    units_total: float = 0.0
+
+    class Config:
+        from_attributes = True
+
+
+class ManualMovementDocumentDetail(BaseModel):
+    document: ManualMovementDocumentRead
+    lines: List[ManualMovementDocumentLineRead]
+
+
+class ManualMovementDocumentPage(BaseModel):
+    items: List[ManualMovementDocumentRead]
     total: int
     skip: int
     limit: int
@@ -955,6 +1156,43 @@ class PosStationRead(BaseModel):
 
 class PosStationResponse(PosStationRead):
     pin_plain: Optional[str] = None
+
+
+class StockDeviceCreate(BaseModel):
+    name: Annotated[str, Field(min_length=1, max_length=120)]
+    bound_device_id: Optional[str] = None
+    bound_device_label: Optional[str] = None
+
+
+class StockDeviceUpdate(BaseModel):
+    name: Optional[Annotated[str, Field(min_length=1, max_length=120)]] = None
+    is_active: Optional[bool] = None
+    bound_device_id: Optional[str] = None
+    bound_device_label: Optional[str] = None
+    touch_seen: bool = False
+
+
+class StockDeviceRead(BaseModel):
+    id: str
+    name: str
+    is_active: bool
+    bound_device_id: Optional[str] = None
+    bound_device_label: Optional[str] = None
+    created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_seen_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class StockDevicePage(BaseModel):
+    items: List[StockDeviceRead]
+    total: int
+    skip: int
+    limit: int
 
 
 class PosStationNoticeCreate(BaseModel):

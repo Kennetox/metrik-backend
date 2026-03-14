@@ -459,6 +459,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_schedule_shifts_postgres(connection)
                 _ensure_table_sale_number_reservations_postgres(connection)
                 _ensure_table_pos_station_notices_postgres(connection)
+                _ensure_table_stock_devices_postgres(connection)
                 _ensure_table_demo_signup_audits_postgres(connection)
                 _ensure_column_postgres(
                     connection,
@@ -739,10 +740,37 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "receiving_lots", "supplier_name", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "invoice_reference", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "source_reference", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "stock_device_id", "TEXT")
+                _ensure_column_postgres(connection, "receiving_lots", "stock_device_name", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "notes", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_name", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_url", "TEXT")
                 _ensure_column_postgres(connection, "receiving_lots", "support_file_size", "INTEGER")
+                if _table_exists_postgres(connection, "inventory_recounts"):
+                    _ensure_column_postgres(
+                        connection,
+                        "inventory_recounts",
+                        "source",
+                        "TEXT NOT NULL DEFAULT 'web'",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "inventory_recounts",
+                        "stock_device_id",
+                        "TEXT",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "inventory_recounts",
+                        "stock_device_name",
+                        "TEXT",
+                    )
+                    connection.execute(
+                        text(
+                            "UPDATE inventory_recounts SET source = 'web' "
+                            "WHERE source IS NULL OR btrim(source) = ''"
+                        )
+                    )
                 _ensure_column_postgres(connection, "products", "tenant_id", "INTEGER")
                 _ensure_column_postgres(connection, "product_groups", "tenant_id", "INTEGER")
                 _ensure_column_postgres(connection, "payment_methods", "tenant_id", "INTEGER")
@@ -763,6 +791,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "hr_employee_documents",
                     "password_resets",
                     "pos_station_notices",
+                    "stock_devices",
                     "sale_return_items",
                     "sale_return_payments",
                     "sale_change_return_items",
@@ -959,6 +988,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "hr_employee_documents",
                     "password_resets",
                     "pos_station_notices",
+                    "stock_devices",
                     "sale_return_items",
                     "sale_return_payments",
                     "sale_change_return_items",
@@ -1056,6 +1086,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_table_pos_stations(connection)
                 _ensure_table_pos_station_notices(connection)
+                _ensure_table_stock_devices(connection)
                 _relax_pos_station_schema_sqlite(connection)
                 _ensure_table_sale_changes(connection)
                 _ensure_column(connection, "sale_changes", "voided_at", "DATETIME")
@@ -1097,10 +1128,27 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_column(connection, "receiving_lots", "supplier_name", "TEXT")
                     _ensure_column(connection, "receiving_lots", "invoice_reference", "TEXT")
                     _ensure_column(connection, "receiving_lots", "source_reference", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "stock_device_id", "TEXT")
+                    _ensure_column(connection, "receiving_lots", "stock_device_name", "TEXT")
                     _ensure_column(connection, "receiving_lots", "notes", "TEXT")
                     _ensure_column(connection, "receiving_lots", "support_file_name", "TEXT")
                     _ensure_column(connection, "receiving_lots", "support_file_url", "TEXT")
                     _ensure_column(connection, "receiving_lots", "support_file_size", "INTEGER")
+                if _table_exists(connection, "inventory_recounts"):
+                    _ensure_column(
+                        connection,
+                        "inventory_recounts",
+                        "source",
+                        "TEXT NOT NULL DEFAULT 'web'",
+                    )
+                    _ensure_column(connection, "inventory_recounts", "stock_device_id", "TEXT")
+                    _ensure_column(connection, "inventory_recounts", "stock_device_name", "TEXT")
+                    connection.execute(
+                        text(
+                            "UPDATE inventory_recounts SET source = 'web' "
+                            "WHERE source IS NULL OR trim(source) = ''"
+                        )
+                    )
                 _ensure_column(connection, "pos_users", "phone", "TEXT")
                 _ensure_column(connection, "pos_users", "pin_hash", "TEXT")
                 _ensure_column(connection, "pos_users", "position", "TEXT")
@@ -2316,6 +2364,65 @@ def _ensure_table_product_audit_logs(connection) -> None:
         _ensure_column(connection, "product_audit_logs", "created_at", "DATETIME")
 
 
+def _ensure_table_stock_devices(connection) -> None:
+    if not _table_exists(connection, "stock_devices"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE stock_devices (
+                    id TEXT PRIMARY KEY,
+                    tenant_id INTEGER,
+                    name TEXT NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    bound_device_id TEXT,
+                    bound_device_label TEXT,
+                    created_by_user_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at DATETIME,
+                    FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                    FOREIGN KEY(created_by_user_id) REFERENCES pos_users(id)
+                )
+                """
+            )
+        )
+    else:
+        _ensure_column(connection, "stock_devices", "tenant_id", "INTEGER")
+        _ensure_column(connection, "stock_devices", "name", "TEXT")
+        _ensure_column(connection, "stock_devices", "is_active", "BOOLEAN NOT NULL DEFAULT 1")
+        _ensure_column(connection, "stock_devices", "bound_device_id", "TEXT")
+        _ensure_column(connection, "stock_devices", "bound_device_label", "TEXT")
+        _ensure_column(connection, "stock_devices", "created_by_user_id", "INTEGER")
+        _ensure_column(connection, "stock_devices", "created_at", "DATETIME")
+        _ensure_column(connection, "stock_devices", "updated_at", "DATETIME")
+        _ensure_column(connection, "stock_devices", "last_seen_at", "DATETIME")
+
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS stock_devices_tenant_idx
+            ON stock_devices (tenant_id)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS stock_devices_tenant_active_idx
+            ON stock_devices (tenant_id, is_active)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS stock_devices_tenant_name_unique_idx
+            ON stock_devices (tenant_id, name)
+            """
+        )
+    )
+
+
 def _ensure_table_pos_stations(connection) -> None:
     if not _table_exists(connection, "pos_stations"):
         connection.execute(
@@ -2877,6 +2984,51 @@ def _ensure_table_pos_station_notices_postgres(connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS pos_station_notices_station_idx
             ON pos_station_notices (station_id)
+            """
+        )
+    )
+
+
+def _ensure_table_stock_devices_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS stock_devices (
+                id TEXT PRIMARY KEY,
+                tenant_id INTEGER REFERENCES tenants(id),
+                name TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                bound_device_id TEXT,
+                bound_device_label TEXT,
+                created_by_user_id INTEGER REFERENCES pos_users(id),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS stock_devices_tenant_idx
+            ON stock_devices (tenant_id)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS stock_devices_tenant_active_idx
+            ON stock_devices (tenant_id, is_active)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS stock_devices_tenant_name_unique_idx
+            ON stock_devices (tenant_id, name)
             """
         )
     )

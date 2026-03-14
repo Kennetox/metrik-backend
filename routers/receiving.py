@@ -22,6 +22,7 @@ router = APIRouter(
     prefix="/receiving",
     tags=["receiving"],
 )
+MAX_OPEN_RECEIVING_LOTS = 2
 
 SOP_FILE_PATH = Path(__file__).resolve().parents[1] / "docs" / "sop-recepcion-tablet-v1.md"
 
@@ -59,6 +60,34 @@ def _require_tenant_id(db: Session, user: models.PosUser) -> int:
             detail="Usuario sin empresa asignada para operar recepción",
         )
     return tenant_id
+
+
+def _resolve_stock_device_or_422(
+    db: Session,
+    tenant_id: int,
+    stock_device_id: str | None,
+) -> models.StockDevice | None:
+    cleaned = (stock_device_id or "").strip()
+    if not cleaned:
+        return None
+    device = crud.get_stock_device(db, cleaned, tenant_id=tenant_id)
+    if not device:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DEVICE_NOT_ALLOWED",
+                "message": "El dispositivo de inventario no existe para esta empresa.",
+            },
+        )
+    if not device.is_active:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DEVICE_BLOCKED",
+                "message": "El dispositivo de inventario está inactivo.",
+            },
+        )
+    return device
 
 
 def _validate_invoice_requirements(
@@ -143,6 +172,15 @@ def create_receiving_lot(
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("movements.manage")),
 ):
+    crud.acquire_receiving_lot_creation_lock(db)
+    tenant_id = _require_tenant_id(db, current_user)
+    open_lots = crud.count_receiving_lots(db, status="open", tenant_id=tenant_id)
+    if open_lots >= MAX_OPEN_RECEIVING_LOTS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Máximo {MAX_OPEN_RECEIVING_LOTS} recepciones abiertas al mismo tiempo.",
+        )
+
     supplier_name = _normalize_optional_text(payload.supplier_name)
     invoice_reference = _normalize_optional_text(payload.invoice_reference)
     _validate_invoice_requirements(
@@ -154,11 +192,15 @@ def create_receiving_lot(
     payload.invoice_reference = invoice_reference
     payload.source_reference = _normalize_optional_text(payload.source_reference) or invoice_reference
     payload.notes = _normalize_optional_text(payload.notes)
+    stock_device = _resolve_stock_device_or_422(db, tenant_id, payload.stock_device_id)
+    if stock_device:
+        stock_device.last_seen_at = datetime.utcnow()
 
     lot = crud.create_receiving_lot(
         db,
         payload,
         created_by_user_id=current_user.id,
+        stock_device_name=stock_device.name if stock_device else None,
     )
     return lot
 
@@ -594,6 +636,8 @@ def list_receiving_documents(
             models.ReceivingLot.status.label("status"),
             models.ReceivingLot.purchase_type.label("purchase_type"),
             models.ReceivingLot.origin_name.label("origin_name"),
+            models.ReceivingLot.stock_device_id.label("stock_device_id"),
+            models.ReceivingLot.stock_device_name.label("stock_device_name"),
             models.ReceivingLot.created_at.label("created_at"),
             models.ReceivingLot.closed_at.label("closed_at"),
             models.ReceivingLot.supplier_name.label("supplier_name"),
@@ -623,6 +667,8 @@ def list_receiving_documents(
         models.ReceivingLot.status,
         models.ReceivingLot.purchase_type,
         models.ReceivingLot.origin_name,
+        models.ReceivingLot.stock_device_id,
+        models.ReceivingLot.stock_device_name,
         models.ReceivingLot.created_at,
         models.ReceivingLot.closed_at,
         models.ReceivingLot.supplier_name,
@@ -650,6 +696,8 @@ def list_receiving_documents(
             status=row.status,
             purchase_type=row.purchase_type,
             origin_name=row.origin_name,
+            stock_device_id=row.stock_device_id,
+            stock_device_name=row.stock_device_name,
             lines_count=int(row.lines_count or 0),
             units_total=float(row.units_total or 0.0),
             created_at=row.created_at,

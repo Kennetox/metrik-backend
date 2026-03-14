@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 import hashlib
+import json
 import logging
 import re
 import secrets
@@ -575,6 +576,7 @@ def create_receiving_lot(
     db: Session,
     payload: schemas.ReceivingLotCreate,
     created_by_user_id: int | None = None,
+    stock_device_name: str | None = None,
 ) -> models.ReceivingLot:
     effective_tenant_id = get_default_tenant_id(db)
     if created_by_user_id:
@@ -590,6 +592,8 @@ def create_receiving_lot(
         tenant_id=effective_tenant_id,
         purchase_type=payload.purchase_type,
         origin_name=payload.origin_name.strip(),
+        stock_device_id=_clean_field(payload.stock_device_id),
+        stock_device_name=_clean_field(stock_device_name),
         source_reference=source_reference,
         supplier_name=supplier_name,
         invoice_reference=invoice_reference,
@@ -606,6 +610,13 @@ def create_receiving_lot(
     db.commit()
     db.refresh(lot)
     return lot
+
+
+def acquire_receiving_lot_creation_lock(db: Session) -> None:
+    backend = db.bind.dialect.name if db.bind and db.bind.dialect else ""
+    if backend == "postgresql":
+        # Serializa creación de lotes para evitar carreras web/app.
+        db.execute(text("SELECT pg_advisory_xact_lock(91827432)"))
 
 
 def get_receiving_lot(
@@ -791,7 +802,7 @@ def create_receiving_product_quick(
             sku=next_sku,
             name=payload.name.strip(),
             price=float(payload.price),
-            cost=float(payload.cost if payload.cost is not None else payload.price),
+            cost=float(payload.cost if payload.cost is not None else 0),
             barcode=next_barcode,
             unit=None,
             stock_min=0,
@@ -899,6 +910,61 @@ def close_receiving_lot(
     lot: models.ReceivingLot,
     closed_by_user_id: int | None = None,
 ) -> models.ReceivingLot:
+    effective_tenant_id = lot.tenant_id if lot.tenant_id is not None else get_default_tenant_id(db)
+
+    items_query = db.query(models.ReceivingLotItem).filter(
+        models.ReceivingLotItem.lot_id == lot.id
+    )
+    if effective_tenant_id is not None:
+        items_query = items_query.filter(models.ReceivingLotItem.tenant_id == effective_tenant_id)
+    items = items_query.all()
+
+    # Proteccion contra duplicados: si ya existen movimientos del lote, no los recrea.
+    existing_movements_query = db.query(models.InventoryMovement).filter(
+        models.InventoryMovement.reference_type == "receiving_lot",
+        models.InventoryMovement.reference_id == lot.id,
+    )
+    if effective_tenant_id is not None:
+        existing_movements_query = existing_movements_query.filter(
+            models.InventoryMovement.tenant_id == effective_tenant_id
+        )
+    has_existing_lot_movements = existing_movements_query.first() is not None
+
+    if not has_existing_lot_movements and items:
+        qty_by_product: dict[int, float] = defaultdict(float)
+        name_by_product: dict[int, str] = {}
+        for item in items:
+            product_id = int(item.product_id)
+            qty_by_product[product_id] += float(item.qty_received or 0.0)
+            if product_id not in name_by_product:
+                name_by_product[product_id] = item.product_name_snapshot or f"#{product_id}"
+
+        for product_id, total_qty in qty_by_product.items():
+            if total_qty <= 0:
+                continue
+            movement_notes_parts = [
+                f"lote:{lot.lot_number or lot.id}",
+                f"origen:{lot.origin_name}",
+            ]
+            if lot.purchase_type:
+                movement_notes_parts.append(f"tipo:{lot.purchase_type}")
+            if lot.supplier_name:
+                movement_notes_parts.append(f"proveedor:{lot.supplier_name}")
+            if lot.invoice_reference:
+                movement_notes_parts.append(f"factura:{lot.invoice_reference}")
+
+            movement = models.InventoryMovement(
+                tenant_id=effective_tenant_id,
+                product_id=product_id,
+                qty_delta=abs(float(total_qty)),
+                reason="purchase",
+                notes=" | ".join(movement_notes_parts),
+                reference_type="receiving_lot",
+                reference_id=lot.id,
+                created_by_user_id=closed_by_user_id,
+            )
+            db.add(movement)
+
     lot.status = "closed"
     lot.closed_by_user_id = closed_by_user_id
     lot.closed_at = datetime.utcnow()
@@ -953,6 +1019,272 @@ def cancel_receiving_lot(
     db.commit()
     db.refresh(lot)
     return lot
+
+
+def acquire_manual_movement_document_creation_lock(db: Session) -> None:
+    backend = db.bind.dialect.name if db.bind and db.bind.dialect else ""
+    if backend == "postgresql":
+        # Serializa creación de documentos manuales para blindar numeración.
+        db.execute(text("SELECT pg_advisory_xact_lock(91827433)"))
+
+
+def _manual_movement_prefix(kind: str) -> str:
+    return {
+        "salida_manual": "SM",
+        "venta_manual": "VM",
+        "ajuste": "AJ",
+        "perdida_dano": "PD",
+    }.get(kind, "MM")
+
+
+def _serialize_manual_header(header: Dict[str, Any] | None) -> str:
+    clean = header or {}
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _deserialize_manual_header(raw: str | None) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def create_manual_movement_document(
+    db: Session,
+    payload: schemas.ManualMovementDocumentCreate,
+    created_by_user_id: int | None = None,
+    tenant_id: int | None = None,
+) -> models.ManualMovementDocument:
+    document = models.ManualMovementDocument(
+        tenant_id=tenant_id if tenant_id is not None else get_default_tenant_id(db),
+        kind=payload.kind,
+        status="open",
+        origin_name=(payload.origin_name or "Metrik web").strip() or "Metrik web",
+        header_json=_serialize_manual_header(payload.header),
+        notes=_clean_field(payload.notes),
+        created_by_user_id=created_by_user_id,
+    )
+    db.add(document)
+    db.flush()
+    if not document.document_number:
+        prefix = _manual_movement_prefix(document.kind)
+        document.document_number = f"{prefix}-{document.id:06d}"
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+def get_manual_movement_document(
+    db: Session,
+    document_id: int,
+    tenant_id: int | None = None,
+) -> models.ManualMovementDocument | None:
+    query = db.query(models.ManualMovementDocument).filter(
+        models.ManualMovementDocument.id == document_id
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ManualMovementDocument.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def list_manual_movement_documents(
+    db: Session,
+    *,
+    status: str | None = None,
+    kind: str | None = None,
+    skip: int = 0,
+    limit: int = 50,
+    tenant_id: int | None = None,
+) -> List[models.ManualMovementDocument]:
+    query = db.query(models.ManualMovementDocument)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ManualMovementDocument.tenant_id == effective_tenant_id)
+    if status:
+        query = query.filter(models.ManualMovementDocument.status == status)
+    if kind:
+        query = query.filter(models.ManualMovementDocument.kind == kind)
+    order_col = (
+        models.ManualMovementDocument.closed_at
+        if status == "closed"
+        else models.ManualMovementDocument.created_at
+    )
+    return (
+        query.order_by(order_col.desc(), models.ManualMovementDocument.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_manual_movement_documents(
+    db: Session,
+    *,
+    status: str | None = None,
+    kind: str | None = None,
+    tenant_id: int | None = None,
+) -> int:
+    query = db.query(func.count(models.ManualMovementDocument.id))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ManualMovementDocument.tenant_id == effective_tenant_id)
+    if status:
+        query = query.filter(models.ManualMovementDocument.status == status)
+    if kind:
+        query = query.filter(models.ManualMovementDocument.kind == kind)
+    return int(query.scalar() or 0)
+
+
+def list_manual_movement_document_lines(
+    db: Session,
+    document_id: int,
+    tenant_id: int | None = None,
+) -> List[models.ManualMovementDocumentLine]:
+    query = db.query(models.ManualMovementDocumentLine).filter(
+        models.ManualMovementDocumentLine.document_id == document_id
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ManualMovementDocumentLine.tenant_id == effective_tenant_id)
+    return query.order_by(models.ManualMovementDocumentLine.id.asc()).all()
+
+
+def update_manual_movement_document_header(
+    db: Session,
+    document: models.ManualMovementDocument,
+    *,
+    header: Dict[str, Any] | None = None,
+    notes: str | None = None,
+) -> models.ManualMovementDocument:
+    document.header_json = _serialize_manual_header(header)
+    document.notes = _clean_field(notes)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+def replace_manual_movement_document_lines(
+    db: Session,
+    document: models.ManualMovementDocument,
+    lines_payload: List[schemas.ManualMovementDocumentLineInput],
+    tenant_id: int | None = None,
+) -> List[models.ManualMovementDocumentLine]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    db.query(models.ManualMovementDocumentLine).filter(
+        models.ManualMovementDocumentLine.document_id == document.id
+    ).delete(synchronize_session=False)
+
+    if not lines_payload:
+        db.commit()
+        return []
+
+    product_ids = [line.product_id for line in lines_payload]
+    products = (
+        db.query(models.Product)
+        .filter(models.Product.id.in_(product_ids))
+        .filter(models.Product.tenant_id == effective_tenant_id if effective_tenant_id is not None else true())
+        .all()
+    )
+    products_by_id = {product.id: product for product in products}
+
+    created_rows: List[models.ManualMovementDocumentLine] = []
+    for line in lines_payload:
+        product = products_by_id.get(line.product_id)
+        if not product:
+            continue
+        row = models.ManualMovementDocumentLine(
+            tenant_id=effective_tenant_id,
+            document_id=document.id,
+            product_id=product.id,
+            product_name_snapshot=product.name,
+            sku_snapshot=product.sku,
+            barcode_snapshot=product.barcode,
+            qty=float(line.qty),
+            unit_cost_snapshot=float(line.unit_cost) if line.unit_cost is not None else None,
+            unit_price_snapshot=float(line.unit_price) if line.unit_price is not None else None,
+            notes=_clean_field(line.notes),
+        )
+        db.add(row)
+        created_rows.append(row)
+    db.commit()
+    for row in created_rows:
+        db.refresh(row)
+    return created_rows
+
+
+def cancel_manual_movement_document(
+    db: Session,
+    document: models.ManualMovementDocument,
+) -> models.ManualMovementDocument:
+    document.status = "cancelled"
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+def close_manual_movement_document(
+    db: Session,
+    document: models.ManualMovementDocument,
+    *,
+    closed_by_user_id: int | None,
+    external_reference_type: str | None = None,
+    external_reference_id: int | None = None,
+    tenant_id: int | None = None,
+) -> models.ManualMovementDocument:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    lines = list_manual_movement_document_lines(db, document.id, tenant_id=effective_tenant_id)
+    header = _deserialize_manual_header(document.header_json)
+
+    if document.kind in {"salida_manual", "ajuste", "perdida_dano"}:
+        for line in lines:
+            qty = float(line.qty or 0.0)
+            if qty <= 0:
+                continue
+            reason = "transfer_out"
+            qty_delta = -abs(qty)
+            if document.kind == "ajuste":
+                reason = "adjustment"
+                # En ajuste se permite positivo/negativo vía header.
+                direction = (header.get("adjust_direction") or "in").strip().lower()
+                qty_delta = abs(qty) if direction == "in" else -abs(qty)
+            elif document.kind == "perdida_dano":
+                damage_type = (header.get("damage_type") or "loss").strip().lower()
+                reason = "damage" if damage_type == "damage" else "loss"
+
+            note_parts = [
+                f"Documento:{document.document_number or document.id}",
+                f"Tipo:{document.kind}",
+                document.notes or "",
+                line.notes or "",
+            ]
+            movement = models.InventoryMovement(
+                tenant_id=effective_tenant_id,
+                product_id=line.product_id,
+                qty_delta=qty_delta,
+                reason=reason,
+                notes=" | ".join(part for part in note_parts if part),
+                reference_type=document.kind,
+                reference_id=document.id,
+                created_by_user_id=closed_by_user_id,
+            )
+            db.add(movement)
+
+    document.status = "closed"
+    document.closed_by_user_id = closed_by_user_id
+    document.closed_at = datetime.utcnow()
+    document.external_reference_type = _clean_field(external_reference_type)
+    document.external_reference_id = external_reference_id
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+def parse_manual_movement_header(document: models.ManualMovementDocument) -> Dict[str, Any]:
+    return _deserialize_manual_header(document.header_json)
 
 
 def revoke_user_sessions(
@@ -1781,7 +2113,44 @@ def create_sale(
         db, tenant_id=effective_tenant_id
     ):
         raise ValueError("Debe seleccionar una estación para registrar la venta")
-    if reservation is None and _tenant_requires_station(
+    if reservation is None and is_pos_web and sale_number_preassigned is None:
+        for _ in range(3):
+            auto_reservation = reserve_sale_number(
+                db,
+                pos_name=pos_name,
+                station_id=station_id,
+                reserved_by_user_id=created_by_user_id,
+                tenant_id=effective_tenant_id,
+            )
+            duplicated_sale = (
+                db.query(models.Sale)
+                .filter(
+                    or_(
+                        models.Sale.sale_number == auto_reservation.sale_number,
+                        models.Sale.document_number == auto_reservation.document_number,
+                    ),
+                    (
+                        models.Sale.tenant_id == effective_tenant_id
+                        if effective_tenant_id is not None
+                        else true()
+                    ),
+                )
+                .first()
+            )
+            if duplicated_sale:
+                auto_reservation.status = "cancelled"
+                db.add(auto_reservation)
+                db.commit()
+                continue
+            reservation = auto_reservation
+            sale_number_preassigned = reservation.sale_number
+            reserved_document_number = reservation.document_number
+            break
+        if reservation is None:
+            raise ValueError(
+                "No se pudo reservar un ticket para POS web. Intenta de nuevo en unos segundos."
+            )
+    if reservation is None and not is_pos_web and _tenant_requires_station(
         db, tenant_id=effective_tenant_id
     ):
         raise ValueError("Debe reservar el número de venta antes de registrar.")
@@ -4436,6 +4805,138 @@ def get_pos_station_by_label(
     if effective_tenant_id is not None:
         query = query.filter(models.PosStation.tenant_id == effective_tenant_id)
     return query.first()
+
+
+def list_stock_devices(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    active_only: bool = False,
+    skip: int = 0,
+    limit: int = 50,
+) -> List[models.StockDevice]:
+    query = (
+        db.query(models.StockDevice)
+        .options(selectinload(models.StockDevice.created_by))
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.StockDevice.tenant_id == effective_tenant_id)
+    if active_only:
+        query = query.filter(models.StockDevice.is_active.is_(True))
+    return (
+        query
+        .order_by(models.StockDevice.updated_at.desc(), models.StockDevice.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_stock_devices(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    active_only: bool = False,
+) -> int:
+    query = db.query(func.count(models.StockDevice.id))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.StockDevice.tenant_id == effective_tenant_id)
+    if active_only:
+        query = query.filter(models.StockDevice.is_active.is_(True))
+    return int(query.scalar() or 0)
+
+
+def get_stock_device(
+    db: Session,
+    stock_device_id: str,
+    *,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.StockDevice]:
+    query = (
+        db.query(models.StockDevice)
+        .options(selectinload(models.StockDevice.created_by))
+        .filter(models.StockDevice.id == stock_device_id)
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.StockDevice.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def get_stock_device_by_name(
+    db: Session,
+    name: str,
+    *,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.StockDevice]:
+    query = (
+        db.query(models.StockDevice)
+        .options(selectinload(models.StockDevice.created_by))
+        .filter(func.lower(models.StockDevice.name) == name.strip().lower())
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.StockDevice.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def create_stock_device(
+    db: Session,
+    payload: schemas.StockDeviceCreate,
+    *,
+    tenant_id: Optional[int] = None,
+    created_by_user_id: Optional[int] = None,
+) -> models.StockDevice:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    normalized_name = payload.name.strip()
+    if get_stock_device_by_name(db, normalized_name, tenant_id=effective_tenant_id):
+        raise ValueError("Ya existe un dispositivo con ese nombre")
+
+    device = models.StockDevice(
+        id=str(uuid4()),
+        tenant_id=effective_tenant_id,
+        name=normalized_name,
+        is_active=True,
+        bound_device_id=_clean_field(payload.bound_device_id),
+        bound_device_label=_clean_field(payload.bound_device_label),
+        created_by_user_id=created_by_user_id,
+        last_seen_at=datetime.utcnow(),
+    )
+    db.add(device)
+    db.commit()
+    db.refresh(device)
+    return device
+
+
+def update_stock_device(
+    db: Session,
+    device: models.StockDevice,
+    payload: schemas.StockDeviceUpdate,
+) -> models.StockDevice:
+    if payload.name is not None:
+        next_name = payload.name.strip()
+        if not next_name:
+            raise ValueError("El nombre del dispositivo es obligatorio")
+        existing = get_stock_device_by_name(db, next_name, tenant_id=device.tenant_id)
+        if existing and existing.id != device.id:
+            raise ValueError("Ya existe un dispositivo con ese nombre")
+        device.name = next_name
+
+    if payload.is_active is not None:
+        device.is_active = bool(payload.is_active)
+
+    if payload.bound_device_id is not None:
+        device.bound_device_id = _clean_field(payload.bound_device_id)
+    if payload.bound_device_label is not None:
+        device.bound_device_label = _clean_field(payload.bound_device_label)
+    if payload.touch_seen:
+        device.last_seen_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(device)
+    return device
 
 
 def get_pos_station_by_email(

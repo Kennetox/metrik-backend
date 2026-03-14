@@ -195,6 +195,95 @@ class InventoryMovement(Base):
     created_by = relationship("PosUser")
 
 
+class InventoryRecount(Base):
+    __tablename__ = "inventory_recounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    code = Column(String, unique=True, nullable=True, index=True)
+    status = Column(String, nullable=False, default="draft")
+    source = Column(String, nullable=False, default="web")  # web | app
+    stock_device_id = Column(String, ForeignKey("stock_devices.id"), nullable=True, index=True)
+    stock_device_name = Column(String(120), nullable=True)
+    scope_type = Column(String, nullable=False, default="all")  # all | group
+    scope_value = Column(String, nullable=True)  # group_name when scope_type=group
+    count_mode = Column(String, nullable=False, default="blind")  # blind | visible
+    title = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    closed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    applied_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    started_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+    closed_by = relationship("PosUser", foreign_keys=[closed_by_user_id])
+    applied_by = relationship("PosUser", foreign_keys=[applied_by_user_id])
+    lines = relationship(
+        "InventoryRecountLine",
+        back_populates="recount",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def created_by_user_name(self) -> str | None:
+        return self.created_by.name if self.created_by else None
+
+    @property
+    def closed_by_user_name(self) -> str | None:
+        return self.closed_by.name if self.closed_by else None
+
+    @property
+    def applied_by_user_name(self) -> str | None:
+        return self.applied_by.name if self.applied_by else None
+
+
+class InventoryRecountLine(Base):
+    __tablename__ = "inventory_recount_lines"
+    __table_args__ = (
+        UniqueConstraint("recount_id", "product_id", name="uq_recount_product"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    recount_id = Column(
+        Integer,
+        ForeignKey("inventory_recounts.id"),
+        nullable=False,
+        index=True,
+    )
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_name_snapshot = Column(String, nullable=False)
+    sku_snapshot = Column(String, nullable=True)
+    barcode_snapshot = Column(String, nullable=True)
+    group_name_snapshot = Column(String, nullable=True)
+    system_qty = Column(Float, nullable=False, default=0)
+    counted_qty = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    counted_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    counted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    recount = relationship("InventoryRecount", back_populates="lines")
+    product = relationship("Product")
+    counted_by = relationship("PosUser")
+
+
 class ReceivingLot(Base):
     __tablename__ = "receiving_lots"
 
@@ -204,6 +293,8 @@ class ReceivingLot(Base):
     status = Column(String, nullable=False, default="open")
     purchase_type = Column(String, nullable=False, default="cash")
     origin_name = Column(String, nullable=False)
+    stock_device_id = Column(String, ForeignKey("stock_devices.id"), nullable=True, index=True)
+    stock_device_name = Column(String(120), nullable=True)
     supplier_name = Column(String, nullable=True)
     invoice_reference = Column(String, nullable=True)
     source_reference = Column(String, nullable=True)
@@ -230,6 +321,14 @@ class ReceivingLot(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def created_by_user_name(self) -> str | None:
+        return self.created_by.name if self.created_by else None
+
+    @property
+    def closed_by_user_name(self) -> str | None:
+        return self.closed_by.name if self.closed_by else None
+
 
 class ReceivingLotItem(Base):
     __tablename__ = "receiving_lot_items"
@@ -255,6 +354,78 @@ class ReceivingLotItem(Base):
     )
 
     lot = relationship("ReceivingLot", back_populates="items")
+    product = relationship("Product")
+
+
+class ManualMovementDocument(Base):
+    __tablename__ = "manual_movement_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    document_number = Column(String, unique=True, index=True, nullable=True)
+    kind = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="open", index=True)
+    origin_name = Column(String, nullable=False, default="Metrik web")
+    header_json = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    external_reference_type = Column(String, nullable=True)
+    external_reference_id = Column(Integer, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    closed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    closed_at = Column(DateTime, nullable=True)
+
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+    closed_by = relationship("PosUser", foreign_keys=[closed_by_user_id])
+    lines = relationship(
+        "ManualMovementDocumentLine",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def created_by_user_name(self) -> str | None:
+        return self.created_by.name if self.created_by else None
+
+    @property
+    def closed_by_user_name(self) -> str | None:
+        return self.closed_by.name if self.closed_by else None
+
+
+class ManualMovementDocumentLine(Base):
+    __tablename__ = "manual_movement_document_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    document_id = Column(
+        Integer,
+        ForeignKey("manual_movement_documents.id"),
+        nullable=False,
+        index=True,
+    )
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_name_snapshot = Column(String, nullable=False)
+    sku_snapshot = Column(String, nullable=True)
+    barcode_snapshot = Column(String, nullable=True)
+    qty = Column(Float, nullable=False, default=0)
+    unit_cost_snapshot = Column(Float, nullable=True)
+    unit_price_snapshot = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    document = relationship("ManualMovementDocument", back_populates="lines")
     product = relationship("Product")
 
 
@@ -836,6 +1007,35 @@ class PosStation(Base):
         remote_side=[id],
         foreign_keys=[parent_station_id],
     )
+
+
+class StockDevice(Base):
+    __tablename__ = "stock_devices"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_stock_device_tenant_name"),
+    )
+
+    id = Column(String, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    name = Column(String(120), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    bound_device_id = Column(String, nullable=True)
+    bound_device_label = Column(String, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    last_seen_at = Column(DateTime, nullable=True)
+
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+
+    @property
+    def created_by_user_name(self) -> str | None:
+        return self.created_by.name if self.created_by else None
 
 
 class PosStationNotice(Base):

@@ -23,6 +23,8 @@ from routers import (
     separated_orders as separated_orders_router,
     inventory as inventory_router,
     receiving as receiving_router,
+    stock_devices as stock_devices_router,
+    manual_movements as manual_movements_router,
     hr as hr_router,
     platform as platform_router,
 )
@@ -121,6 +123,8 @@ app.include_router(dashboard_router.router)
 app.include_router(auth_router.router)
 app.include_router(inventory_router.router)
 app.include_router(receiving_router.router)
+app.include_router(stock_devices_router.router)
+app.include_router(manual_movements_router.router)
 app.include_router(hr_router.router)
 app.include_router(platform_router.router)
 if ENABLE_SCHEDULE_MODULE:
