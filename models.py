@@ -31,6 +31,7 @@ class Tenant(Base):
     trial_ends_at = Column(DateTime, nullable=True)
     converted_at = Column(DateTime, nullable=True)
     enabled_modules = Column(JSON, nullable=True)
+    module_user_access = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,
@@ -114,6 +115,7 @@ class Product(Base):
     cost = Column(Float, nullable=False)
 
     barcode = Column(String, nullable=True)
+    label_format = Column(String(64), nullable=False, default="Kensar1")
     unit = Column(String, nullable=True)
     image_url = Column(String(512), nullable=True)
     image_thumb_url = Column(String(512), nullable=True)
@@ -123,6 +125,7 @@ class Product(Base):
     active = Column(Boolean, default=True)
     service = Column(Boolean, default=False)
     includes_tax = Column(Boolean, default=False)
+    is_investment = Column(Boolean, nullable=False, default=False)
     preferred_qty = Column(Integer, default=0)
     reorder_point = Column(Integer, default=0)
     low_stock_alert = Column(Boolean, default=False)
@@ -340,6 +343,7 @@ class ReceivingLotItem(Base):
     product_name_snapshot = Column(String, nullable=False)
     sku_snapshot = Column(String, nullable=True)
     barcode_snapshot = Column(String, nullable=True)
+    label_format_snapshot = Column(String(64), nullable=True)
     qty_received = Column(Float, nullable=False, default=0)
     unit_cost_snapshot = Column(Float, nullable=False, default=0)
     unit_price_snapshot = Column(Float, nullable=False, default=0)
@@ -650,6 +654,90 @@ class SalePayment(Base):
     is_primary = Column(Boolean, default=False, nullable=False)
 
     sale = relationship("Sale", back_populates="payments")
+
+
+class InvestmentParticipant(Base):
+    __tablename__ = "investment_participants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True, index=True)
+    display_name = Column(String(128), nullable=False)
+    share_percent = Column(Float, nullable=False, default=0)
+    profit_share_percent = Column(Float, nullable=False, default=0)
+    capital_share_percent = Column(Float, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("PosUser")
+
+
+class InvestmentCut(Base):
+    __tablename__ = "investment_cuts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    gross_sales = Column(Float, nullable=False, default=0)
+    collected_sales = Column(Float, nullable=False, default=0)
+    cogs = Column(Float, nullable=False, default=0)
+    profit_base = Column(Float, nullable=False, default=0)
+    notes = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    created_by = relationship("PosUser")
+    allocations = relationship(
+        "InvestmentCutAllocation",
+        back_populates="cut",
+        cascade="all, delete-orphan",
+    )
+
+
+class InvestmentCutAllocation(Base):
+    __tablename__ = "investment_cut_allocations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    cut_id = Column(Integer, ForeignKey("investment_cuts.id"), nullable=False, index=True)
+    participant_id = Column(Integer, ForeignKey("investment_participants.id"), nullable=False, index=True)
+    share_percent = Column(Float, nullable=False, default=0)
+    profit_share_percent = Column(Float, nullable=False, default=0)
+    capital_share_percent = Column(Float, nullable=False, default=0)
+    profit_amount = Column(Float, nullable=False, default=0)
+    capital_amount = Column(Float, nullable=False, default=0)
+    amount_due = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    cut = relationship("InvestmentCut", back_populates="allocations")
+    participant = relationship("InvestmentParticipant")
+
+
+class InvestmentPayout(Base):
+    __tablename__ = "investment_payouts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    participant_id = Column(Integer, ForeignKey("investment_participants.id"), nullable=False, index=True)
+    cut_id = Column(Integer, ForeignKey("investment_cuts.id"), nullable=True, index=True)
+    amount = Column(Float, nullable=False, default=0)
+    paid_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    method = Column(String, nullable=True)
+    reference = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    participant = relationship("InvestmentParticipant")
+    cut = relationship("InvestmentCut")
+    created_by = relationship("PosUser")
 
 
 class PaymentMethod(Base):

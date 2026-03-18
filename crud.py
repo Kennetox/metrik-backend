@@ -31,6 +31,32 @@ def _clean_field(value):
     return value
 
 
+DEFAULT_PRODUCT_LABEL_FORMAT = "Kensar1"
+CABLES_PRODUCT_LABEL_FORMAT = "Cables_1"
+
+
+def _is_cables_group(group_name: Optional[str]) -> bool:
+    if not isinstance(group_name, str):
+        return False
+    normalized = group_name.strip().lower()
+    if not normalized:
+        return False
+    return "cables" in normalized
+
+
+def resolve_product_label_format(
+    *,
+    group_name: Optional[str],
+    label_format: Optional[str] = None,
+) -> str:
+    manual = (label_format or "").strip()
+    if manual:
+        return manual
+    if _is_cables_group(group_name):
+        return CABLES_PRODUCT_LABEL_FORMAT
+    return DEFAULT_PRODUCT_LABEL_FORMAT
+
+
 def _normalize_label(value: Optional[str]) -> str:
     return (value or "").strip().lower()
 
@@ -154,7 +180,69 @@ def get_tenant_enabled_modules(tenant: Optional[models.Tenant]) -> List[str]:
     return tenant_modules.normalize_enabled_modules(tenant.enabled_modules)
 
 
-def build_tenant_session_read(tenant: Optional[models.Tenant]) -> Optional[schemas.TenantSessionRead]:
+def normalize_module_user_access(value: Optional[Dict[str, Any]]) -> Dict[str, List[int]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: Dict[str, List[int]] = {}
+    for module_id, raw_user_ids in value.items():
+        if not isinstance(module_id, str):
+            continue
+        module_key = module_id.strip()
+        if not module_key:
+            continue
+        if module_key not in tenant_modules.MODULE_IDS:
+            continue
+        if not isinstance(raw_user_ids, list):
+            continue
+        seen: set[int] = set()
+        cleaned_ids: List[int] = []
+        for raw_user_id in raw_user_ids:
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError):
+                continue
+            if user_id <= 0 or user_id in seen:
+                continue
+            seen.add(user_id)
+            cleaned_ids.append(user_id)
+        normalized[module_key] = cleaned_ids
+    return normalized
+
+
+def can_user_access_tenant_module(
+    tenant: Optional[models.Tenant],
+    module_id: str,
+    user: Optional[models.PosUser] = None,
+) -> bool:
+    enabled_modules = get_tenant_enabled_modules(tenant)
+    if module_id not in enabled_modules:
+        return False
+    if not tenant:
+        return True
+    access_map = normalize_module_user_access(getattr(tenant, "module_user_access", None))
+    allowed_ids = access_map.get(module_id)
+    if not allowed_ids:
+        return True
+    if not user:
+        return False
+    return int(user.id) in set(allowed_ids)
+
+
+def build_tenant_module_access_map(
+    tenant: Optional[models.Tenant],
+    user: Optional[models.PosUser],
+) -> Dict[str, bool]:
+    enabled_modules = get_tenant_enabled_modules(tenant)
+    return {
+        module_id: can_user_access_tenant_module(tenant, module_id, user=user)
+        for module_id in enabled_modules
+    }
+
+
+def build_tenant_session_read(
+    tenant: Optional[models.Tenant],
+    user: Optional[models.PosUser] = None,
+) -> Optional[schemas.TenantSessionRead]:
     if not tenant:
         return None
     return schemas.TenantSessionRead(
@@ -166,6 +254,7 @@ def build_tenant_session_read(tenant: Optional[models.Tenant]) -> Optional[schem
         trial_ends_at=tenant.trial_ends_at,
         trial_days_remaining=get_tenant_trial_days_remaining(tenant),
         enabled_modules=get_tenant_enabled_modules(tenant),
+        module_access=build_tenant_module_access_map(tenant, user),
     )
 
 
@@ -303,6 +392,7 @@ def build_platform_tenant_read(
         updated_at=tenant.updated_at,
         trial_days_remaining=get_tenant_trial_days_remaining(tenant),
         enabled_modules=get_tenant_enabled_modules(tenant),
+        module_user_access=normalize_module_user_access(tenant.module_user_access),
         module_catalog=tenant_modules.get_tenant_module_catalog(),
         admin_user=(
             schemas.PlatformTenantAdminRead(
@@ -335,6 +425,18 @@ def list_platform_tenant_reads(db: Session) -> list[schemas.PlatformTenantRead]:
     return [build_platform_tenant_read(db, tenant) for tenant in tenants]
 
 
+def list_platform_tenant_users(
+    db: Session,
+    tenant_id: int,
+) -> list[models.PosUser]:
+    return (
+        db.query(models.PosUser)
+        .filter(models.PosUser.tenant_id == tenant_id)
+        .order_by(models.PosUser.created_at.asc(), models.PosUser.id.asc())
+        .all()
+    )
+
+
 def create_tenant_with_admin(
     db: Session,
     payload: schemas.PlatformTenantCreateRequest,
@@ -360,6 +462,7 @@ def create_tenant_with_admin(
         is_active=True,
         lifecycle_stage="active",
         enabled_modules=tenant_modules.normalize_enabled_modules([]),
+        module_user_access={},
     )
     db.add(tenant)
     db.flush()
@@ -409,6 +512,19 @@ def update_tenant(
         tenant.enabled_modules = tenant_modules.normalize_enabled_modules(
             data["enabled_modules"]
         )
+    if "module_user_access" in data and data["module_user_access"] is not None:
+        incoming_access = normalize_module_user_access(data["module_user_access"])
+        tenant_user_ids = {
+            int(row.id)
+            for row in db.query(models.PosUser.id)
+            .filter(models.PosUser.tenant_id == tenant.id)
+            .all()
+        }
+        sanitized_access: Dict[str, List[int]] = {}
+        for module_id, user_ids in incoming_access.items():
+            sanitized_ids = [user_id for user_id in user_ids if user_id in tenant_user_ids]
+            sanitized_access[module_id] = sanitized_ids
+        tenant.module_user_access = sanitized_access
 
     if name_changed:
         settings = (
@@ -465,6 +581,7 @@ def create_demo_tenant_with_admin(
         trial_started_at=now,
         trial_ends_at=now + timedelta(days=7),
         enabled_modules=tenant_modules.normalize_enabled_modules([]),
+        module_user_access={},
     )
     db.add(tenant)
     db.flush()
@@ -856,6 +973,10 @@ def add_receiving_lot_item(
         existing.qty_received = float(existing.qty_received or 0) + float(qty_received)
         if unit_cost is not None:
             existing.unit_cost_snapshot = float(unit_cost)
+        existing.label_format_snapshot = resolve_product_label_format(
+            group_name=product.group_name,
+            label_format=product.label_format,
+        )
         if notes is not None:
             existing.notes = _clean_field(notes)
         db.commit()
@@ -869,6 +990,10 @@ def add_receiving_lot_item(
         product_name_snapshot=product.name,
         sku_snapshot=product.sku,
         barcode_snapshot=product.barcode,
+        label_format_snapshot=resolve_product_label_format(
+            group_name=product.group_name,
+            label_format=product.label_format,
+        ),
         qty_received=float(qty_received),
         unit_cost_snapshot=float(unit_cost if unit_cost is not None else product.cost or 0),
         unit_price_snapshot=float(product.price or 0),
@@ -1509,6 +1634,10 @@ def create_product(
         price=product_in.price,
         cost=product_in.cost,
         barcode=product_in.barcode,
+        label_format=resolve_product_label_format(
+            group_name=product_in.group_name,
+            label_format=product_in.label_format,
+        ),
         unit=product_in.unit,
         image_url=product_in.image_url,
         image_thumb_url=product_in.image_thumb_url,
@@ -1521,6 +1650,7 @@ def create_product(
         active=product_in.active,
         service=product_in.service,
         includes_tax=product_in.includes_tax,
+        is_investment=product_in.is_investment,
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
@@ -1538,6 +1668,18 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    if "label_format" in data or "group_name" in data:
+        next_group_name = data.get("group_name", db_product.group_name)
+        if "label_format" in data:
+            data["label_format"] = resolve_product_label_format(
+                group_name=next_group_name,
+                label_format=data.get("label_format"),
+            )
+        elif "group_name" in data:
+            data["label_format"] = resolve_product_label_format(
+                group_name=next_group_name,
+                label_format=None,
+            )
     for field, value in data.items():
         setattr(db_product, field, value)
     db.commit()

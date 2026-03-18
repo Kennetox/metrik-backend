@@ -472,6 +472,51 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "tenants", "trial_ends_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "tenants", "converted_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "tenants", "enabled_modules", "JSONB")
+                _ensure_column_postgres(connection, "tenants", "module_user_access", "JSONB")
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "is_investment",
+                    "BOOLEAN DEFAULT FALSE",
+                )
+                if _table_exists_postgres(connection, "investment_participants"):
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_participants",
+                        "profit_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_participants",
+                        "capital_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                if _table_exists_postgres(connection, "investment_cut_allocations"):
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cut_allocations",
+                        "profit_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cut_allocations",
+                        "capital_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cut_allocations",
+                        "profit_amount",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cut_allocations",
+                        "capital_amount",
+                        "FLOAT DEFAULT 0",
+                    )
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -778,6 +823,24 @@ def run_schema_upgrades(engine: Engine) -> None:
                         )
                     )
                 _ensure_column_postgres(connection, "products", "tenant_id", "INTEGER")
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "label_format",
+                    "VARCHAR(64)",
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET label_format = CASE
+                            WHEN lower(coalesce(group_name, '')) LIKE '%cables%' THEN 'Cables_1'
+                            ELSE 'Kensar1'
+                        END
+                        WHERE label_format IS NULL OR btrim(label_format) = ''
+                        """
+                    )
+                )
                 _ensure_column_postgres(connection, "product_groups", "tenant_id", "INTEGER")
                 _ensure_column_postgres(connection, "payment_methods", "tenant_id", "INTEGER")
                 _ensure_column_postgres(connection, "pos_settings", "tenant_id", "INTEGER")
@@ -819,6 +882,21 @@ def run_schema_upgrades(engine: Engine) -> None:
                 ]
                 for table in transactional_tenant_tables:
                     _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+                _ensure_column_postgres(
+                    connection,
+                    "receiving_lot_items",
+                    "label_format_snapshot",
+                    "VARCHAR(64)",
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE receiving_lot_items
+                        SET label_format_snapshot = 'Kensar1'
+                        WHERE label_format_snapshot IS NULL OR btrim(label_format_snapshot) = ''
+                        """
+                    )
+                )
                 for table in shared_tenant_tables:
                     _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
                 _ensure_tenant_fk_postgres(connection, "products")
@@ -864,6 +942,51 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "tenants", "trial_ends_at", "TIMESTAMP")
                 _ensure_column(connection, "tenants", "converted_at", "TIMESTAMP")
                 _ensure_column(connection, "tenants", "enabled_modules", "TEXT")
+                _ensure_column(connection, "tenants", "module_user_access", "TEXT")
+                _ensure_column(
+                    connection,
+                    "products",
+                    "is_investment",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                if _table_exists(connection, "investment_participants"):
+                    _ensure_column(
+                        connection,
+                        "investment_participants",
+                        "profit_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_participants",
+                        "capital_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                if _table_exists(connection, "investment_cut_allocations"):
+                    _ensure_column(
+                        connection,
+                        "investment_cut_allocations",
+                        "profit_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_cut_allocations",
+                        "capital_share_percent",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_cut_allocations",
+                        "profit_amount",
+                        "FLOAT DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_cut_allocations",
+                        "capital_amount",
+                        "FLOAT DEFAULT 0",
+                    )
                 _ensure_column(
                     connection,
                     "sales",
@@ -926,6 +1049,24 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column(
                     connection,
+                    "products",
+                    "label_format",
+                    "VARCHAR(64)",
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET label_format = CASE
+                            WHEN lower(coalesce(group_name, '')) LIKE '%cables%' THEN 'Cables_1'
+                            ELSE 'Kensar1'
+                        END
+                        WHERE label_format IS NULL OR trim(label_format) = ''
+                        """
+                    )
+                )
+                _ensure_column(
+                    connection,
                     "sale_returns",
                     "closure_id",
                     "INTEGER",
@@ -972,6 +1113,21 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "receiving_lot_items",
                         "labels_printed_qty",
                         "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "receiving_lot_items",
+                        "label_format_snapshot",
+                        "VARCHAR(64)",
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE receiving_lot_items
+                            SET label_format_snapshot = 'Kensar1'
+                            WHERE label_format_snapshot IS NULL OR trim(label_format_snapshot) = ''
+                            """
+                        )
                     )
                 if _table_exists(connection, "products"):
                     _ensure_column(connection, "products", "tenant_id", "INTEGER")

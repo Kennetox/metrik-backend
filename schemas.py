@@ -17,6 +17,7 @@ class ProductBase(BaseModel):
     price: float
     cost: float
     barcode: Optional[str] = None
+    label_format: Optional[str] = None
     unit: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
@@ -34,6 +35,7 @@ class ProductBase(BaseModel):
     active: bool = True
     service: bool = False
     includes_tax: bool = False
+    is_investment: bool = False
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
@@ -49,6 +51,7 @@ class ProductUpdate(BaseModel):
     price: Optional[float] = None
     cost: Optional[float] = None
     barcode: Optional[str] = None
+    label_format: Optional[str] = None
     unit: Optional[str] = None
     stock_min: Optional[int] = None
     preferred_qty: Optional[int] = None
@@ -58,6 +61,7 @@ class ProductUpdate(BaseModel):
     active: Optional[bool] = None
     service: Optional[bool] = None
     includes_tax: Optional[bool] = None
+    is_investment: Optional[bool] = None
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
@@ -214,6 +218,184 @@ class InventoryProductPage(BaseModel):
     limit: int
     total_cost_value: float
     total_price_value: float
+
+
+class InvestmentSummaryRead(BaseModel):
+    total_products: int
+    active_products: int
+    stock_units: float
+    stock_cost_value: float
+    stock_sale_value: float
+
+
+class InvestmentRecentSaleRow(BaseModel):
+    sale_id: int
+    sale_document_number: Optional[str] = None
+    sold_at: datetime
+    product_id: int
+    product_name: str
+    quantity: float
+    unit_price: float
+    gross_line_total: float
+    line_discount_value: float
+    discount_percent: float
+    line_cost_total: float = 0.0
+    net_total: float
+    pos_name: Optional[str] = None
+    seller_name: Optional[str] = None
+
+
+class InvestmentRecentMovementRow(BaseModel):
+    movement_id: int
+    product_id: int
+    product_name: str
+    qty_delta: float
+    reason: str
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class InvestmentRecentActivityRead(BaseModel):
+    recent_sales: List[InvestmentRecentSaleRow] = []
+    recent_movements: List[InvestmentRecentMovementRow] = []
+
+
+class InvestmentSaleLineRow(BaseModel):
+    sale_id: int
+    sale_document_number: Optional[str] = None
+    sold_at: datetime
+    product_id: int
+    product_name: str
+    quantity: float
+    unit_price: float
+    gross_line_total: float
+    line_discount_value: float
+    discount_percent: float
+    line_cost_total: float = 0.0
+    net_total: float
+    pos_name: Optional[str] = None
+    seller_name: Optional[str] = None
+
+
+class InvestmentSaleLinePage(BaseModel):
+    items: List[InvestmentSaleLineRow]
+    total: int
+    skip: int
+    limit: int
+    total_quantity: float = 0.0
+    total_discount: float = 0.0
+    total_net: float = 0.0
+
+
+class InvestmentProductRow(BaseModel):
+    product_id: int
+    product_name: str
+    sku: Optional[str] = None
+    group_name: Optional[str] = None
+    qty_on_hand: float
+    status: Literal["ok", "low", "critical"]
+    cost: float
+    price: float
+    last_movement_at: Optional[datetime] = None
+
+
+class InvestmentParticipantBase(BaseModel):
+    user_id: Optional[int] = None
+    display_name: str
+    share_percent: float = 0.0
+    profit_share_percent: float = 0.0
+    capital_share_percent: float = 0.0
+    is_active: bool = True
+
+
+class InvestmentParticipantCreate(InvestmentParticipantBase):
+    pass
+
+
+class InvestmentParticipantRead(InvestmentParticipantBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InvestmentParticipantsReplaceRequest(BaseModel):
+    items: List[InvestmentParticipantCreate]
+
+
+class InvestmentCutPreviewRequest(BaseModel):
+    period_start: datetime
+    period_end: datetime
+
+
+class InvestmentCutAllocationRead(BaseModel):
+    participant_id: int
+    participant_name: str
+    share_percent: float
+    profit_share_percent: float = 0.0
+    capital_share_percent: float = 0.0
+    profit_amount: float = 0.0
+    capital_amount: float = 0.0
+    amount_due: float
+
+
+class InvestmentCutRead(BaseModel):
+    id: int
+    period_start: datetime
+    period_end: datetime
+    gross_sales: float
+    collected_sales: float
+    cogs: float
+    profit_base: float
+    notes: Optional[str] = None
+    created_at: datetime
+    allocations: List[InvestmentCutAllocationRead] = []
+
+
+class InvestmentCutCreateRequest(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    notes: Optional[str] = None
+
+
+class InvestmentPayoutCreateRequest(BaseModel):
+    participant_id: int
+    cut_id: Optional[int] = None
+    amount: float
+    paid_at: Optional[datetime] = None
+    method: Optional[str] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class InvestmentPayoutRead(BaseModel):
+    id: int
+    participant_id: int
+    participant_name: str
+    cut_id: Optional[int] = None
+    amount: float
+    paid_at: datetime
+    method: Optional[str] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class InvestmentLedgerRow(BaseModel):
+    participant_id: int
+    participant_name: str
+    due_total: float
+    paid_total: float
+    balance: float
+
+
+class InvestmentLedgerRead(BaseModel):
+    rows: List[InvestmentLedgerRow]
+    due_total: float
+    paid_total: float
+    balance_total: float
 
 
 class InventoryProductMovement(BaseModel):
@@ -403,6 +585,7 @@ class ReceivingLotItemRead(BaseModel):
     product_name_snapshot: str
     sku_snapshot: Optional[str] = None
     barcode_snapshot: Optional[str] = None
+    label_format_snapshot: Optional[str] = None
     qty_received: float
     unit_cost_snapshot: float
     unit_price_snapshot: float
@@ -1760,6 +1943,7 @@ class TenantRead(BaseModel):
     trial_ends_at: Optional[datetime] = None
     converted_at: Optional[datetime] = None
     enabled_modules: List[str] = []
+    module_user_access: Dict[str, List[int]] = {}
     created_at: datetime
     updated_at: datetime
 
@@ -1773,6 +1957,16 @@ class PlatformTenantAdminRead(BaseModel):
     email: EmailStr
     phone: Optional[str] = None
     status: Literal["Activo", "Inactivo"] = "Activo"
+    created_at: datetime
+
+
+class PlatformTenantUserRead(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"] = "Vendedor"
+    status: Literal["Activo", "Inactivo"] = "Activo"
+    is_active: bool = True
     created_at: datetime
 
 
@@ -1819,6 +2013,7 @@ class PlatformTenantUpdateRequest(BaseModel):
     name: Optional[Annotated[str, Field(min_length=2, max_length=128)]] = None
     is_active: Optional[bool] = None
     enabled_modules: Optional[List[str]] = None
+    module_user_access: Optional[Dict[str, List[int]]] = None
     lifecycle_stage: Optional[
         Literal["demo", "active", "inactive", "suspended", "archived"]
     ] = None
@@ -1843,6 +2038,7 @@ class TenantSessionRead(BaseModel):
     trial_ends_at: Optional[datetime] = None
     trial_days_remaining: Optional[int] = None
     enabled_modules: List[str] = []
+    module_access: Dict[str, bool] = {}
 
 
 class PlatformUserRead(BaseModel):
