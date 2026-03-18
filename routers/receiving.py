@@ -339,6 +339,7 @@ def quick_create_receiving_product(
                 "name": product.name,
                 "price": product.price,
                 "cost": product.cost,
+                "label_format": product.label_format,
             },
         },
     )

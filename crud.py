@@ -922,6 +922,7 @@ def create_receiving_product_quick(
             price=float(payload.price),
             cost=float(payload.cost if payload.cost is not None else 0),
             barcode=next_barcode,
+            label_format=_clean_field(payload.label_format),
             unit=None,
             stock_min=0,
             preferred_qty=0,

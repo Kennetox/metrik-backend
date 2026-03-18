@@ -606,6 +606,7 @@ class ReceivingProductLookup(BaseModel):
     name: str
     price: float
     cost: float
+    label_format: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -634,6 +635,7 @@ class ReceivingProductQuickCreate(BaseModel):
     price: float = Field(gt=0)
     cost: Optional[float] = Field(default=None, ge=0)
     group_name: NonEmptyStr
+    label_format: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
 
