@@ -350,6 +350,9 @@ class InvestmentCutRead(BaseModel):
     cogs: float
     profit_base: float
     notes: Optional[str] = None
+    reconciled: bool = False
+    reconciled_at: Optional[datetime] = None
+    reconciled_by_user_id: Optional[int] = None
     created_at: datetime
     allocations: List[InvestmentCutAllocationRead] = []
 

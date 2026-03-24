@@ -167,6 +167,28 @@ def require_any_permission(*permission_ids: str):
     return _permission_checker
 
 
+def require_module_access(module_id: str):
+    def _module_checker(
+        user: models.PosUser = Depends(require_pos_auth),
+        db: Session = Depends(get_db),
+    ):
+        tenant_id = crud.resolve_user_tenant_id(db, user)
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Usuario sin empresa asignada",
+            )
+        tenant = crud.get_tenant(db, tenant_id)
+        if not crud.can_user_access_tenant_module(tenant, module_id, user=user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No autorizado para este módulo",
+            )
+        return user
+
+    return _module_checker
+
+
 def require_platform_auth(
     authorization: Optional[str] = Header(None),
     db: Session = Depends(get_db),

@@ -517,6 +517,25 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "capital_amount",
                         "FLOAT DEFAULT 0",
                     )
+                if _table_exists_postgres(connection, "investment_cuts"):
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cuts",
+                        "reconciled",
+                        "BOOLEAN DEFAULT FALSE",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cuts",
+                        "reconciled_at",
+                        "TIMESTAMP",
+                    )
+                    _ensure_column_postgres(
+                        connection,
+                        "investment_cuts",
+                        "reconciled_by_user_id",
+                        "INTEGER",
+                    )
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -986,6 +1005,25 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "investment_cut_allocations",
                         "capital_amount",
                         "FLOAT DEFAULT 0",
+                    )
+                if _table_exists(connection, "investment_cuts"):
+                    _ensure_column(
+                        connection,
+                        "investment_cuts",
+                        "reconciled",
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_cuts",
+                        "reconciled_at",
+                        "TIMESTAMP",
+                    )
+                    _ensure_column(
+                        connection,
+                        "investment_cuts",
+                        "reconciled_by_user_id",
+                        "INTEGER",
                     )
                 _ensure_column(
                     connection,

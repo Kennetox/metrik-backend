@@ -94,6 +94,14 @@ TENANT_MODULES: List[TenantModuleDef] = [
         "enabled_by_default": True,
     },
     {
+        "id": "investment",
+        "label": "Inversion",
+        "description": "Seguimiento privado de inversion familiar.",
+        "required": False,
+        "platform_visible": True,
+        "enabled_by_default": False,
+    },
+    {
         "id": "sales_history",
         "label": "Historial de ventas",
         "description": "Lectura historica de ventas y seguimiento.",

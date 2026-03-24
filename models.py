@@ -690,10 +690,14 @@ class InvestmentCut(Base):
     cogs = Column(Float, nullable=False, default=0)
     profit_base = Column(Float, nullable=False, default=0)
     notes = Column(Text, nullable=True)
+    reconciled = Column(Boolean, nullable=False, default=False)
+    reconciled_at = Column(DateTime, nullable=True)
+    reconciled_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    created_by = relationship("PosUser")
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+    reconciled_by = relationship("PosUser", foreign_keys=[reconciled_by_user_id])
     allocations = relationship(
         "InvestmentCutAllocation",
         back_populates="cut",

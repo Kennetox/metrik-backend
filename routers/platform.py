@@ -28,6 +28,30 @@ def list_platform_tenants(
     return crud.list_platform_tenant_reads(db)
 
 
+@router.get("/tenants/{tenant_id}/users", response_model=List[schemas.PlatformTenantUserRead])
+def list_platform_tenant_users(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _: models.PlatformUser = Depends(require_platform_admin),
+):
+    tenant = crud.get_tenant(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    users = crud.list_platform_tenant_users(db, tenant_id=tenant.id)
+    return [
+        schemas.PlatformTenantUserRead(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            role=user.role,
+            status=user.status,
+            is_active=bool(user.is_active),
+            created_at=user.created_at,
+        )
+        for user in users
+    ]
+
+
 @router.post("/tenants", response_model=schemas.PlatformTenantCreateResponse, status_code=201)
 def create_platform_tenant(
     payload: schemas.PlatformTenantCreateRequest,

@@ -27,6 +27,7 @@ from routers import (
     manual_movements as manual_movements_router,
     hr as hr_router,
     platform as platform_router,
+    investment as investment_router,
 )
 
 app = FastAPI(
@@ -127,6 +128,7 @@ app.include_router(stock_devices_router.router)
 app.include_router(manual_movements_router.router)
 app.include_router(hr_router.router)
 app.include_router(platform_router.router)
+app.include_router(investment_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
 

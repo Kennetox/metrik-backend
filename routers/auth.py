@@ -203,7 +203,7 @@ def login(
     return schemas.AuthLoginResponse(
         token=token,
         user=user_read,
-        tenant=crud.build_tenant_session_read(tenant),
+        tenant=crud.build_tenant_session_read(tenant, user),
         expires_at=expires_at,
     )
 
@@ -318,7 +318,7 @@ def start_demo(
     return schemas.DemoStartResponse(
         token=token,
         user=schemas.PosUserRead.model_validate(admin_user),
-        tenant=crud.build_tenant_session_read(tenant),
+        tenant=crud.build_tenant_session_read(tenant, admin_user),
         expires_at=expires_at,
     )
 
@@ -589,7 +589,7 @@ def pos_login(
     return schemas.AuthLoginResponse(
         token=token,
         user=user_read,
-        tenant=crud.build_tenant_session_read(tenant),
+        tenant=crud.build_tenant_session_read(tenant, user),
         expires_at=expires_at,
     )
 
@@ -683,7 +683,7 @@ def tablet_login(
     return schemas.AuthLoginResponse(
         token=token,
         user=user_read,
-        tenant=crud.build_tenant_session_read(tenant),
+        tenant=crud.build_tenant_session_read(tenant, user),
         expires_at=expires_at,
     )
 
@@ -772,7 +772,7 @@ def mobile_stock_login(
     return schemas.AuthLoginResponse(
         token=token,
         user=user_read,
-        tenant=crud.build_tenant_session_read(tenant),
+        tenant=crud.build_tenant_session_read(tenant, user),
         expires_at=expires_at,
     )
 
