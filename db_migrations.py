@@ -479,6 +479,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "is_investment",
                     "BOOLEAN DEFAULT FALSE",
                 )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "investment_enabled_at",
+                    "TIMESTAMP",
+                )
                 if _table_exists_postgres(connection, "investment_participants"):
                     _ensure_column_postgres(
                         connection,
@@ -967,6 +973,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "is_investment",
                     "INTEGER NOT NULL DEFAULT 0",
+                )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "investment_enabled_at",
+                    "TIMESTAMP",
                 )
                 if _table_exists(connection, "investment_participants"):
                     _ensure_column(

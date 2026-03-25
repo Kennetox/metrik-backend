@@ -135,6 +135,7 @@ class Product(Base):
     group_name = Column(String, nullable=True)   # viene de 'grupo' en Excel
     brand = Column(String, nullable=True)        # 'marca'
     supplier = Column(String, nullable=True)
+    investment_enabled_at = Column(DateTime, nullable=True)
     group_meta = None  # runtime attribute for schemas
     updated_at = Column(
         DateTime,

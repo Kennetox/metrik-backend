@@ -36,6 +36,7 @@ class ProductBase(BaseModel):
     service: bool = False
     includes_tax: bool = False
     is_investment: bool = False
+    investment_enabled_at: Optional[datetime] = None
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
@@ -62,6 +63,7 @@ class ProductUpdate(BaseModel):
     service: Optional[bool] = None
     includes_tax: Optional[bool] = None
     is_investment: Optional[bool] = None
+    investment_enabled_at: Optional[datetime] = None
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None

@@ -27,6 +27,12 @@ def _resolve_tenant_id(db: Session, user: models.PosUser) -> int:
     return tenant_id
 
 
+def _investment_enabled_at_expr():
+    # For products promoted to investment after sales already existed, only count
+    # sales from the activation timestamp onward.
+    return func.coalesce(models.Product.investment_enabled_at, models.Product.updated_at)
+
+
 def _compute_cut_metrics(
     db: Session,
     *,
@@ -52,6 +58,7 @@ def _compute_cut_metrics(
         .filter(models.Sale.created_at >= period_start)
         .filter(models.Sale.created_at < period_end)
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
         .first()
     )
     returns_row = (
@@ -69,6 +76,7 @@ def _compute_cut_metrics(
         .filter(models.SaleReturn.created_at >= period_start)
         .filter(models.SaleReturn.created_at < period_end)
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.SaleReturn.created_at >= _investment_enabled_at_expr())
         .first()
     )
     sold_gross = float(getattr(sales_row, "gross_sales", 0.0) or 0.0)
@@ -173,6 +181,7 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
         .scalar()
     )
     first_return_at = (
@@ -182,6 +191,7 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
         .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.SaleReturn.created_at >= _investment_enabled_at_expr())
         .scalar()
     )
     candidates = [dt for dt in [first_sale_at, first_return_at] if isinstance(dt, datetime)]
@@ -395,6 +405,7 @@ def get_investment_recent_activity(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
         .order_by(models.Sale.created_at.desc(), models.SaleItem.id.desc())
         .limit(limit_sales)
         .all()
@@ -482,6 +493,7 @@ def list_investment_sales_lines(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
     )
     if period_start is not None:
         base_query = base_query.filter(models.Sale.created_at >= period_start)
@@ -577,6 +589,7 @@ def export_investment_sales_lines_xlsx(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
     )
     if period_start is not None:
         query = query.filter(models.Sale.created_at >= period_start)
@@ -677,6 +690,7 @@ def export_investment_sales_lines_pdf(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
+        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
     )
     if period_start is not None:
         query = query.filter(models.Sale.created_at >= period_start)
@@ -1174,6 +1188,27 @@ def list_investment_payouts(
         )
         for payout, participant_name in rows
     ]
+
+
+@router.post("/products/{product_id}/remove", status_code=204)
+def remove_investment_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_module_access("investment")),
+):
+    tenant_id = _resolve_tenant_id(db, current_user)
+    product = (
+        db.query(models.Product)
+        .filter(models.Product.tenant_id == tenant_id)
+        .filter(models.Product.id == product_id)
+        .first()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    product.is_investment = False
+    product.investment_enabled_at = None
+    db.commit()
+    return None
 
 
 @router.get("/payouts/export/xlsx")

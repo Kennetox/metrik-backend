@@ -1652,6 +1652,7 @@ def create_product(
         service=product_in.service,
         includes_tax=product_in.includes_tax,
         is_investment=product_in.is_investment,
+        investment_enabled_at=(datetime.utcnow() if product_in.is_investment else None),
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
@@ -1669,6 +1670,13 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    if "is_investment" in data:
+        next_is_investment = bool(data.get("is_investment"))
+        if next_is_investment:
+            if not db_product.is_investment or db_product.investment_enabled_at is None:
+                data["investment_enabled_at"] = datetime.utcnow()
+        else:
+            data["investment_enabled_at"] = None
     if "label_format" in data or "group_name" in data:
         next_group_name = data.get("group_name", db_product.group_name)
         if "label_format" in data:
