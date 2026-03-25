@@ -136,6 +136,8 @@ class Product(Base):
     brand = Column(String, nullable=True)        # 'marca'
     supplier = Column(String, nullable=True)
     investment_enabled_at = Column(DateTime, nullable=True)
+    investment_disabled_at = Column(DateTime, nullable=True)
+    investment_status = Column(String(16), nullable=False, default="active")
     group_meta = None  # runtime attribute for schemas
     updated_at = Column(
         DateTime,

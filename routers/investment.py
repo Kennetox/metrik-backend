@@ -1,11 +1,11 @@
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 import pandas as pd
-from sqlalchemy import func, or_, true
+from sqlalchemy import and_, func, or_, true
 from sqlalchemy.orm import Session
 
 import crud, models, schemas
@@ -33,6 +33,52 @@ def _investment_enabled_at_expr():
     return func.coalesce(models.Product.investment_enabled_at, models.Product.updated_at)
 
 
+def _investment_active_window_clause(timestamp_col):
+    start_at = _investment_enabled_at_expr()
+    return and_(
+        timestamp_col >= start_at,
+        or_(
+            models.Product.investment_disabled_at.is_(None),
+            timestamp_col < models.Product.investment_disabled_at,
+        ),
+    )
+
+
+def _cut_display_key(period_start: datetime, period_end: datetime) -> Tuple[str, str]:
+    # Normalize period identity by displayed date range (inclusive end date shown in UI),
+    # so accidental time drifts do not generate duplicated fortnights.
+    end_display = (period_end - timedelta(seconds=1)).date().isoformat()
+    return (period_start.date().isoformat(), end_display)
+
+
+def _load_effective_cuts(db: Session, *, tenant_id: int) -> List[models.InvestmentCut]:
+    first_investment_enabled_at = (
+        db.query(func.min(_investment_enabled_at_expr()))
+        .select_from(models.Product)
+        .filter(models.Product.tenant_id == tenant_id)
+        .filter(models.Product.is_investment.is_(True))
+        .scalar()
+    )
+    cuts = (
+        db.query(models.InvestmentCut)
+        .filter(models.InvestmentCut.tenant_id == tenant_id)
+        .order_by(models.InvestmentCut.created_at.desc(), models.InvestmentCut.id.desc())
+        .all()
+    )
+    seen_keys: set[Tuple[str, str]] = set()
+    effective_desc: List[models.InvestmentCut] = []
+    for cut in cuts:
+        if first_investment_enabled_at and cut.period_end <= first_investment_enabled_at:
+            # Legacy cut fully before current investment start window.
+            continue
+        key = _cut_display_key(cut.period_start, cut.period_end)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        effective_desc.append(cut)
+    return list(reversed(effective_desc))
+
+
 def _compute_cut_metrics(
     db: Session,
     *,
@@ -58,7 +104,7 @@ def _compute_cut_metrics(
         .filter(models.Sale.created_at >= period_start)
         .filter(models.Sale.created_at < period_end)
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
         .first()
     )
     returns_row = (
@@ -76,7 +122,7 @@ def _compute_cut_metrics(
         .filter(models.SaleReturn.created_at >= period_start)
         .filter(models.SaleReturn.created_at < period_end)
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.SaleReturn.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.SaleReturn.created_at))
         .first()
     )
     sold_gross = float(getattr(sales_row, "gross_sales", 0.0) or 0.0)
@@ -181,7 +227,7 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
         .scalar()
     )
     first_return_at = (
@@ -191,7 +237,7 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
         .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.SaleReturn.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.SaleReturn.created_at))
         .scalar()
     )
     candidates = [dt for dt in [first_sale_at, first_return_at] if isinstance(dt, datetime)]
@@ -204,8 +250,8 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
 
     first_activity_at = min(candidates)
     period_start = _period_start_for(first_activity_at)
-    existing_periods = {
-        (row.period_start, row.period_end)
+    existing_period_keys = {
+        _cut_display_key(row.period_start, row.period_end)
         for row in db.query(models.InvestmentCut.period_start, models.InvestmentCut.period_end)
         .filter(models.InvestmentCut.tenant_id == tenant_id)
         .all()
@@ -216,8 +262,8 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
         period_end = _period_end_for(period_start)
         if period_end > as_of:
             break
-        key = (period_start, period_end)
-        if key not in existing_periods:
+        key = _cut_display_key(period_start, period_end)
+        if key not in existing_period_keys:
             gross_sales, collected_sales, cogs, profit_base = _compute_cut_metrics(
                 db,
                 tenant_id=tenant_id,
@@ -259,7 +305,7 @@ def _ensure_automatic_quincenal_cuts(db: Session, *, tenant_id: int, as_of: date
                             )
                         )
                     created_any = True
-            existing_periods.add(key)
+            existing_period_keys.add(key)
         period_start = period_end
 
     if created_any:
@@ -277,7 +323,10 @@ def get_investment_summary(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty_on_hand"),
         )
+        .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(models.InventoryMovement.tenant_id == tenant_id if tenant_id is not None else true())
+        .filter(models.Product.is_investment.is_(True))
+        .filter(_investment_active_window_clause(models.InventoryMovement.created_at))
         .group_by(models.InventoryMovement.product_id)
         .subquery()
     )
@@ -323,7 +372,10 @@ def list_investment_products(
             models.InventoryMovement.product_id.label("product_id"),
             func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty_on_hand"),
         )
+        .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(models.InventoryMovement.tenant_id == tenant_id if tenant_id is not None else true())
+        .filter(models.Product.is_investment.is_(True))
+        .filter(_investment_active_window_clause(models.InventoryMovement.created_at))
         .group_by(models.InventoryMovement.product_id)
         .subquery()
     )
@@ -332,7 +384,10 @@ def list_investment_products(
             models.InventoryMovement.product_id.label("product_id"),
             func.max(models.InventoryMovement.created_at).label("last_movement_at"),
         )
+        .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(models.InventoryMovement.tenant_id == tenant_id if tenant_id is not None else true())
+        .filter(models.Product.is_investment.is_(True))
+        .filter(_investment_active_window_clause(models.InventoryMovement.created_at))
         .group_by(models.InventoryMovement.product_id)
         .subquery()
     )
@@ -384,6 +439,9 @@ def list_investment_products(
                 status=status,
                 cost=float(product.cost or 0.0),
                 price=float(product.price or 0.0),
+                investment_status=(product.investment_status or "active"),
+                investment_enabled_at=product.investment_enabled_at,
+                investment_disabled_at=product.investment_disabled_at,
                 last_movement_at=last_movement_at,
             )
         )
@@ -405,7 +463,7 @@ def get_investment_recent_activity(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
         .order_by(models.Sale.created_at.desc(), models.SaleItem.id.desc())
         .limit(limit_sales)
         .all()
@@ -449,6 +507,7 @@ def get_investment_recent_activity(
         .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(models.InventoryMovement.tenant_id == tenant_id)
         .filter(models.Product.is_investment.is_(True))
+        .filter(_investment_active_window_clause(models.InventoryMovement.created_at))
         .order_by(models.InventoryMovement.created_at.desc(), models.InventoryMovement.id.desc())
         .limit(limit_movements)
         .all()
@@ -493,7 +552,7 @@ def list_investment_sales_lines(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
     )
     if period_start is not None:
         base_query = base_query.filter(models.Sale.created_at >= period_start)
@@ -589,7 +648,7 @@ def export_investment_sales_lines_xlsx(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
     )
     if period_start is not None:
         query = query.filter(models.Sale.created_at >= period_start)
@@ -690,7 +749,7 @@ def export_investment_sales_lines_pdf(
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.status == "active")
         .filter(models.Product.is_investment.is_(True))
-        .filter(models.Sale.created_at >= _investment_enabled_at_expr())
+        .filter(_investment_active_window_clause(models.Sale.created_at))
     )
     if period_start is not None:
         query = query.filter(models.Sale.created_at >= period_start)
@@ -887,15 +946,14 @@ def create_investment_cut(
         period_start=payload.period_start,
         period_end=payload.period_end,
     )
-    existing_cut = (
-        db.query(models.InvestmentCut.id)
+    requested_key = _cut_display_key(payload.period_start, payload.period_end)
+    for existing in (
+        db.query(models.InvestmentCut.period_start, models.InvestmentCut.period_end)
         .filter(models.InvestmentCut.tenant_id == tenant_id)
-        .filter(models.InvestmentCut.period_start == payload.period_start)
-        .filter(models.InvestmentCut.period_end == payload.period_end)
-        .first()
-    )
-    if existing_cut:
-        raise HTTPException(status_code=400, detail="Ya existe un corte para ese período.")
+        .all()
+    ):
+        if _cut_display_key(existing.period_start, existing.period_end) == requested_key:
+            raise HTTPException(status_code=400, detail="Ya existe un corte para ese período.")
 
     participants = _active_participants(db, tenant_id=tenant_id)
     allocations = _build_cut_allocations(
@@ -964,13 +1022,7 @@ def list_investment_cuts(
 ):
     tenant_id = _resolve_tenant_id(db, current_user)
     _ensure_automatic_quincenal_cuts(db, tenant_id=tenant_id, as_of=datetime.utcnow())
-    cuts = (
-        db.query(models.InvestmentCut)
-        .filter(models.InvestmentCut.tenant_id == tenant_id)
-        .order_by(models.InvestmentCut.period_start.desc(), models.InvestmentCut.id.desc())
-        .limit(limit)
-        .all()
-    )
+    cuts = list(reversed(_load_effective_cuts(db, tenant_id=tenant_id)))[0:limit]
     result: List[schemas.InvestmentCutRead] = []
     for cut in cuts:
         allocs = (
@@ -1206,7 +1258,47 @@ def remove_investment_product(
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     product.is_investment = False
+    product.investment_status = "archived"
     product.investment_enabled_at = None
+    product.investment_disabled_at = datetime.utcnow()
+    db.commit()
+    return None
+
+
+@router.patch("/products/{product_id}/status", status_code=204)
+def update_investment_product_status(
+    product_id: int,
+    payload: schemas.InvestmentProductStatusUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_module_access("investment")),
+):
+    tenant_id = _resolve_tenant_id(db, current_user)
+    product = (
+        db.query(models.Product)
+        .filter(models.Product.tenant_id == tenant_id)
+        .filter(models.Product.id == product_id)
+        .first()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    if not product.is_investment:
+        raise HTTPException(status_code=400, detail="El producto no pertenece al módulo inversión.")
+    now = datetime.utcnow()
+    next_status = payload.status
+    if next_status == "active":
+        product.investment_status = "active"
+        product.investment_enabled_at = now
+        product.investment_disabled_at = None
+    elif next_status == "paused":
+        product.investment_status = "paused"
+        if product.investment_enabled_at is None:
+            product.investment_enabled_at = now
+        product.investment_disabled_at = now
+    else:
+        product.investment_status = "archived"
+        if product.investment_enabled_at is None:
+            product.investment_enabled_at = now
+        product.investment_disabled_at = now
     db.commit()
     return None
 
@@ -1337,21 +1429,32 @@ def get_investment_ledger(
         .filter(models.InvestmentParticipant.tenant_id == tenant_id)
         .all()
     )
-    due_rows = (
-        db.query(
-            models.InvestmentCutAllocation.participant_id.label("participant_id"),
-            func.coalesce(func.sum(models.InvestmentCutAllocation.amount_due), 0).label("due_total"),
+    effective_cut_ids = [cut.id for cut in _load_effective_cuts(db, tenant_id=tenant_id)]
+    if effective_cut_ids:
+        due_rows = (
+            db.query(
+                models.InvestmentCutAllocation.participant_id.label("participant_id"),
+                func.coalesce(func.sum(models.InvestmentCutAllocation.amount_due), 0).label("due_total"),
+            )
+            .filter(models.InvestmentCutAllocation.tenant_id == tenant_id)
+            .filter(models.InvestmentCutAllocation.cut_id.in_(effective_cut_ids))
+            .group_by(models.InvestmentCutAllocation.participant_id)
+            .all()
         )
-        .filter(models.InvestmentCutAllocation.tenant_id == tenant_id)
-        .group_by(models.InvestmentCutAllocation.participant_id)
-        .all()
-    )
+    else:
+        due_rows = []
     paid_rows = (
         db.query(
             models.InvestmentPayout.participant_id.label("participant_id"),
             func.coalesce(func.sum(models.InvestmentPayout.amount), 0).label("paid_total"),
         )
         .filter(models.InvestmentPayout.tenant_id == tenant_id)
+        .filter(
+            or_(
+                models.InvestmentPayout.cut_id.is_(None),
+                models.InvestmentPayout.cut_id.in_(effective_cut_ids if effective_cut_ids else [-1]),
+            )
+        )
         .group_by(models.InvestmentPayout.participant_id)
         .all()
     )

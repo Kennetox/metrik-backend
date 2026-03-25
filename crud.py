@@ -1652,7 +1652,9 @@ def create_product(
         service=product_in.service,
         includes_tax=product_in.includes_tax,
         is_investment=product_in.is_investment,
+        investment_status=("active" if product_in.is_investment else "archived"),
         investment_enabled_at=(datetime.utcnow() if product_in.is_investment else None),
+        investment_disabled_at=(None if product_in.is_investment else datetime.utcnow()),
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
@@ -1670,13 +1672,30 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    now = datetime.utcnow()
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
         if next_is_investment:
             if not db_product.is_investment or db_product.investment_enabled_at is None:
-                data["investment_enabled_at"] = datetime.utcnow()
+                data["investment_enabled_at"] = now
+            data["investment_status"] = "active"
+            data["investment_disabled_at"] = None
         else:
             data["investment_enabled_at"] = None
+            data["investment_disabled_at"] = now
+            data["investment_status"] = "archived"
+    if "investment_status" in data:
+        next_status = (data.get("investment_status") or "").strip().lower()
+        if next_status in {"active", "paused", "archived"}:
+            if not bool(data.get("is_investment", db_product.is_investment)):
+                data["is_investment"] = True
+            if next_status == "active":
+                data["investment_enabled_at"] = now
+                data["investment_disabled_at"] = None
+            else:
+                if db_product.investment_enabled_at is None:
+                    data["investment_enabled_at"] = now
+                data["investment_disabled_at"] = now
     if "label_format" in data or "group_name" in data:
         next_group_name = data.get("group_name", db_product.group_name)
         if "label_format" in data:

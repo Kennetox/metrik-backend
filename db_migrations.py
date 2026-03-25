@@ -485,6 +485,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "investment_enabled_at",
                     "TIMESTAMP",
                 )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "investment_disabled_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "investment_status",
+                    "TEXT DEFAULT 'active'",
+                )
                 if _table_exists_postgres(connection, "investment_participants"):
                     _ensure_column_postgres(
                         connection,
@@ -979,6 +991,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "investment_enabled_at",
                     "TIMESTAMP",
+                )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "investment_disabled_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column(
+                    connection,
+                    "products",
+                    "investment_status",
+                    "TEXT DEFAULT 'active'",
                 )
                 if _table_exists(connection, "investment_participants"):
                     _ensure_column(
