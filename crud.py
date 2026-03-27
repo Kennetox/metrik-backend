@@ -9,10 +9,11 @@ import math
 import re
 import secrets
 import string
+import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import String, case, cast, func, or_, text, true
+from sqlalchemy import String, and_, case, cast, func, or_, text, true
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
@@ -59,6 +60,21 @@ def resolve_product_label_format(
 
 def _normalize_label(value: Optional[str]) -> str:
     return (value or "").strip().lower()
+
+
+def _slugify_text(value: Optional[str]) -> str:
+    normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    return re.sub(r"-{2,}", "-", slug)
+
+
+def build_product_web_slug(name: Optional[str], sku: Optional[str] = None) -> str:
+    base = _slugify_text(name)
+    if base:
+        return base[:160]
+    fallback = _slugify_text(sku)
+    return (fallback or "producto")[:160]
 
 
 def _should_sync_company_name_from_tenant(
@@ -1658,6 +1674,15 @@ def create_product(
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
+        web_slug=build_product_web_slug(product_in.web_slug or product_in.name, product_in.sku),
+        web_published=product_in.web_published,
+        web_featured=product_in.web_featured,
+        web_short_description=product_in.web_short_description,
+        web_long_description=product_in.web_long_description,
+        web_sort_order=product_in.web_sort_order,
+        web_visible_when_out_of_stock=product_in.web_visible_when_out_of_stock,
+        web_price_mode=product_in.web_price_mode,
+        web_whatsapp_message=product_in.web_whatsapp_message,
     )
     db.add(db_product)
     db.commit()
@@ -1672,6 +1697,8 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    if "web_slug" in data:
+        data["web_slug"] = build_product_web_slug(data.get("web_slug") or data.get("name"))
     now = datetime.utcnow()
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
@@ -2039,6 +2066,387 @@ def get_product_group_by_path(
     if effective_tenant_id is not None:
         query = query.filter(models.ProductGroup.tenant_id == effective_tenant_id)
     return query.first()
+
+
+def _get_catalog_stock_subquery(db: Session, tenant_id: Optional[int]):
+    return (
+        db.query(
+            models.InventoryMovement.product_id.label("product_id"),
+            func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty_on_hand"),
+        )
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .group_by(models.InventoryMovement.product_id)
+        .subquery()
+    )
+
+
+def resolve_public_catalog_tenant_id(db: Session) -> Optional[int]:
+    return get_default_tenant_id(db)
+
+
+def resolve_product_web_slug(product: models.Product) -> str:
+    manual = (product.web_slug or "").strip()
+    if manual:
+        return build_product_web_slug(manual)
+    return build_product_web_slug(product.name, product.sku)
+
+
+def resolve_web_product_stock_status(
+    product: models.Product,
+    qty_on_hand: Optional[float],
+) -> str:
+    if product.service:
+        return "service"
+    price_mode = (product.web_price_mode or "visible").strip().lower()
+    if price_mode == "consultar" and qty_on_hand is None:
+        return "consultar"
+    qty = float(qty_on_hand or 0.0)
+    if qty <= 0:
+        return "out_of_stock"
+    if product.low_stock_alert and product.stock_min > 0 and qty <= product.stock_min:
+        return "low_stock"
+    return "in_stock"
+
+
+def _build_web_catalog_filters(
+    db: Session,
+    tenant_id: Optional[int],
+    q: Optional[str] = None,
+    featured: Optional[bool] = None,
+):
+    query = db.query(models.Product).filter(
+        models.Product.active.is_(True),
+        models.Product.web_published.is_(True),
+    )
+    if tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == tenant_id)
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.Product.name.ilike(like),
+                models.Product.sku.ilike(like),
+                models.Product.barcode.ilike(like),
+                models.Product.brand.ilike(like),
+                models.Product.group_name.ilike(like),
+                models.Product.web_short_description.ilike(like),
+            )
+        )
+    if featured is not None:
+        query = query.filter(models.Product.web_featured.is_(featured))
+
+    category_rows = (
+        query.with_entities(
+            models.Product.group_name,
+            func.count(models.Product.id),
+        )
+        .filter(models.Product.group_name.isnot(None))
+        .group_by(models.Product.group_name)
+        .order_by(func.count(models.Product.id).desc(), models.Product.group_name.asc())
+        .all()
+    )
+    categories = []
+    for path, count in category_rows:
+        if not path:
+            continue
+        group = get_product_group_by_path(db, path, tenant_id=tenant_id)
+        categories.append(
+            schemas.WebCatalogFilterOption(
+                value=path,
+                label=(group.display_name if group else path),
+                count=int(count or 0),
+            )
+        )
+
+    brand_rows = (
+        query.with_entities(
+            models.Product.brand,
+            func.count(models.Product.id),
+        )
+        .filter(models.Product.brand.isnot(None))
+        .group_by(models.Product.brand)
+        .order_by(func.count(models.Product.id).desc(), models.Product.brand.asc())
+        .all()
+    )
+    brands = [
+        schemas.WebCatalogFilterOption(
+            value=brand,
+            label=brand,
+            count=int(count or 0),
+        )
+        for brand, count in brand_rows
+        if brand
+    ]
+    return schemas.WebCatalogFilters(categories=categories, brands=brands)
+
+
+def get_web_catalog_version(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> schemas.WebCatalogVersion:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    products_query = db.query(models.Product).filter(
+        models.Product.active.is_(True),
+        models.Product.web_published.is_(True),
+    )
+    groups_query = (
+        db.query(models.ProductGroup)
+        .join(models.Product, models.Product.group_name == models.ProductGroup.path)
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+    )
+    if effective_tenant_id is not None:
+        products_query = products_query.filter(models.Product.tenant_id == effective_tenant_id)
+        groups_query = groups_query.filter(
+            models.ProductGroup.tenant_id == effective_tenant_id,
+            models.Product.tenant_id == effective_tenant_id,
+        )
+
+    products_updated_at = products_query.with_entities(func.max(models.Product.updated_at)).scalar()
+    groups_updated_at = groups_query.with_entities(func.max(models.ProductGroup.updated_at)).scalar()
+    updated_at = max(
+        [ts for ts in [products_updated_at, groups_updated_at] if ts is not None],
+        default=None,
+    )
+    products_count = int(products_query.with_entities(func.count(models.Product.id)).scalar() or 0)
+    groups_count = int(
+        groups_query.with_entities(func.count(func.distinct(models.ProductGroup.id))).scalar() or 0
+    )
+    return schemas.WebCatalogVersion(
+        updated_at=updated_at,
+        products_count=products_count,
+        groups_count=groups_count,
+    )
+
+
+def get_web_catalog_categories(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> List[schemas.WebCatalogCategory]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    query = (
+        db.query(
+            models.ProductGroup.path,
+            models.ProductGroup.display_name,
+            models.ProductGroup.image_url,
+            models.ProductGroup.tile_color,
+            func.count(models.Product.id).label("product_count"),
+        )
+        .join(models.Product, models.Product.group_name == models.ProductGroup.path)
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+    )
+    if effective_tenant_id is not None:
+        query = query.filter(
+            models.ProductGroup.tenant_id == effective_tenant_id,
+            models.Product.tenant_id == effective_tenant_id,
+        )
+    rows = (
+        query.group_by(
+            models.ProductGroup.path,
+            models.ProductGroup.display_name,
+            models.ProductGroup.image_url,
+            models.ProductGroup.tile_color,
+        )
+        .order_by(func.count(models.Product.id).desc(), models.ProductGroup.display_name.asc())
+        .all()
+    )
+    return [
+        schemas.WebCatalogCategory(
+            id=row.path,
+            path=row.path,
+            name=row.display_name,
+            image_url=row.image_url,
+            tile_color=row.tile_color,
+            product_count=int(row.product_count or 0),
+        )
+        for row in rows
+    ]
+
+
+def get_web_catalog_products(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
+    featured: Optional[bool] = None,
+    sort: str = "recommended",
+    page: int = 1,
+    page_size: int = 24,
+) -> schemas.WebCatalogProductList:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
+
+    query = (
+        db.query(
+            models.Product,
+            func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+            models.ProductGroup.display_name.label("category_name"),
+        )
+        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+        .outerjoin(
+            models.ProductGroup,
+            and_(
+                models.ProductGroup.path == models.Product.group_name,
+                models.ProductGroup.tenant_id == models.Product.tenant_id,
+            ),
+        )
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+    )
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.Product.name.ilike(like),
+                models.Product.sku.ilike(like),
+                models.Product.barcode.ilike(like),
+                models.Product.brand.ilike(like),
+                models.Product.group_name.ilike(like),
+                models.Product.web_short_description.ilike(like),
+            )
+        )
+    if category:
+        query = query.filter(models.Product.group_name == category)
+    if brand:
+        query = query.filter(models.Product.brand == brand)
+    if featured is not None:
+        query = query.filter(models.Product.web_featured.is_(featured))
+
+    qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
+    query = query.filter(
+        or_(
+            models.Product.web_visible_when_out_of_stock.is_(True),
+            models.Product.web_visible_when_out_of_stock.is_(None),
+            models.Product.service.is_(True),
+            qty_col > 0,
+        )
+    )
+    if sort == "price_asc":
+        query = query.order_by(models.Product.price.asc(), models.Product.name.asc())
+    elif sort == "price_desc":
+        query = query.order_by(models.Product.price.desc(), models.Product.name.asc())
+    elif sort == "name_asc":
+        query = query.order_by(models.Product.name.asc())
+    else:
+        query = query.order_by(
+            models.Product.web_featured.desc(),
+            models.Product.web_sort_order.asc(),
+            case((qty_col > 0, 0), else_=1),
+            models.Product.name.asc(),
+        )
+
+    total = query.count()
+    skip = max(page - 1, 0) * page_size
+    rows = query.offset(skip).limit(page_size).all()
+    items: List[schemas.WebCatalogProductCard] = []
+    for product, qty_on_hand, category_name in rows:
+        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            continue
+        price_mode = (product.web_price_mode or "visible").strip().lower()
+        price = float(product.price) if price_mode == "visible" else None
+        items.append(
+            schemas.WebCatalogProductCard(
+                id=product.id,
+                sku=product.sku,
+                slug=resolve_product_web_slug(product),
+                name=product.name,
+                short_description=product.web_short_description,
+                brand=product.brand,
+                category_path=product.group_name,
+                category_name=category_name or product.group_name,
+                image_url=product.image_url,
+                image_thumb_url=product.image_thumb_url,
+                price_mode=price_mode,
+                price=price,
+                stock_status=stock_status,
+                featured=bool(product.web_featured),
+            )
+        )
+
+    filters = _build_web_catalog_filters(
+        db,
+        tenant_id=effective_tenant_id,
+        q=q,
+        featured=featured,
+    )
+    return schemas.WebCatalogProductList(
+        items=items,
+        total=int(total),
+        page=page,
+        page_size=page_size,
+        filters=filters,
+    )
+
+
+def get_web_catalog_product_by_slug(
+    db: Session,
+    slug: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[schemas.WebCatalogProductDetail]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
+    rows = (
+        db.query(
+            models.Product,
+            func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+            models.ProductGroup.display_name.label("category_name"),
+        )
+        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+        .outerjoin(
+            models.ProductGroup,
+            and_(
+                models.ProductGroup.path == models.Product.group_name,
+                models.ProductGroup.tenant_id == models.Product.tenant_id,
+            ),
+        )
+        .filter(
+            models.Product.active.is_(True),
+            models.Product.web_published.is_(True),
+            models.Product.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true(),
+        )
+        .all()
+    )
+    normalized_slug = build_product_web_slug(slug)
+    for product, qty_on_hand, category_name in rows:
+        resolved_slug = resolve_product_web_slug(product)
+        if resolved_slug != normalized_slug:
+            continue
+        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            return None
+        price_mode = (product.web_price_mode or "visible").strip().lower()
+        return schemas.WebCatalogProductDetail(
+            id=product.id,
+            sku=product.sku,
+            slug=resolved_slug,
+            name=product.name,
+            short_description=product.web_short_description,
+            long_description=product.web_long_description,
+            brand=product.brand,
+            category_path=product.group_name,
+            category_name=category_name or product.group_name,
+            image_url=product.image_url,
+            image_thumb_url=product.image_thumb_url,
+            gallery=[url for url in [product.image_url, product.image_thumb_url] if url],
+            price_mode=price_mode,
+            price=(float(product.price) if price_mode == "visible" else None),
+            stock_status=stock_status,
+            specs={},
+            whatsapp_message=product.web_whatsapp_message,
+        )
+    return None
 
 
 def create_product_group(

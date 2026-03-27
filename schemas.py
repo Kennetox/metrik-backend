@@ -42,6 +42,15 @@ class ProductBase(BaseModel):
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
+    web_slug: Optional[str] = None
+    web_published: bool = False
+    web_featured: bool = False
+    web_short_description: Optional[str] = None
+    web_long_description: Optional[str] = None
+    web_sort_order: int = 0
+    web_visible_when_out_of_stock: bool = True
+    web_price_mode: Literal["visible", "consultar"] = "visible"
+    web_whatsapp_message: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -73,6 +82,15 @@ class ProductUpdate(BaseModel):
     supplier: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
+    web_slug: Optional[str] = None
+    web_published: Optional[bool] = None
+    web_featured: Optional[bool] = None
+    web_short_description: Optional[str] = None
+    web_long_description: Optional[str] = None
+    web_sort_order: Optional[int] = None
+    web_visible_when_out_of_stock: Optional[bool] = None
+    web_price_mode: Optional[Literal["visible", "consultar"]] = None
+    web_whatsapp_message: Optional[str] = None
     tile_color: Optional[str] = Field(
         default=None,
         pattern=r"^#([0-9a-fA-F]{6})$",
@@ -147,6 +165,85 @@ class CatalogVersion(BaseModel):
     updated_at: Optional[datetime] = None
     products_count: Optional[int] = None
     groups_count: Optional[int] = None
+
+
+WebCatalogStockStatus = Literal["in_stock", "low_stock", "out_of_stock", "service", "consultar"]
+WebCatalogPriceMode = Literal["visible", "consultar"]
+
+
+class WebCatalogCategory(BaseModel):
+    id: str
+    path: str
+    name: str
+    image_url: Optional[str] = None
+    tile_color: Optional[str] = None
+    product_count: int
+
+
+class WebCatalogCategoryList(BaseModel):
+    items: List[WebCatalogCategory]
+
+
+class WebCatalogProductCard(BaseModel):
+    id: int
+    sku: Optional[str] = None
+    slug: str
+    name: str
+    short_description: Optional[str] = None
+    brand: Optional[str] = None
+    category_path: Optional[str] = None
+    category_name: Optional[str] = None
+    image_url: Optional[str] = None
+    image_thumb_url: Optional[str] = None
+    price_mode: WebCatalogPriceMode
+    price: Optional[float] = None
+    stock_status: WebCatalogStockStatus
+    featured: bool
+
+
+class WebCatalogFilterOption(BaseModel):
+    value: str
+    label: str
+    count: int
+
+
+class WebCatalogFilters(BaseModel):
+    categories: List[WebCatalogFilterOption]
+    brands: List[WebCatalogFilterOption]
+
+
+class WebCatalogProductList(BaseModel):
+    items: List[WebCatalogProductCard]
+    total: int
+    page: int
+    page_size: int
+    filters: WebCatalogFilters
+
+
+class WebCatalogProductDetail(BaseModel):
+    id: int
+    sku: Optional[str] = None
+    slug: str
+    name: str
+    short_description: Optional[str] = None
+    long_description: Optional[str] = None
+    brand: Optional[str] = None
+    category_path: Optional[str] = None
+    category_name: Optional[str] = None
+    image_url: Optional[str] = None
+    image_thumb_url: Optional[str] = None
+    gallery: List[str]
+    price_mode: WebCatalogPriceMode
+    price: Optional[float] = None
+    stock_status: WebCatalogStockStatus
+    specs: Dict[str, str]
+    whatsapp_message: Optional[str] = None
+
+
+class WebCatalogVersion(BaseModel):
+    updated_at: Optional[datetime] = None
+    products_count: int
+    groups_count: int
 
 
 # ===================== INVENTORY =====================

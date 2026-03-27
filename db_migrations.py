@@ -497,6 +497,100 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "investment_status",
                     "TEXT DEFAULT 'active'",
                 )
+                _ensure_column_postgres(connection, "products", "web_slug", "VARCHAR(160)")
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_published",
+                    "BOOLEAN DEFAULT FALSE",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_featured",
+                    "BOOLEAN DEFAULT FALSE",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_short_description",
+                    "VARCHAR(280)",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_long_description",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_sort_order",
+                    "INTEGER DEFAULT 0",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_visible_when_out_of_stock",
+                    "BOOLEAN DEFAULT TRUE",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_price_mode",
+                    "TEXT DEFAULT 'visible'",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_whatsapp_message",
+                    "TEXT",
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_published = FALSE
+                        WHERE web_published IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_featured = FALSE
+                        WHERE web_featured IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_sort_order = 0
+                        WHERE web_sort_order IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_visible_when_out_of_stock = TRUE
+                        WHERE web_visible_when_out_of_stock IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_price_mode = 'visible'
+                        WHERE web_price_mode IS NULL OR btrim(web_price_mode) = ''
+                        """
+                    )
+                )
                 if _table_exists_postgres(connection, "investment_participants"):
                     _ensure_column_postgres(
                         connection,
@@ -1205,6 +1299,65 @@ def run_schema_upgrades(engine: Engine) -> None:
                     )
                 if _table_exists(connection, "products"):
                     _ensure_column(connection, "products", "tenant_id", "INTEGER")
+                    _ensure_column(connection, "products", "web_slug", "TEXT")
+                    _ensure_column(connection, "products", "web_published", "BOOLEAN DEFAULT 0")
+                    _ensure_column(connection, "products", "web_featured", "BOOLEAN DEFAULT 0")
+                    _ensure_column(connection, "products", "web_short_description", "TEXT")
+                    _ensure_column(connection, "products", "web_long_description", "TEXT")
+                    _ensure_column(connection, "products", "web_sort_order", "INTEGER DEFAULT 0")
+                    _ensure_column(
+                        connection,
+                        "products",
+                        "web_visible_when_out_of_stock",
+                        "BOOLEAN DEFAULT 1",
+                    )
+                    _ensure_column(connection, "products", "web_price_mode", "TEXT DEFAULT 'visible'")
+                    _ensure_column(connection, "products", "web_whatsapp_message", "TEXT")
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_published = 0
+                            WHERE web_published IS NULL
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_featured = 0
+                            WHERE web_featured IS NULL
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_sort_order = 0
+                            WHERE web_sort_order IS NULL
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_visible_when_out_of_stock = 1
+                            WHERE web_visible_when_out_of_stock IS NULL
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_price_mode = 'visible'
+                            WHERE web_price_mode IS NULL OR trim(web_price_mode) = ''
+                            """
+                        )
+                    )
                 if _table_exists(connection, "product_groups"):
                     _ensure_column(connection, "product_groups", "tenant_id", "INTEGER")
                 if _table_exists(connection, "payment_methods"):
