@@ -42,11 +42,14 @@ class ProductBase(BaseModel):
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
+    web_name: Optional[str] = None
     web_slug: Optional[str] = None
     web_published: bool = False
     web_featured: bool = False
     web_short_description: Optional[str] = None
     web_long_description: Optional[str] = None
+    web_compare_price: Optional[float] = None
+    web_badge_text: Optional[str] = None
     web_sort_order: int = 0
     web_visible_when_out_of_stock: bool = True
     web_price_mode: Literal["visible", "consultar"] = "visible"
@@ -80,6 +83,7 @@ class ProductUpdate(BaseModel):
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
+    web_name: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
     web_slug: Optional[str] = None
@@ -87,6 +91,8 @@ class ProductUpdate(BaseModel):
     web_featured: Optional[bool] = None
     web_short_description: Optional[str] = None
     web_long_description: Optional[str] = None
+    web_compare_price: Optional[float] = None
+    web_badge_text: Optional[str] = None
     web_sort_order: Optional[int] = None
     web_visible_when_out_of_stock: Optional[bool] = None
     web_price_mode: Optional[Literal["visible", "consultar"]] = None
@@ -189,6 +195,7 @@ class WebCatalogProductCard(BaseModel):
     sku: Optional[str] = None
     slug: str
     name: str
+    badge_text: Optional[str] = None
     short_description: Optional[str] = None
     brand: Optional[str] = None
     category_path: Optional[str] = None
@@ -197,6 +204,7 @@ class WebCatalogProductCard(BaseModel):
     image_thumb_url: Optional[str] = None
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
+    compare_price: Optional[float] = None
     stock_status: WebCatalogStockStatus
     featured: bool
 
@@ -225,6 +233,7 @@ class WebCatalogProductDetail(BaseModel):
     sku: Optional[str] = None
     slug: str
     name: str
+    badge_text: Optional[str] = None
     short_description: Optional[str] = None
     long_description: Optional[str] = None
     brand: Optional[str] = None
@@ -235,6 +244,7 @@ class WebCatalogProductDetail(BaseModel):
     gallery: List[str]
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
+    compare_price: Optional[float] = None
     stock_status: WebCatalogStockStatus
     specs: Dict[str, str]
     whatsapp_message: Optional[str] = None
@@ -1564,6 +1574,189 @@ class PosCustomerFrequentRead(PosCustomerRead):
     sales_count: int
 
 
+class WebCustomerRegisterRequest(BaseModel):
+    name: str
+    email: EmailStr
+    password: Annotated[str, Field(min_length=8)]
+    phone: Optional[str] = None
+    tax_id: Optional[str] = None
+    address: Optional[str] = None
+
+
+class WebCustomerLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class WebCustomerRead(BaseModel):
+    id: int
+    pos_customer_id: int
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    tax_id: Optional[str] = None
+    address: Optional[str] = None
+    email_verified: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class WebCustomerAuthResponse(BaseModel):
+    token: str
+    customer: WebCustomerRead
+    expires_at: datetime
+
+
+class WebCartItemMutationRequest(BaseModel):
+    product_id: int
+    quantity: float = Field(gt=0)
+
+
+class WebCartItemUpdateRequest(BaseModel):
+    quantity: float = Field(ge=0)
+
+
+class WebCartItemRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    product_slug: str
+    product_sku: Optional[str] = None
+    image_url: Optional[str] = None
+    brand: Optional[str] = None
+    stock_status: WebCatalogStockStatus
+    quantity: float
+    unit_price: float
+    line_total: float
+
+
+class WebCartRead(BaseModel):
+    id: int
+    status: str
+    currency: str
+    items: List[WebCartItemRead]
+    items_count: int
+    subtotal: float
+    updated_at: datetime
+
+
+WebOrderStatus = Literal[
+    "draft",
+    "pending_payment",
+    "paid",
+    "processing",
+    "ready",
+    "fulfilled",
+    "cancelled",
+    "payment_failed",
+    "refunded",
+]
+
+WebOrderPaymentStatus = Literal["pending", "approved", "failed", "cancelled", "refunded"]
+WebOrderFulfillmentStatus = Literal["pending", "processing", "ready", "fulfilled", "cancelled"]
+
+
+class WebOrderCreateFromCartRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+class WebOrderItemRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    product_slug: str
+    product_sku: Optional[str] = None
+    image_url: Optional[str] = None
+    quantity: float
+    unit_price: float
+    line_discount_value: float
+    line_total: float
+
+
+class WebOrderPaymentRead(BaseModel):
+    id: int
+    provider: Optional[str] = None
+    provider_reference: Optional[str] = None
+    method: Optional[str] = None
+    status: WebOrderPaymentStatus
+    amount: float
+    currency: str
+    approved_at: Optional[datetime] = None
+    failed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class WebOrderStatusLogRead(BaseModel):
+    id: int
+    from_status: Optional[str] = None
+    to_status: str
+    note: Optional[str] = None
+    actor_type: str
+    actor_user_id: Optional[int] = None
+    created_at: datetime
+
+
+class WebOrderRead(BaseModel):
+    id: int
+    account_id: int
+    pos_customer_id: Optional[int] = None
+    web_order_number: Optional[int] = None
+    document_number: Optional[str] = None
+    status: WebOrderStatus
+    payment_status: WebOrderPaymentStatus
+    fulfillment_status: WebOrderFulfillmentStatus
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_tax_id: Optional[str] = None
+    customer_address: Optional[str] = None
+    subtotal: float
+    discount_amount: float
+    shipping_amount: float
+    total: float
+    currency: str
+    notes: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    paid_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    converted_to_sale_at: Optional[datetime] = None
+    sale_id: Optional[int] = None
+    sale_document_number: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    items: List[WebOrderItemRead]
+    payments: List[WebOrderPaymentRead]
+    status_logs: List[WebOrderStatusLogRead]
+
+
+class WebOrderPaymentRecordRequest(BaseModel):
+    method: str
+    amount: float
+    provider: Optional[str] = None
+    provider_reference: Optional[str] = None
+    status: WebOrderPaymentStatus = "approved"
+    note: Optional[str] = None
+    raw_payload: Dict[str, object] = Field(default_factory=dict)
+
+
+class WebOrderCustomerPaymentSubmissionRequest(BaseModel):
+    method: str
+    amount: float = Field(gt=0)
+    provider: Optional[str] = None
+    provider_reference: Optional[str] = None
+    note: Optional[str] = None
+
+
+class WebOrderStatusUpdateRequest(BaseModel):
+    status: WebOrderStatus
+    note: Optional[str] = None
+
+
+class WebOrderConvertToSaleRequest(BaseModel):
+    note: Optional[str] = None
+
+
 class ReturnPaymentBase(BaseModel):
     method: str
     amount: float
@@ -1744,7 +1937,7 @@ class SeparatedOrderPaymentVoidRequest(BaseModel):
     note: Optional[str] = None
 
 
-DocumentAdjustmentType = Literal["payment", "discount", "note"]
+DocumentAdjustmentType = Literal["payment", "discount", "total", "note"]
 
 
 class DocumentAdjustmentCreate(BaseModel):

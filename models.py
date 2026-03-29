@@ -120,11 +120,14 @@ class Product(Base):
     image_url = Column(String(512), nullable=True)
     image_thumb_url = Column(String(512), nullable=True)
     tile_color = Column(String(7), nullable=True)
+    web_name = Column(String(255), nullable=True)
     web_slug = Column(String(160), nullable=True, index=True)
     web_published = Column(Boolean, nullable=False, default=False)
     web_featured = Column(Boolean, nullable=False, default=False)
     web_short_description = Column(String(280), nullable=True)
     web_long_description = Column(Text, nullable=True)
+    web_compare_price = Column(Float, nullable=True)
+    web_badge_text = Column(String(80), nullable=True)
     web_sort_order = Column(Integer, nullable=False, default=0)
     web_visible_when_out_of_stock = Column(Boolean, nullable=False, default=True)
     web_price_mode = Column(String(24), nullable=False, default="visible")
@@ -836,6 +839,221 @@ class PosCustomer(Base):
     )
 
     sales = relationship("Sale", back_populates="customer")
+    web_accounts = relationship("WebCustomerAccount", back_populates="customer")
+
+
+class WebCustomerAccount(Base):
+    __tablename__ = "web_customer_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "email", name="web_customer_accounts_tenant_email_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    pos_customer_id = Column(Integer, ForeignKey("pos_customers.id"), nullable=False, index=True)
+    email = Column(String(255), nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    email_verified = Column(Boolean, nullable=False, default=False)
+    last_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    customer = relationship("PosCustomer", back_populates="web_accounts")
+    sessions = relationship(
+        "WebCustomerSession",
+        back_populates="account",
+        cascade="all, delete-orphan",
+    )
+
+
+class WebCustomerSession(Base):
+    __tablename__ = "web_customer_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    account_id = Column(Integer, ForeignKey("web_customer_accounts.id"), nullable=False, index=True)
+    token_hash = Column(String(128), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(String, nullable=True)
+
+    account = relationship("WebCustomerAccount", back_populates="sessions")
+
+
+class WebCart(Base):
+    __tablename__ = "web_carts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    account_id = Column(Integer, ForeignKey("web_customer_accounts.id"), nullable=False, index=True)
+    status = Column(String(24), nullable=False, default="active")
+    currency = Column(String(8), nullable=False, default="COP")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    converted_at = Column(DateTime, nullable=True)
+
+    account = relationship("WebCustomerAccount")
+    items = relationship(
+        "WebCartItem",
+        back_populates="cart",
+        cascade="all, delete-orphan",
+    )
+
+
+class WebCartItem(Base):
+    __tablename__ = "web_cart_items"
+    __table_args__ = (
+        UniqueConstraint("cart_id", "product_id", name="web_cart_items_cart_product_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    cart_id = Column(Integer, ForeignKey("web_carts.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    quantity = Column(Float, nullable=False, default=1)
+    unit_price_snapshot = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    cart = relationship("WebCart", back_populates="items")
+    product = relationship("Product")
+
+
+class WebOrder(Base):
+    __tablename__ = "web_orders"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "web_order_number", name="web_orders_tenant_number_key"),
+        UniqueConstraint("tenant_id", "document_number", name="web_orders_tenant_document_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    web_order_number = Column(Integer, index=True, nullable=True)
+    document_number = Column(String, index=True, nullable=True)
+    account_id = Column(Integer, ForeignKey("web_customer_accounts.id"), nullable=False, index=True)
+    pos_customer_id = Column(Integer, ForeignKey("pos_customers.id"), nullable=True, index=True)
+    status = Column(String(32), nullable=False, default="pending_payment")
+    payment_status = Column(String(32), nullable=False, default="pending")
+    fulfillment_status = Column(String(32), nullable=False, default="pending")
+    customer_name = Column(String, nullable=True)
+    customer_email = Column(String, nullable=True)
+    customer_phone = Column(String, nullable=True)
+    customer_tax_id = Column(String, nullable=True)
+    customer_address = Column(String, nullable=True)
+    subtotal = Column(Float, nullable=False, default=0)
+    discount_amount = Column(Float, nullable=False, default=0)
+    shipping_amount = Column(Float, nullable=False, default=0)
+    total = Column(Float, nullable=False, default=0)
+    currency = Column(String(8), nullable=False, default="COP")
+    notes = Column(Text, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    converted_to_sale_at = Column(DateTime, nullable=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True, index=True)
+    sale_document_number = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    account = relationship("WebCustomerAccount")
+    customer = relationship("PosCustomer")
+    sale = relationship("Sale")
+    items = relationship(
+        "WebOrderItem",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+    payments = relationship(
+        "WebOrderPayment",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+    status_logs = relationship(
+        "WebOrderStatusLog",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+
+
+class WebOrderItem(Base):
+    __tablename__ = "web_order_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    web_order_id = Column(Integer, ForeignKey("web_orders.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_name_snapshot = Column(String, nullable=False)
+    product_sku_snapshot = Column(String, nullable=True)
+    product_barcode_snapshot = Column(String, nullable=True)
+    unit_price_snapshot = Column(Float, nullable=False, default=0)
+    quantity = Column(Float, nullable=False, default=1)
+    line_discount_value = Column(Float, nullable=False, default=0)
+    line_total = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("WebOrder", back_populates="items")
+    product = relationship("Product")
+
+
+class WebOrderPayment(Base):
+    __tablename__ = "web_order_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    web_order_id = Column(Integer, ForeignKey("web_orders.id"), nullable=False, index=True)
+    provider = Column(String(64), nullable=True)
+    provider_reference = Column(String, nullable=True)
+    method = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    amount = Column(Float, nullable=False, default=0)
+    currency = Column(String(8), nullable=False, default="COP")
+    raw_payload = Column(JSON, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    failed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("WebOrder", back_populates="payments")
+
+
+class WebOrderStatusLog(Base):
+    __tablename__ = "web_order_status_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    web_order_id = Column(Integer, ForeignKey("web_orders.id"), nullable=False, index=True)
+    from_status = Column(String(32), nullable=True)
+    to_status = Column(String(32), nullable=False)
+    note = Column(Text, nullable=True)
+    actor_type = Column(String(32), nullable=False, default="system")
+    actor_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("WebOrder", back_populates="status_logs")
+    actor_user = relationship("PosUser")
 
 
 class HREmployee(Base):

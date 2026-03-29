@@ -498,6 +498,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "TEXT DEFAULT 'active'",
                 )
                 _ensure_column_postgres(connection, "products", "web_slug", "VARCHAR(160)")
+                _ensure_column_postgres(connection, "products", "web_name", "VARCHAR(255)")
                 _ensure_column_postgres(
                     connection,
                     "products",
@@ -521,6 +522,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "web_long_description",
                     "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_compare_price",
+                    "DOUBLE PRECISION",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_badge_text",
+                    "VARCHAR(80)",
                 )
                 _ensure_column_postgres(
                     connection,
@@ -1300,10 +1313,13 @@ def run_schema_upgrades(engine: Engine) -> None:
                 if _table_exists(connection, "products"):
                     _ensure_column(connection, "products", "tenant_id", "INTEGER")
                     _ensure_column(connection, "products", "web_slug", "TEXT")
+                    _ensure_column(connection, "products", "web_name", "TEXT")
                     _ensure_column(connection, "products", "web_published", "BOOLEAN DEFAULT 0")
                     _ensure_column(connection, "products", "web_featured", "BOOLEAN DEFAULT 0")
                     _ensure_column(connection, "products", "web_short_description", "TEXT")
                     _ensure_column(connection, "products", "web_long_description", "TEXT")
+                    _ensure_column(connection, "products", "web_compare_price", "REAL")
+                    _ensure_column(connection, "products", "web_badge_text", "TEXT")
                     _ensure_column(connection, "products", "web_sort_order", "INTEGER DEFAULT 0")
                     _ensure_column(
                         connection,

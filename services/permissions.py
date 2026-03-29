@@ -259,6 +259,26 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "commerce_web",
+        "label": "Comercio Web",
+        "description": "Operación del canal web: órdenes, pagos y conversión a venta.",
+        "roles": _role_flags(Administrador=True, Supervisor=True),
+        "actions": [
+            {
+                "id": "commerce_web.view",
+                "label": "Ver órdenes web",
+                "description": "Permite consultar el módulo Comercio Web y sus órdenes.",
+                "roles": _role_flags(Administrador=True, Supervisor=True, Auditor=True),
+            },
+            {
+                "id": "commerce_web.manage",
+                "label": "Gestionar órdenes web",
+                "description": "Permite registrar pagos, cambiar estados y convertir órdenes a venta.",
+                "roles": _role_flags(Administrador=True, Supervisor=True),
+            },
+        ],
+    },
+    {
         "id": "settings",
         "label": "Configuración",
         "description": "Preferencias del POS, SMTP y otros ajustes.",

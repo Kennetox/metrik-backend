@@ -102,6 +102,14 @@ TENANT_MODULES: List[TenantModuleDef] = [
         "enabled_by_default": False,
     },
     {
+        "id": "commerce_web",
+        "label": "Comercio Web",
+        "description": "Ordenes web, pagos online y conversion a venta.",
+        "required": False,
+        "platform_visible": True,
+        "enabled_by_default": False,
+    },
+    {
         "id": "sales_history",
         "label": "Historial de ventas",
         "description": "Lectura historica de ventas y seguimiento.",

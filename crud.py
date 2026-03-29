@@ -1568,6 +1568,60 @@ def get_products(
     return products
 
 
+def search_comercio_web_catalog_products(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    q: Optional[str] = None,
+    published_only: Optional[bool] = None,
+    limit: int = 60,
+):
+    query = db.query(models.Product)
+    if tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == tenant_id)
+    if published_only is True:
+        query = query.filter(models.Product.web_published.is_(True))
+    elif published_only is False:
+        query = query.filter(models.Product.web_published.is_(False))
+
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.Product.name.ilike(like),
+                models.Product.web_name.ilike(like),
+                models.Product.sku.ilike(like),
+                models.Product.barcode.ilike(like),
+                models.Product.brand.ilike(like),
+                models.Product.group_name.ilike(like),
+            )
+        )
+
+    products = (
+        query.order_by(
+            models.Product.web_published.desc(),
+            models.Product.web_featured.desc(),
+            models.Product.updated_at.desc(),
+            models.Product.id.desc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    group_names = {p.group_name for p in products if p.group_name}
+    group_map = {}
+    if group_names:
+        groups_query = db.query(models.ProductGroup).filter(models.ProductGroup.path.in_(group_names))
+        if tenant_id is not None:
+            groups_query = groups_query.filter(models.ProductGroup.tenant_id == tenant_id)
+        groups = groups_query.all()
+        group_map = {g.path: g for g in groups}
+
+    for product in products:
+        product.group_meta = group_map.get(product.group_name or "")
+    return products
+
+
 def get_catalog_version(
     db: Session,
     tenant_id: Optional[int] = None,
@@ -1674,11 +1728,17 @@ def create_product(
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
-        web_slug=build_product_web_slug(product_in.web_slug or product_in.name, product_in.sku),
+        web_name=product_in.web_name,
+        web_slug=build_product_web_slug(
+            product_in.web_slug or product_in.web_name or product_in.name,
+            product_in.sku,
+        ),
         web_published=product_in.web_published,
         web_featured=product_in.web_featured,
         web_short_description=product_in.web_short_description,
         web_long_description=product_in.web_long_description,
+        web_compare_price=product_in.web_compare_price,
+        web_badge_text=product_in.web_badge_text,
         web_sort_order=product_in.web_sort_order,
         web_visible_when_out_of_stock=product_in.web_visible_when_out_of_stock,
         web_price_mode=product_in.web_price_mode,
@@ -1698,7 +1758,10 @@ def update_product(
 ):
     data = product_in.dict(exclude_unset=True)
     if "web_slug" in data:
-        data["web_slug"] = build_product_web_slug(data.get("web_slug") or data.get("name"))
+        data["web_slug"] = build_product_web_slug(
+            data.get("web_slug") or data.get("web_name") or data.get("name") or db_product.name,
+            data.get("sku") or db_product.sku,
+        )
     now = datetime.utcnow()
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
@@ -2095,6 +2158,13 @@ def resolve_product_web_slug(product: models.Product) -> str:
     return build_product_web_slug(product.name, product.sku)
 
 
+def resolve_product_web_name(product: models.Product) -> str:
+    manual = (product.web_name or "").strip()
+    if manual:
+        return manual
+    return product.name
+
+
 def resolve_web_product_stock_status(
     product: models.Product,
     qty_on_hand: Optional[float],
@@ -2359,7 +2429,8 @@ def get_web_catalog_products(
                 id=product.id,
                 sku=product.sku,
                 slug=resolve_product_web_slug(product),
-                name=product.name,
+                name=resolve_product_web_name(product),
+                badge_text=(product.web_badge_text or None),
                 short_description=product.web_short_description,
                 brand=product.brand,
                 category_path=product.group_name,
@@ -2368,6 +2439,11 @@ def get_web_catalog_products(
                 image_thumb_url=product.image_thumb_url,
                 price_mode=price_mode,
                 price=price,
+                compare_price=(
+                    float(product.web_compare_price)
+                    if product.web_compare_price is not None and price_mode == "visible"
+                    else None
+                ),
                 stock_status=stock_status,
                 featured=bool(product.web_featured),
             )
@@ -2431,7 +2507,8 @@ def get_web_catalog_product_by_slug(
             id=product.id,
             sku=product.sku,
             slug=resolved_slug,
-            name=product.name,
+            name=resolve_product_web_name(product),
+            badge_text=(product.web_badge_text or None),
             short_description=product.web_short_description,
             long_description=product.web_long_description,
             brand=product.brand,
@@ -2442,6 +2519,11 @@ def get_web_catalog_product_by_slug(
             gallery=[url for url in [product.image_url, product.image_thumb_url] if url],
             price_mode=price_mode,
             price=(float(product.price) if price_mode == "visible" else None),
+            compare_price=(
+                float(product.web_compare_price)
+                if product.web_compare_price is not None and price_mode == "visible"
+                else None
+            ),
             stock_status=stock_status,
             specs={},
             whatsapp_message=product.web_whatsapp_message,
@@ -6166,6 +6248,985 @@ def soft_delete_pos_customer(db: Session, customer: models.PosCustomer):
     db.commit()
     db.refresh(customer)
     return customer
+
+
+def get_web_customer_account(
+    db: Session,
+    account_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.WebCustomerAccount]:
+    query = (
+        db.query(models.WebCustomerAccount)
+        .options(joinedload(models.WebCustomerAccount.customer))
+        .filter(models.WebCustomerAccount.id == account_id)
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebCustomerAccount.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def get_web_customer_account_by_email(
+    db: Session,
+    email: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.WebCustomerAccount]:
+    query = (
+        db.query(models.WebCustomerAccount)
+        .options(joinedload(models.WebCustomerAccount.customer))
+        .filter(func.lower(models.WebCustomerAccount.email) == email.strip().lower())
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebCustomerAccount.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def _find_pos_customer_by_email(
+    db: Session,
+    email: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosCustomer]:
+    query = db.query(models.PosCustomer).filter(func.lower(models.PosCustomer.email) == email.strip().lower())
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def create_web_customer_account(
+    db: Session,
+    payload: schemas.WebCustomerRegisterRequest,
+    tenant_id: Optional[int] = None,
+) -> models.WebCustomerAccount:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    normalized_email = payload.email.strip().lower()
+    existing = get_web_customer_account_by_email(db, normalized_email, tenant_id=effective_tenant_id)
+    if existing:
+        raise ValueError("Ya existe una cuenta registrada con ese correo")
+
+    customer = _find_pos_customer_by_email(db, normalized_email, tenant_id=effective_tenant_id)
+    if customer:
+        customer.name = payload.name
+        customer.phone = payload.phone
+        customer.tax_id = payload.tax_id
+        customer.address = payload.address
+        customer.is_active = True
+    else:
+        customer = models.PosCustomer(
+            tenant_id=effective_tenant_id,
+            name=payload.name,
+            phone=payload.phone,
+            email=normalized_email,
+            tax_id=payload.tax_id,
+            address=payload.address,
+            is_active=True,
+        )
+        db.add(customer)
+        db.flush()
+
+    account = models.WebCustomerAccount(
+        tenant_id=effective_tenant_id,
+        pos_customer_id=customer.id,
+        email=normalized_email,
+        password_hash=hash_password(payload.password),
+        is_active=True,
+        email_verified=False,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return get_web_customer_account(db, account.id, tenant_id=effective_tenant_id)
+
+
+def revoke_web_customer_sessions(
+    db: Session,
+    account_id: int,
+    reason: str = "replaced",
+) -> None:
+    now = datetime.utcnow()
+    (
+        db.query(models.WebCustomerSession)
+        .filter(
+            models.WebCustomerSession.account_id == account_id,
+            models.WebCustomerSession.revoked_at.is_(None),
+        )
+        .update(
+            {
+                models.WebCustomerSession.revoked_at: now,
+                models.WebCustomerSession.revoked_reason: reason,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+
+
+def create_web_customer_session(
+    db: Session,
+    account_id: int,
+    token: str,
+    expires_at: datetime,
+) -> models.WebCustomerSession:
+    account = get_web_customer_account(db, account_id)
+    if not account:
+        raise ValueError("Cuenta web no encontrada")
+    session = models.WebCustomerSession(
+        tenant_id=account.tenant_id,
+        account_id=account.id,
+        token_hash=_session_token_hash(token),
+        created_at=datetime.utcnow(),
+        last_seen_at=datetime.utcnow(),
+        expires_at=expires_at,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_web_customer_session_by_token(
+    db: Session,
+    token: str,
+) -> Optional[models.WebCustomerSession]:
+    return (
+        db.query(models.WebCustomerSession)
+        .options(
+            joinedload(models.WebCustomerSession.account).joinedload(models.WebCustomerAccount.customer)
+        )
+        .filter(models.WebCustomerSession.token_hash == _session_token_hash(token))
+        .first()
+    )
+
+
+def get_active_web_cart(
+    db: Session,
+    account_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.WebCart]:
+    query = (
+        db.query(models.WebCart)
+        .options(
+            joinedload(models.WebCart.items).joinedload(models.WebCartItem.product)
+        )
+        .filter(
+            models.WebCart.account_id == account_id,
+            models.WebCart.status == "active",
+        )
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebCart.tenant_id == effective_tenant_id)
+    return query.order_by(models.WebCart.updated_at.desc()).first()
+
+
+def get_or_create_active_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+) -> models.WebCart:
+    cart = get_active_web_cart(db, account.id, tenant_id=account.tenant_id)
+    if cart:
+        return cart
+    cart = models.WebCart(
+        tenant_id=account.tenant_id,
+        account_id=account.id,
+        status="active",
+        currency="COP",
+    )
+    db.add(cart)
+    db.commit()
+    db.refresh(cart)
+    return get_active_web_cart(db, account.id, tenant_id=account.tenant_id)
+
+
+def _get_cart_item(
+    db: Session,
+    cart_id: int,
+    product_id: int,
+) -> Optional[models.WebCartItem]:
+    return (
+        db.query(models.WebCartItem)
+        .filter(
+            models.WebCartItem.cart_id == cart_id,
+            models.WebCartItem.product_id == product_id,
+        )
+        .first()
+    )
+
+
+def _get_web_cart_stock_snapshot(
+    db: Session,
+    tenant_id: Optional[int],
+    product_ids: list[int],
+) -> dict[int, float]:
+    if not product_ids:
+        return {}
+    rows = (
+        db.query(
+            models.InventoryMovement.product_id,
+            func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty_on_hand"),
+        )
+        .filter(models.InventoryMovement.product_id.in_(product_ids))
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .group_by(models.InventoryMovement.product_id)
+        .all()
+    )
+    return {int(product_id): float(qty_on_hand or 0.0) for product_id, qty_on_hand in rows}
+
+
+def _serialize_web_cart(
+    db: Session,
+    cart: models.WebCart,
+) -> schemas.WebCartRead:
+    items = list(cart.items or [])
+    product_ids = [item.product_id for item in items]
+    qty_by_product = _get_web_cart_stock_snapshot(db, cart.tenant_id, product_ids)
+    serialized_items: list[schemas.WebCartItemRead] = []
+    subtotal = 0.0
+
+    for item in items:
+        product = item.product
+        if not product:
+            continue
+        unit_price = float(item.unit_price_snapshot or product.price or 0.0)
+        quantity = float(item.quantity or 0.0)
+        line_total = unit_price * quantity
+        subtotal += line_total
+        serialized_items.append(
+            schemas.WebCartItemRead(
+                id=item.id,
+                product_id=product.id,
+                product_name=product.name,
+                product_slug=resolve_product_web_slug(product),
+                product_sku=product.sku,
+                image_url=product.image_url,
+                brand=product.brand,
+                stock_status=resolve_web_product_stock_status(product, qty_by_product.get(product.id, 0.0)),
+                quantity=quantity,
+                unit_price=unit_price,
+                line_total=line_total,
+            )
+        )
+
+    return schemas.WebCartRead(
+        id=cart.id,
+        status=cart.status,
+        currency=cart.currency,
+        items=serialized_items,
+        items_count=len(serialized_items),
+        subtotal=subtotal,
+        updated_at=cart.updated_at,
+    )
+
+
+def get_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    return _serialize_web_cart(db, cart)
+
+
+def add_item_to_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+    payload: schemas.WebCartItemMutationRequest,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    product = get_product(db, payload.product_id, tenant_id=account.tenant_id)
+    if not product or not product.active or not product.web_published:
+        raise ValueError("Producto no disponible para web")
+
+    existing = _get_cart_item(db, cart.id, product.id)
+    if existing:
+        existing.quantity = float(existing.quantity or 0.0) + float(payload.quantity)
+        existing.unit_price_snapshot = float(product.price or 0.0)
+    else:
+        existing = models.WebCartItem(
+            tenant_id=cart.tenant_id,
+            cart_id=cart.id,
+            product_id=product.id,
+            quantity=float(payload.quantity),
+            unit_price_snapshot=float(product.price or 0.0),
+        )
+        db.add(existing)
+
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+    return get_web_cart(db, account)
+
+
+def update_web_cart_item_quantity(
+    db: Session,
+    account: models.WebCustomerAccount,
+    product_id: int,
+    quantity: float,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    item = _get_cart_item(db, cart.id, product_id)
+    if not item:
+        raise ValueError("Producto no existe en el carrito")
+
+    if quantity <= 0:
+        db.delete(item)
+    else:
+        item.quantity = float(quantity)
+
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+    return get_web_cart(db, account)
+
+
+def clear_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    for item in list(cart.items or []):
+        db.delete(item)
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+    return get_web_cart(db, account)
+
+
+def get_next_web_order_number(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> int:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    orders_query = db.query(models.WebOrder)
+    if effective_tenant_id is not None:
+        orders_query = orders_query.filter(models.WebOrder.tenant_id == effective_tenant_id)
+    max_number = orders_query.with_entities(func.max(models.WebOrder.web_order_number)).scalar()
+    max_id = orders_query.with_entities(func.max(models.WebOrder.id)).scalar()
+    candidates = [value for value in [max_number, max_id] if value is not None]
+    current = int(max(candidates)) if candidates else 0
+    return current + 1
+
+
+def _create_web_order_status_log(
+    db: Session,
+    order: models.WebOrder,
+    *,
+    from_status: str | None,
+    to_status: str,
+    note: str | None = None,
+    actor_type: str = "system",
+    actor_user_id: int | None = None,
+) -> models.WebOrderStatusLog:
+    log = models.WebOrderStatusLog(
+        tenant_id=order.tenant_id,
+        web_order_id=order.id,
+        from_status=from_status,
+        to_status=to_status,
+        note=note,
+        actor_type=actor_type,
+        actor_user_id=actor_user_id,
+    )
+    db.add(log)
+    return log
+
+
+def get_web_order(
+    db: Session,
+    order_id: int,
+    account_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.WebOrder]:
+    query = (
+        db.query(models.WebOrder)
+        .options(
+            joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
+            joinedload(models.WebOrder.payments),
+            joinedload(models.WebOrder.status_logs),
+        )
+        .filter(
+            models.WebOrder.id == order_id,
+            models.WebOrder.account_id == account_id,
+        )
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebOrder.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def list_web_orders(
+    db: Session,
+    account: models.WebCustomerAccount,
+    limit: int = 50,
+) -> list[models.WebOrder]:
+    return (
+        db.query(models.WebOrder)
+        .options(
+            joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
+            joinedload(models.WebOrder.payments),
+            joinedload(models.WebOrder.status_logs),
+        )
+        .filter(
+            models.WebOrder.account_id == account.id,
+            models.WebOrder.tenant_id == account.tenant_id
+            if account.tenant_id is not None
+            else true(),
+        )
+        .order_by(models.WebOrder.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def _serialize_web_order(
+    order: models.WebOrder,
+) -> schemas.WebOrderRead:
+    items = [
+        schemas.WebOrderItemRead(
+            id=item.id,
+            product_id=item.product_id,
+            product_name=item.product_name_snapshot,
+            product_slug=(resolve_product_web_slug(item.product) if item.product else build_product_web_slug(item.product_name_snapshot, item.product_sku_snapshot)),
+            product_sku=item.product_sku_snapshot,
+            image_url=(item.product.image_url if item.product else None),
+            quantity=float(item.quantity or 0.0),
+            unit_price=float(item.unit_price_snapshot or 0.0),
+            line_discount_value=float(item.line_discount_value or 0.0),
+            line_total=float(item.line_total or 0.0),
+        )
+        for item in (order.items or [])
+    ]
+    payments = [
+        schemas.WebOrderPaymentRead(
+            id=payment.id,
+            provider=payment.provider,
+            provider_reference=payment.provider_reference,
+            method=payment.method,
+            status=payment.status,
+            amount=float(payment.amount or 0.0),
+            currency=payment.currency,
+            approved_at=payment.approved_at,
+            failed_at=payment.failed_at,
+            cancelled_at=payment.cancelled_at,
+            created_at=payment.created_at,
+        )
+        for payment in (order.payments or [])
+    ]
+    status_logs = [
+        schemas.WebOrderStatusLogRead(
+            id=log.id,
+            from_status=log.from_status,
+            to_status=log.to_status,
+            note=log.note,
+            actor_type=log.actor_type,
+            actor_user_id=log.actor_user_id,
+            created_at=log.created_at,
+        )
+        for log in sorted(order.status_logs or [], key=lambda row: row.created_at)
+    ]
+    return schemas.WebOrderRead(
+        id=order.id,
+        account_id=order.account_id,
+        pos_customer_id=order.pos_customer_id,
+        web_order_number=order.web_order_number,
+        document_number=order.document_number,
+        status=order.status,
+        payment_status=order.payment_status,
+        fulfillment_status=order.fulfillment_status,
+        customer_name=order.customer_name,
+        customer_email=order.customer_email,
+        customer_phone=order.customer_phone,
+        customer_tax_id=order.customer_tax_id,
+        customer_address=order.customer_address,
+        subtotal=float(order.subtotal or 0.0),
+        discount_amount=float(order.discount_amount or 0.0),
+        shipping_amount=float(order.shipping_amount or 0.0),
+        total=float(order.total or 0.0),
+        currency=order.currency,
+        notes=order.notes,
+        submitted_at=order.submitted_at,
+        paid_at=order.paid_at,
+        cancelled_at=order.cancelled_at,
+        converted_to_sale_at=order.converted_to_sale_at,
+        sale_id=order.sale_id,
+        sale_document_number=order.sale_document_number,
+        created_at=order.created_at,
+        updated_at=order.updated_at,
+        items=items,
+        payments=payments,
+        status_logs=status_logs,
+    )
+
+
+def get_backoffice_web_order(
+    db: Session,
+    order_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.WebOrder]:
+    query = (
+        db.query(models.WebOrder)
+        .options(
+            joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
+            joinedload(models.WebOrder.payments),
+            joinedload(models.WebOrder.status_logs),
+        )
+        .filter(models.WebOrder.id == order_id)
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebOrder.tenant_id == effective_tenant_id)
+    return query.first()
+
+
+def list_backoffice_web_orders(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    limit: int = 100,
+    status: Optional[str] = None,
+    payment_status: Optional[str] = None,
+    search: Optional[str] = None,
+) -> list[models.WebOrder]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.WebOrder).options(
+        joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
+        joinedload(models.WebOrder.payments),
+        joinedload(models.WebOrder.status_logs),
+    )
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebOrder.tenant_id == effective_tenant_id)
+    if status:
+        query = query.filter(models.WebOrder.status == status)
+    if payment_status:
+        query = query.filter(models.WebOrder.payment_status == payment_status)
+    term = _clean_field(search)
+    if term:
+        like_term = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.WebOrder.document_number.ilike(like_term),
+                models.WebOrder.customer_name.ilike(like_term),
+                models.WebOrder.customer_email.ilike(like_term),
+                models.WebOrder.customer_phone.ilike(like_term),
+            )
+        )
+    return query.order_by(models.WebOrder.created_at.desc()).limit(limit).all()
+
+
+def _transition_web_order_status(
+    db: Session,
+    order: models.WebOrder,
+    *,
+    to_status: str,
+    note: str | None = None,
+    actor_type: str = "system",
+    actor_user_id: int | None = None,
+) -> models.WebOrder:
+    to_status = (to_status or "").strip()
+    if not to_status:
+        raise ValueError("Debe indicar un estado para la orden web")
+
+    current_status = order.status
+    if current_status == to_status:
+        return order
+
+    paid_statuses = {"paid", "processing", "ready", "fulfilled"}
+    if to_status in paid_statuses and order.payment_status != "approved":
+        raise ValueError("La orden debe tener pago aprobado antes de avanzar en fulfillment")
+    if to_status == "fulfilled" and order.sale_id is None:
+        raise ValueError("La orden debe convertirse en venta antes de marcarse como entregada")
+    if current_status in {"cancelled", "refunded"} and to_status not in {"refunded"}:
+        raise ValueError("La orden ya está cerrada y no puede volver a un estado operativo")
+
+    order.status = to_status
+    if to_status == "pending_payment":
+        order.fulfillment_status = "pending"
+        order.payment_status = "pending"
+        order.paid_at = None
+    elif to_status == "payment_failed":
+        order.payment_status = "failed"
+        order.fulfillment_status = "pending"
+    elif to_status == "paid":
+        order.payment_status = "approved"
+        order.fulfillment_status = "pending"
+        order.paid_at = order.paid_at or datetime.utcnow()
+    elif to_status == "processing":
+        order.payment_status = "approved"
+        order.fulfillment_status = "processing"
+        order.paid_at = order.paid_at or datetime.utcnow()
+    elif to_status == "ready":
+        order.payment_status = "approved"
+        order.fulfillment_status = "ready"
+        order.paid_at = order.paid_at or datetime.utcnow()
+    elif to_status == "fulfilled":
+        order.payment_status = "approved"
+        order.fulfillment_status = "fulfilled"
+        order.paid_at = order.paid_at or datetime.utcnow()
+    elif to_status == "cancelled":
+        order.fulfillment_status = "cancelled"
+        order.cancelled_at = order.cancelled_at or datetime.utcnow()
+        if order.payment_status == "pending":
+            order.payment_status = "cancelled"
+    elif to_status == "refunded":
+        order.payment_status = "refunded"
+        order.fulfillment_status = "cancelled"
+        order.cancelled_at = order.cancelled_at or datetime.utcnow()
+
+    order.updated_at = datetime.utcnow()
+    _create_web_order_status_log(
+        db,
+        order,
+        from_status=current_status,
+        to_status=to_status,
+        note=_clean_field(note),
+        actor_type=actor_type,
+        actor_user_id=actor_user_id,
+    )
+    return order
+
+
+def record_web_order_payment(
+    db: Session,
+    order: models.WebOrder,
+    payload: schemas.WebOrderPaymentRecordRequest,
+    *,
+    actor_user_id: int | None = None,
+) -> schemas.WebOrderRead:
+    if order.status in {"cancelled", "refunded"}:
+        raise ValueError("La orden no admite pagos en su estado actual")
+
+    amount = float(payload.amount or 0.0)
+    if amount <= 0:
+        raise ValueError("El monto del pago debe ser mayor que cero")
+
+    payment_status = payload.status or "approved"
+    payment = models.WebOrderPayment(
+        tenant_id=order.tenant_id,
+        web_order_id=order.id,
+        provider=_clean_field(payload.provider),
+        provider_reference=_clean_field(payload.provider_reference),
+        method=_clean_field(payload.method),
+        status=payment_status,
+        amount=amount,
+        currency=order.currency,
+        raw_payload=payload.raw_payload or {},
+        approved_at=datetime.utcnow() if payment_status == "approved" else None,
+        failed_at=datetime.utcnow() if payment_status == "failed" else None,
+        cancelled_at=datetime.utcnow() if payment_status == "cancelled" else None,
+    )
+    db.add(payment)
+
+    transition_note = payload.note
+    if payment_status == "approved":
+        order.payment_status = "approved"
+        order.paid_at = order.paid_at or datetime.utcnow()
+        if order.status in {"pending_payment", "payment_failed"}:
+            _transition_web_order_status(
+                db,
+                order,
+                to_status="paid",
+                note=transition_note or "Pago aprobado registrado en Comercio Web",
+                actor_type="pos_user",
+                actor_user_id=actor_user_id,
+            )
+    elif payment_status == "failed":
+        _transition_web_order_status(
+            db,
+            order,
+            to_status="payment_failed",
+            note=transition_note or "Pago fallido registrado en Comercio Web",
+            actor_type="pos_user",
+            actor_user_id=actor_user_id,
+        )
+    elif payment_status == "cancelled":
+        order.payment_status = "cancelled"
+        order.updated_at = datetime.utcnow()
+    elif payment_status == "refunded":
+        _transition_web_order_status(
+            db,
+            order,
+            to_status="refunded",
+            note=transition_note or "Pago reembolsado registrado en Comercio Web",
+            actor_type="pos_user",
+            actor_user_id=actor_user_id,
+        )
+    else:
+        order.updated_at = datetime.utcnow()
+
+    db.commit()
+    stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+    if not stored:
+        raise ValueError("No se pudo recuperar la orden actualizada")
+    return _serialize_web_order(stored)
+
+
+def submit_customer_web_order_payment(
+    db: Session,
+    order: models.WebOrder,
+    payload: schemas.WebOrderCustomerPaymentSubmissionRequest,
+) -> schemas.WebOrderRead:
+    if order.status in {"cancelled", "refunded", "fulfilled"}:
+        raise ValueError("La orden no admite nuevos pagos en su estado actual")
+    if order.payment_status == "approved":
+        raise ValueError("La orden ya tiene un pago aprobado")
+
+    amount = float(payload.amount or 0.0)
+    if amount <= 0:
+        raise ValueError("El monto reportado debe ser mayor que cero")
+
+    payment = models.WebOrderPayment(
+        tenant_id=order.tenant_id,
+        web_order_id=order.id,
+        provider=_clean_field(payload.provider) or "manual_transfer",
+        provider_reference=_clean_field(payload.provider_reference),
+        method=_clean_field(payload.method) or "transferencia",
+        status="pending",
+        amount=amount,
+        currency=order.currency,
+        raw_payload={},
+    )
+    db.add(payment)
+
+    if order.status == "payment_failed":
+        _transition_web_order_status(
+            db,
+            order,
+            to_status="pending_payment",
+            note="Cliente registró un nuevo comprobante de pago",
+            actor_type="customer",
+        )
+
+    order.updated_at = datetime.utcnow()
+    _create_web_order_status_log(
+        db,
+        order,
+        from_status=order.status,
+        to_status=order.status,
+        note=_clean_field(payload.note)
+        or f"Cliente reportó pago manual por {amount:.2f} {order.currency}",
+        actor_type="customer",
+    )
+
+    db.commit()
+    stored = get_web_order(db, order.id, order.account_id, tenant_id=order.tenant_id)
+    if not stored:
+        raise ValueError("No se pudo recuperar la orden actualizada")
+    return _serialize_web_order(stored)
+
+
+def update_backoffice_web_order_status(
+    db: Session,
+    order: models.WebOrder,
+    payload: schemas.WebOrderStatusUpdateRequest,
+    *,
+    actor_user_id: int | None = None,
+) -> schemas.WebOrderRead:
+    _transition_web_order_status(
+        db,
+        order,
+        to_status=payload.status,
+        note=payload.note,
+        actor_type="pos_user",
+        actor_user_id=actor_user_id,
+    )
+    db.commit()
+    stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+    if not stored:
+        raise ValueError("No se pudo recuperar la orden actualizada")
+    return _serialize_web_order(stored)
+
+
+def convert_web_order_to_sale(
+    db: Session,
+    order: models.WebOrder,
+    payload: schemas.WebOrderConvertToSaleRequest,
+    *,
+    actor_user_id: int | None = None,
+) -> schemas.WebOrderRead:
+    if order.sale_id is not None:
+        stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        if not stored:
+            raise ValueError("No se pudo recuperar la orden convertida")
+        return _serialize_web_order(stored)
+    if order.payment_status != "approved":
+        raise ValueError("La orden debe tener pago aprobado antes de convertirse en venta")
+    if not order.items:
+        raise ValueError("La orden no tiene items para convertir")
+
+    approved_payments = [payment for payment in (order.payments or []) if payment.status == "approved"]
+    if not approved_payments:
+        raise ValueError("No hay pagos aprobados para convertir la orden en venta")
+
+    paid_amount = round(sum(float(payment.amount or 0.0) for payment in approved_payments), 2)
+    total_amount = round(float(order.total or 0.0), 2)
+    if paid_amount + 0.01 < total_amount:
+        raise ValueError("Los pagos aprobados no cubren el total de la orden")
+
+    sale_notes = [f"Generada desde Comercio Web: {order.document_number}"]
+    if order.notes:
+        sale_notes.append(order.notes)
+    if payload.note:
+        sale_notes.append(payload.note)
+
+    sale_payload = schemas.SaleCreate(
+        payment_method=_clean_field(approved_payments[0].method) or "online",
+        total=total_amount,
+        paid_amount=paid_amount,
+        change_amount=max(0.0, paid_amount - total_amount),
+        cart_discount_value=float(order.discount_amount or 0.0),
+        cart_discount_percent=0.0,
+        surcharge_amount=float(order.shipping_amount or 0.0),
+        surcharge_label="Envío" if float(order.shipping_amount or 0.0) > 0 else None,
+        customer_name=order.customer_name,
+        customer_id=order.pos_customer_id,
+        customer_phone=order.customer_phone,
+        customer_email=order.customer_email,
+        customer_tax_id=order.customer_tax_id,
+        customer_address=order.customer_address,
+        notes=" | ".join(part for part in sale_notes if part),
+        pos_name="POS Web",
+        station_id=None,
+        vendor_name="Comercio Web",
+        items=[
+            schemas.SaleItemCreate(
+                product_id=item.product_id,
+                quantity=float(item.quantity or 0.0),
+                unit_price=float(item.unit_price_snapshot or 0.0),
+                unit_price_original=float(item.unit_price_snapshot or 0.0),
+                product_sku=item.product_sku_snapshot,
+                product_name=item.product_name_snapshot,
+                product_barcode=item.product_barcode_snapshot,
+                discount=float(item.line_discount_value or 0.0),
+                line_discount_value=float(item.line_discount_value or 0.0),
+            )
+            for item in order.items
+        ],
+        payments=[
+            schemas.SalePaymentCreate(
+                method=_clean_field(payment.method) or "online",
+                amount=float(payment.amount or 0.0),
+            )
+            for payment in approved_payments
+        ],
+    )
+    sale = create_sale(db, sale_payload, created_by_user_id=actor_user_id)
+
+    order.sale_id = sale.id
+    order.sale_document_number = sale.document_number
+    order.converted_to_sale_at = datetime.utcnow()
+    if order.status in {"paid", "pending_payment", "payment_failed"}:
+        _transition_web_order_status(
+            db,
+            order,
+            to_status="processing",
+            note=f"Orden convertida a venta {sale.document_number}",
+            actor_type="pos_user",
+            actor_user_id=actor_user_id,
+        )
+    else:
+        order.updated_at = datetime.utcnow()
+        _create_web_order_status_log(
+            db,
+            order,
+            from_status=order.status,
+            to_status=order.status,
+            note=f"Orden vinculada a venta {sale.document_number}",
+            actor_type="pos_user",
+            actor_user_id=actor_user_id,
+        )
+
+    db.commit()
+    stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+    if not stored:
+        raise ValueError("No se pudo recuperar la orden convertida")
+    return _serialize_web_order(stored)
+
+
+def create_web_order_from_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+    payload: schemas.WebOrderCreateFromCartRequest,
+) -> schemas.WebOrderRead:
+    cart = get_active_web_cart(db, account.id, tenant_id=account.tenant_id)
+    if not cart or not cart.items:
+        raise ValueError("El carrito está vacío")
+
+    number = get_next_web_order_number(db, tenant_id=account.tenant_id)
+    document_number = f"OW-{number:06d}"
+
+    subtotal = 0.0
+    order = models.WebOrder(
+        tenant_id=account.tenant_id,
+        web_order_number=number,
+        document_number=document_number,
+        account_id=account.id,
+        pos_customer_id=account.pos_customer_id,
+        status="pending_payment",
+        payment_status="pending",
+        fulfillment_status="pending",
+        customer_name=(account.customer.name if account.customer else None),
+        customer_email=account.email,
+        customer_phone=(account.customer.phone if account.customer else None),
+        customer_tax_id=(account.customer.tax_id if account.customer else None),
+        customer_address=(account.customer.address if account.customer else None),
+        subtotal=0.0,
+        discount_amount=0.0,
+        shipping_amount=0.0,
+        total=0.0,
+        currency=cart.currency,
+        notes=_clean_field(payload.notes),
+        submitted_at=datetime.utcnow(),
+    )
+    db.add(order)
+    db.flush()
+
+    for cart_item in cart.items:
+        product = cart_item.product
+        if not product or not product.active or not product.web_published:
+            raise ValueError("El carrito contiene productos no disponibles para web")
+        unit_price = float(cart_item.unit_price_snapshot or product.price or 0.0)
+        quantity = float(cart_item.quantity or 0.0)
+        line_total = unit_price * quantity
+        subtotal += line_total
+        db.add(
+            models.WebOrderItem(
+                tenant_id=order.tenant_id,
+                web_order_id=order.id,
+                product_id=product.id,
+                product_name_snapshot=product.name,
+                product_sku_snapshot=product.sku,
+                product_barcode_snapshot=product.barcode,
+                unit_price_snapshot=unit_price,
+                quantity=quantity,
+                line_discount_value=0.0,
+                line_total=line_total,
+            )
+        )
+
+    order.subtotal = subtotal
+    order.total = subtotal
+    _create_web_order_status_log(
+        db,
+        order,
+        from_status=None,
+        to_status=order.status,
+        note="Orden creada desde carrito web",
+        actor_type="customer",
+    )
+
+    cart.status = "converted"
+    cart.converted_at = datetime.utcnow()
+    cart.updated_at = datetime.utcnow()
+
+    db.commit()
+    created = get_web_order(db, order.id, account.id, tenant_id=account.tenant_id)
+    if not created:
+        raise ValueError("No se pudo recuperar la orden web creada")
+    return _serialize_web_order(created)
 
 
 # ===================== POS CLOSURES =====================

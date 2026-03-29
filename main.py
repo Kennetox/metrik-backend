@@ -27,6 +27,10 @@ from routers import (
     manual_movements as manual_movements_router,
     hr as hr_router,
     web_catalog as web_catalog_router,
+    web_customers as web_customers_router,
+    web_cart as web_cart_router,
+    web_orders as web_orders_router,
+    comercio_web as comercio_web_router,
     platform as platform_router,
     investment as investment_router,
 )
@@ -129,6 +133,10 @@ app.include_router(stock_devices_router.router)
 app.include_router(manual_movements_router.router)
 app.include_router(hr_router.router)
 app.include_router(web_catalog_router.router)
+app.include_router(web_customers_router.router)
+app.include_router(web_cart_router.router)
+app.include_router(web_orders_router.router)
+app.include_router(comercio_web_router.router)
 app.include_router(platform_router.router)
 app.include_router(investment_router.router)
 if ENABLE_SCHEDULE_MODULE:
