@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import List, Optional
 import unicodedata
 import os
@@ -93,6 +94,8 @@ def list_separated_orders(
     sale_number: Optional[int] = Query(default=None),
     customer: Optional[str] = Query(default=None),
     status_filter: Optional[str] = Query(default=None, alias="status"),
+    date_from: Optional[datetime] = Query(default=None),
+    date_to: Optional[datetime] = Query(default=None),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -109,6 +112,8 @@ def list_separated_orders(
         sale_number=sale_number,
         customer=customer,
         status=status_filter,
+        date_from=date_from,
+        date_to=date_to,
         tenant_id=tenant_id,
     )
 

@@ -569,6 +569,8 @@ def list_inventory_recounts(
         default=None,
         alias="source",
     ),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -584,10 +586,19 @@ def list_inventory_recounts(
         base_query = base_query.filter(models.InventoryRecount.status == status_filter)
     if source_filter:
         base_query = base_query.filter(models.InventoryRecount.source == source_filter)
+    effective_date = func.coalesce(
+        models.InventoryRecount.applied_at,
+        models.InventoryRecount.closed_at,
+        models.InventoryRecount.created_at,
+    )
+    if date_from:
+        base_query = base_query.filter(effective_date >= date_from)
+    if date_to:
+        base_query = base_query.filter(effective_date < date_to)
 
     total = int(base_query.with_entities(func.count(models.InventoryRecount.id)).scalar() or 0)
     rows = (
-        base_query.order_by(models.InventoryRecount.created_at.desc())
+        base_query.order_by(effective_date.desc(), models.InventoryRecount.id.desc())
         .offset(skip)
         .limit(limit)
         .all()

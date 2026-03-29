@@ -1258,6 +1258,8 @@ def list_manual_movement_documents(
     *,
     status: str | None = None,
     kind: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
     skip: int = 0,
     limit: int = 50,
     tenant_id: int | None = None,
@@ -1275,6 +1277,10 @@ def list_manual_movement_documents(
         if status == "closed"
         else models.ManualMovementDocument.created_at
     )
+    if date_from is not None:
+        query = query.filter(order_col >= date_from)
+    if date_to is not None:
+        query = query.filter(order_col < date_to)
     return (
         query.order_by(order_col.desc(), models.ManualMovementDocument.id.desc())
         .offset(skip)
@@ -1288,6 +1294,8 @@ def count_manual_movement_documents(
     *,
     status: str | None = None,
     kind: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
     tenant_id: int | None = None,
 ) -> int:
     query = db.query(func.count(models.ManualMovementDocument.id))
@@ -1298,6 +1306,15 @@ def count_manual_movement_documents(
         query = query.filter(models.ManualMovementDocument.status == status)
     if kind:
         query = query.filter(models.ManualMovementDocument.kind == kind)
+    order_col = (
+        models.ManualMovementDocument.closed_at
+        if status == "closed"
+        else models.ManualMovementDocument.created_at
+    )
+    if date_from is not None:
+        query = query.filter(order_col >= date_from)
+    if date_to is not None:
+        query = query.filter(order_col < date_to)
     return int(query.scalar() or 0)
 
 
@@ -3049,6 +3066,8 @@ def list_separated_orders(
     sale_number: Optional[int] = None,
     customer: Optional[str] = None,
     status: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
     tenant_id: Optional[int] = None,
 ) -> List[models.SeparatedOrder]:
     query = db.query(models.SeparatedOrder)
@@ -3071,6 +3090,10 @@ def list_separated_orders(
         )
     if status:
         query = query.filter(models.SeparatedOrder.status == status)
+    if date_from is not None:
+        query = query.filter(models.SeparatedOrder.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.SeparatedOrder.created_at < date_to)
     return (
         query.order_by(models.SeparatedOrder.created_at.desc())
         .offset(skip)

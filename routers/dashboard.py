@@ -385,12 +385,11 @@ def get_dashboard_summary(
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
         cash_total = _sale_cash_total(sale)
-        if cash_total > 0:
-            totals_by_day[day] += cash_total
+        delta = float(total_delta_by_sale.get(sale.id, 0.0))
+        effective_total = cash_total + delta
+        if effective_total > 0:
+            totals_by_day[day] += effective_total
             tickets_by_day[day] += 1
-        delta = total_delta_by_sale.get(sale.id, 0.0)
-        if delta:
-            totals_by_day[day] += float(delta)
 
     for payment in separated_payments_month:
         day = _to_bogota_date(payment.paid_at, bogota_tz)
@@ -418,12 +417,11 @@ def get_dashboard_summary(
     for sale in sales_trend:
         day = _to_bogota_date(sale.created_at, bogota_tz)
         cash_total = _sale_cash_total(sale)
-        if cash_total > 0:
-            trend_totals_by_day[day] += cash_total
+        delta = float(trend_total_delta_by_sale.get(sale.id, 0.0))
+        effective_total = cash_total + delta
+        if effective_total > 0:
+            trend_totals_by_day[day] += effective_total
             trend_tickets_by_day[day] += 1
-        delta = trend_total_delta_by_sale.get(sale.id, 0.0)
-        if delta:
-            trend_totals_by_day[day] += float(delta)
 
     for payment in separated_payments_trend:
         day = _to_bogota_date(payment.paid_at, bogota_tz)

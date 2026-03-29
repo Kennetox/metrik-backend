@@ -521,6 +521,8 @@ def create_sale(
 def list_sales(
     skip: int = 0,
     limit: int = 100,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.sales", "sales_history.view", "reports.view")
@@ -530,8 +532,6 @@ def list_sales(
     Lista las ventas registradas en el POS.
     Más adelante se puede ampliar con filtros, paginación real, etc.
     """
-    date_from = None
-    date_to = None
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
     matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
     can_view_history_range = permission_service.role_has_permission(
@@ -674,6 +674,15 @@ def create_document_adjustment(
     total_delta = float(payload.total_delta or 0.0)
     payment_delta = float(payload.payment_delta or 0.0)
     adjustment_type = payload.adjustment_type
+    latest_payment_adjustment, total_delta_by_sale = crud._collect_sale_adjustments(
+        db,
+        [sale.id],
+        tenant_id=tenant_id,
+    )
+    current_effective_total = max(
+        0.0,
+        float(sale.total or 0.0) + float(total_delta_by_sale.get(sale.id, 0.0)),
+    )
     payload_payments = payload.payload.get("payments") if payload.payload else None
     payments_list: list[tuple[str, float]] = []
     if isinstance(payload_payments, list):
@@ -701,6 +710,22 @@ def create_document_adjustment(
                 status_code=400,
                 detail="La nota es obligatoria para este ajuste",
             )
+    elif adjustment_type == "payment":
+        if abs(total_delta) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail="El ajuste de pagos no puede modificar el total del documento",
+            )
+        if current_effective_total <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Este documento tiene total en cero. Debes corregir el total antes de ajustar pagos.",
+            )
+        if not payments_list:
+            raise HTTPException(
+                status_code=400,
+                detail="Debes registrar al menos un pago ajustado.",
+            )
     elif adjustment_type == "discount":
         if abs(total_delta - payment_delta) > 0.01:
             raise HTTPException(
@@ -712,8 +737,30 @@ def create_document_adjustment(
                 status_code=400,
                 detail="Debes ajustar los pagos junto con el descuento",
             )
+    elif adjustment_type == "total":
+        if abs(payment_delta) > 0.01 or payments_list:
+            raise HTTPException(
+                status_code=400,
+                detail="El ajuste de total no puede modificar pagos",
+            )
+        next_total = current_effective_total + total_delta
+        if next_total < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="El total ajustado no puede ser negativo",
+            )
     if payments_list:
-        original_total = sum(float(p.amount or 0.0) for p in sale.payments)
+        latest_adjustment = latest_payment_adjustment.get(sale.id)
+        adjusted_payments = (
+            crud._parse_adjustment_payments(latest_adjustment.payload)
+            if latest_adjustment
+            else []
+        )
+        original_total = (
+            _sum_payments(adjusted_payments)
+            if adjusted_payments
+            else sum(float(p.amount or 0.0) for p in sale.payments)
+        )
         if original_total <= 0:
             original_total = float(sale.paid_amount or sale.total or 0.0)
         expected_total = original_total + payment_delta

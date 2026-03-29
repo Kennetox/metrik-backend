@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -77,6 +78,8 @@ def create_manual_movement_document(
 def list_manual_movement_documents(
     status: schemas.ManualMovementStatus | None = Query(default=None),
     kind: schemas.ManualMovementKind | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -87,6 +90,8 @@ def list_manual_movement_documents(
         db,
         status=status,
         kind=kind,
+        date_from=date_from,
+        date_to=date_to,
         skip=skip,
         limit=limit,
         tenant_id=tenant_id,
@@ -95,6 +100,8 @@ def list_manual_movement_documents(
         db,
         status=status,
         kind=kind,
+        date_from=date_from,
+        date_to=date_to,
         tenant_id=tenant_id,
     )
     items: List[schemas.ManualMovementDocumentRead] = []
@@ -213,4 +220,3 @@ def cancel_manual_movement_document(
     cancelled = crud.cancel_manual_movement_document(db, doc)
     lines = crud.list_manual_movement_document_lines(db, document_id, tenant_id=tenant_id)
     return _to_manual_doc_read(cancelled, lines=lines)
-
