@@ -13,7 +13,7 @@ import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import String, and_, case, cast, func, or_, text, true
+from sqlalchemy import String, and_, case, cast, func, not_, or_, text, true
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
@@ -1697,12 +1697,81 @@ def get_products(
     return products
 
 
+def _web_publication_sale_price_expression():
+    price_source = func.lower(func.coalesce(models.Product.web_price_source, "base"))
+    base_price = func.coalesce(models.Product.price, 0.0)
+    price_value = func.coalesce(models.Product.web_price_value, 0.0)
+    return case(
+        (price_source == "fixed", price_value),
+        (price_source == "discount_percent", base_price * (1 - (price_value / 100.0))),
+        else_=base_price,
+    )
+
+
+def _web_publication_discounted_expression():
+    return and_(
+        func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+        models.Product.web_compare_price.is_not(None),
+        models.Product.web_compare_price > _web_publication_sale_price_expression(),
+    )
+
+
+def _web_publication_configured_expression():
+    has_non_empty_web_name = and_(
+        models.Product.web_name.is_not(None),
+        func.trim(models.Product.web_name) != "",
+    )
+    has_non_empty_web_category = and_(
+        models.Product.web_category_key.is_not(None),
+        func.trim(models.Product.web_category_key) != "",
+    )
+    has_non_empty_short_description = and_(
+        models.Product.web_short_description.is_not(None),
+        func.trim(models.Product.web_short_description) != "",
+    )
+    has_non_empty_long_description = and_(
+        models.Product.web_long_description.is_not(None),
+        func.trim(models.Product.web_long_description) != "",
+    )
+    has_non_empty_badge = and_(
+        models.Product.web_badge_text.is_not(None),
+        func.trim(models.Product.web_badge_text) != "",
+    )
+    has_non_empty_gallery = and_(
+        models.Product.web_gallery_urls.is_not(None),
+        func.trim(models.Product.web_gallery_urls) != "",
+    )
+    has_non_empty_whatsapp_message = and_(
+        models.Product.web_whatsapp_message.is_not(None),
+        func.trim(models.Product.web_whatsapp_message) != "",
+    )
+    return or_(
+        models.Product.web_published.is_(True),
+        models.Product.web_featured.is_(True),
+        has_non_empty_web_name,
+        has_non_empty_web_category,
+        has_non_empty_short_description,
+        has_non_empty_long_description,
+        has_non_empty_badge,
+        models.Product.web_compare_price.is_not(None),
+        func.lower(func.coalesce(models.Product.web_price_source, "base")) != "base",
+        models.Product.web_price_value.is_not(None),
+        has_non_empty_gallery,
+        func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "consultar",
+        models.Product.web_visible_when_out_of_stock.is_(False),
+        has_non_empty_whatsapp_message,
+        func.coalesce(models.Product.web_sort_order, 0) > 0,
+    )
+
+
 def search_comercio_web_catalog_products(
     db: Session,
     *,
     tenant_id: Optional[int] = None,
     q: Optional[str] = None,
     published_only: Optional[bool] = None,
+    configured_only: Optional[bool] = None,
+    skip: int = 0,
     limit: int = 60,
 ):
     query = db.query(models.Product)
@@ -1712,6 +1781,11 @@ def search_comercio_web_catalog_products(
         query = query.filter(models.Product.web_published.is_(True))
     elif published_only is False:
         query = query.filter(models.Product.web_published.is_(False))
+    is_configured_publication = _web_publication_configured_expression()
+    if configured_only is True:
+        query = query.filter(is_configured_publication)
+    elif configured_only is False:
+        query = query.filter(not_(is_configured_publication))
 
     term = (q or "").strip()
     if term:
@@ -1734,6 +1808,7 @@ def search_comercio_web_catalog_products(
             models.Product.updated_at.desc(),
             models.Product.id.desc(),
         )
+        .offset(skip)
         .limit(limit)
         .all()
     )
@@ -1749,6 +1824,143 @@ def search_comercio_web_catalog_products(
     for product in products:
         product.group_meta = group_map.get(product.group_name or "")
     return products
+
+
+def list_comercio_web_publications_page(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    q: Optional[str] = None,
+    field: str = "all",
+    status_filter: str = "all",
+    featured_filter: str = "all",
+    badge_filter: str = "all",
+    skip: int = 0,
+    limit: int = 50,
+):
+    configured_expr = _web_publication_configured_expression()
+    discounted_expr = _web_publication_discounted_expression()
+    has_badge_expr = and_(
+        models.Product.web_badge_text.is_not(None),
+        func.trim(models.Product.web_badge_text) != "",
+    )
+
+    query = db.query(models.Product).filter(configured_expr)
+    if tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == tenant_id)
+
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        if field == "name":
+            query = query.filter(
+                or_(
+                    models.Product.name.ilike(like),
+                    models.Product.web_name.ilike(like),
+                )
+            )
+        elif field == "sku":
+            query = query.filter(models.Product.sku.ilike(like))
+        elif field == "brand":
+            query = query.filter(models.Product.brand.ilike(like))
+        elif field == "group":
+            query = query.filter(models.Product.group_name.ilike(like))
+        elif field == "badge":
+            query = query.filter(models.Product.web_badge_text.ilike(like))
+        else:
+            query = query.filter(
+                or_(
+                    models.Product.name.ilike(like),
+                    models.Product.web_name.ilike(like),
+                    models.Product.sku.ilike(like),
+                    models.Product.brand.ilike(like),
+                    models.Product.group_name.ilike(like),
+                    models.Product.web_badge_text.ilike(like),
+                    models.Product.web_short_description.ilike(like),
+                )
+            )
+
+    if status_filter == "featured":
+        query = query.filter(models.Product.web_featured.is_(True))
+    elif status_filter == "discounted":
+        query = query.filter(discounted_expr)
+    elif status_filter == "consult":
+        query = query.filter(
+            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "consultar"
+        )
+
+    if featured_filter == "featured":
+        query = query.filter(models.Product.web_featured.is_(True))
+    elif featured_filter == "standard":
+        query = query.filter(
+            or_(
+                models.Product.web_featured.is_(False),
+                models.Product.web_featured.is_(None),
+            )
+        )
+
+    if badge_filter == "with_badge":
+        query = query.filter(has_badge_expr)
+    elif badge_filter == "without_badge":
+        query = query.filter(not_(has_badge_expr))
+
+    total = query.count()
+    items = (
+        query.order_by(
+            models.Product.web_published.desc(),
+            models.Product.web_featured.desc(),
+            models.Product.updated_at.desc(),
+            models.Product.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    group_names = {p.group_name for p in items if p.group_name}
+    group_map = {}
+    if group_names:
+        groups_query = db.query(models.ProductGroup).filter(models.ProductGroup.path.in_(group_names))
+        if tenant_id is not None:
+            groups_query = groups_query.filter(models.ProductGroup.tenant_id == tenant_id)
+        groups = groups_query.all()
+        group_map = {g.path: g for g in groups}
+    for product in items:
+        product.group_meta = group_map.get(product.group_name or "")
+
+    stats_query = db.query(
+        func.count(models.Product.id).label("configured"),
+        func.sum(case((models.Product.web_published.is_(True), 1), else_=0)).label("published"),
+        func.sum(case((models.Product.web_featured.is_(True), 1), else_=0)).label("featured"),
+        func.sum(case((discounted_expr, 1), else_=0)).label("discounted"),
+        func.sum(
+            case(
+                (
+                    func.lower(func.coalesce(models.Product.web_price_mode, "visible"))
+                    == "consultar",
+                    1,
+                ),
+                else_=0,
+            )
+        ).label("consult"),
+    ).filter(configured_expr)
+    if tenant_id is not None:
+        stats_query = stats_query.filter(models.Product.tenant_id == tenant_id)
+    stats_row = stats_query.first()
+
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "skip": int(skip),
+        "limit": int(limit),
+        "stats": {
+            "configured": int((stats_row.configured if stats_row else 0) or 0),
+            "published": int((stats_row.published if stats_row else 0) or 0),
+            "featured": int((stats_row.featured if stats_row else 0) or 0),
+            "discounted": int((stats_row.discounted if stats_row else 0) or 0),
+            "consult": int((stats_row.consult if stats_row else 0) or 0),
+        },
+    }
 
 
 def get_catalog_version(

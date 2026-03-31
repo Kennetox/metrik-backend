@@ -48,6 +48,18 @@ def _format_count(value: int) -> str:
     return f"{int(value or 0):,}".replace(",", ".")
 
 
+def _format_compact_money(value: float) -> str:
+    raw = float(value or 0.0)
+    absolute = abs(raw)
+    if absolute >= 1_000_000:
+        compact = f"{raw / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"${compact}M"
+    if absolute >= 1_000:
+        compact = f"{raw / 1_000:.0f}"
+        return f"${compact}k"
+    return f"${int(round(raw))}"
+
+
 def _format_percent(value: Optional[float]) -> str:
     if value is None:
         return "Sin base comparativa"
@@ -210,18 +222,23 @@ def _render_quick_report_html(
             best_month = {"label": MONTH_SHORT[month_idx - 1], "total": total}
 
     daily_sorted = sorted(daily_series, key=lambda row: row.date)
-    day_count = len(daily_sorted)
+    month_start, month_end = _month_period(year, month)
+    day_count = month_end.day
     monthly_data: list[dict] = []
     total_month = 0.0
     total_month_tickets = 0
     best_day = {"label": "-", "sub": "", "total": 0.0}
 
+    daily_by_day: dict[int, tuple[float, int]] = {}
     for point in daily_sorted:
-        day_date = point.date
+        day = int(point.date.day)
+        daily_by_day[day] = (float(point.total), int(point.tickets))
+
+    for day in range(1, day_count + 1):
+        day_date = date(year, month, day)
         weekday = WEEKDAY_SHORT[day_date.weekday()]
-        label = f"{day_date.day:02d}"
-        total = float(point.total)
-        tickets = int(point.tickets)
+        total, tickets = daily_by_day.get(day, (0.0, 0))
+        label = f"{day:02d}"
         monthly_data.append({"label": label, "sub": weekday, "total": total, "tickets": tickets})
         total_month += total
         total_month_tickets += tickets
@@ -246,9 +263,108 @@ def _render_quick_report_html(
 
     annual_max = max([entry["total"] for entry in annual_data] + [1.0])
     monthly_max = max([entry["total"] for entry in monthly_data] + [1.0])
+    chart_ticks = [1, 0.66, 0.33, 0]
 
-    annual_bars = _build_bar_rows(annual_data, annual_max, is_daily=False)
-    monthly_bars = _build_bar_rows(monthly_data, monthly_max, is_daily=True)
+    annual_chart = {
+        "width": 980,
+        "height": 164,
+        "top_padding": 30,
+        "chart_height": 104,
+        "baseline_y": 134,
+        "left_padding": 16,
+    }
+    annual_chart["inner_width"] = annual_chart["width"] - annual_chart["left_padding"] * 2
+    annual_chart["slot_width"] = annual_chart["inner_width"] / 12
+    annual_chart["bar_width"] = max(26, annual_chart["slot_width"] - 14)
+
+    daily_chart = {
+        "width": max(980, len(monthly_data) * 34),
+        "height": 174,
+        "top_padding": 30,
+        "chart_height": 102,
+        "baseline_y": 132,
+        "left_padding": 8,
+    }
+    daily_chart["inner_width"] = daily_chart["width"] - daily_chart["left_padding"] * 2
+    daily_chart["slot_width"] = daily_chart["inner_width"] / max(len(monthly_data), 1)
+    daily_chart["bar_width"] = max(10, daily_chart["slot_width"] - 4)
+
+    annual_grid = "".join(
+        f'<line x1="0" y1="{annual_chart["top_padding"] + (1 - tick) * annual_chart["chart_height"]}" '
+        f'x2="{annual_chart["width"]}" y2="{annual_chart["top_padding"] + (1 - tick) * annual_chart["chart_height"]}" '
+        'stroke="#cbd5e1" stroke-dasharray="4 4" />'
+        for tick in chart_ticks
+    )
+    annual_average_line = ""
+    if avg_month > 0:
+        avg_y = annual_chart["baseline_y"] - (avg_month / annual_max) * annual_chart["chart_height"]
+        annual_average_line = (
+            f'<line x1="0" y1="{avg_y}" x2="{annual_chart["width"]}" y2="{avg_y}" '
+            'stroke="#10b981" stroke-opacity="0.45" stroke-dasharray="6 6" />'
+        )
+    annual_bars = []
+    for index, month_entry in enumerate(annual_data):
+        has_sales = float(month_entry["total"]) > 0
+        bar_height = (
+            max(24, (float(month_entry["total"]) / annual_max) * annual_chart["chart_height"])
+            if has_sales
+            else 6
+        )
+        x = annual_chart["left_padding"] + index * annual_chart["slot_width"] + (
+            annual_chart["slot_width"] - annual_chart["bar_width"]
+        ) / 2
+        y = annual_chart["baseline_y"] - bar_height
+        label_x = x + annual_chart["bar_width"] / 2
+        annual_bars.append(
+            f"""
+            <g>
+              <text x="{label_x}" y="{max(14, y - 20)}" text-anchor="middle" font-size="11" font-weight="700" fill="#475569">{escape(_format_compact_money(float(month_entry["total"])))}</text>
+              <text x="{label_x}" y="{max(25, y - 6)}" text-anchor="middle" font-size="11" font-weight="700" fill="#334155">{escape(str(int(month_entry["tickets"])))}</text>
+              <rect x="{x}" y="{y}" width="{annual_chart["bar_width"]}" height="{bar_height}" fill="#334155" />
+              <text x="{label_x}" y="{annual_chart["baseline_y"] + 16}" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">{escape(str(month_entry["label"]))}</text>
+            </g>
+            """
+        )
+    annual_bars_svg = "".join(annual_bars)
+
+    daily_grid = "".join(
+        f'<line x1="0" y1="{daily_chart["top_padding"] + (1 - tick) * daily_chart["chart_height"]}" '
+        f'x2="{daily_chart["width"]}" y2="{daily_chart["top_padding"] + (1 - tick) * daily_chart["chart_height"]}" '
+        'stroke="#cbd5e1" stroke-dasharray="4 4" />'
+        for tick in chart_ticks
+    )
+    daily_average_line = ""
+    if avg_daily > 0:
+        avg_y = daily_chart["baseline_y"] - (avg_daily / monthly_max) * daily_chart["chart_height"]
+        daily_average_line = (
+            f'<line x1="0" y1="{avg_y}" x2="{daily_chart["width"]}" y2="{avg_y}" '
+            'stroke="#10b981" stroke-opacity="0.45" stroke-dasharray="6 6" />'
+        )
+    daily_bars = []
+    for index, day_entry in enumerate(monthly_data):
+        has_sales = float(day_entry["total"]) > 0
+        bar_height = (
+            max(22, (float(day_entry["total"]) / monthly_max) * daily_chart["chart_height"])
+            if has_sales
+            else 3
+        )
+        x = daily_chart["left_padding"] + index * daily_chart["slot_width"] + (
+            daily_chart["slot_width"] - daily_chart["bar_width"]
+        ) / 2
+        y = daily_chart["baseline_y"] - bar_height
+        label_x = x + daily_chart["bar_width"] / 2
+        daily_bars.append(
+            f"""
+            <g>
+              <text x="{label_x}" y="{max(14, y - 20)}" text-anchor="middle" font-size="9" font-weight="700" fill="#475569">{escape(_format_compact_money(float(day_entry["total"])))}</text>
+              <text x="{label_x}" y="{max(24, y - 7)}" text-anchor="middle" font-size="9" font-weight="700" fill="#334155">{escape(str(int(day_entry["tickets"])))}</text>
+              <rect x="{x}" y="{y}" width="{daily_chart["bar_width"]}" height="{bar_height}" fill="#334155" />
+              <text x="{label_x}" y="{daily_chart["baseline_y"] + 14}" text-anchor="middle" font-size="11" font-weight="700" fill="#334155">{escape(str(day_entry["label"]))}</text>
+              <text x="{label_x}" y="{daily_chart["baseline_y"] + 26}" text-anchor="middle" font-size="9" font-weight="600" fill="#64748b">{escape(str(day_entry["sub"]))}</text>
+            </g>
+            """
+        )
+    daily_bars_svg = "".join(daily_bars)
 
     def render_rank_rows(rows: list[dict]) -> str:
         if not rows:
@@ -283,13 +399,7 @@ def _render_quick_report_html(
       .card .value {{ font-size: 20px; font-weight: 700; margin-top: 2px; }}
       .card .note {{ margin-top: 3px; color: #64748b; font-size: 10px; }}
       .chart {{ border: 1px solid #cbd5e1; border-radius: 14px; background: #f8fafc; padding: 8px; overflow: hidden; }}
-      .bars {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(22px, 1fr)); align-items: end; gap: 4px; min-height: 165px; }}
-      .bar-item {{ text-align: center; }}
-      .bar-value {{ min-height: 24px; color: #334155; font-size: 10px; line-height: 1.1; }}
-      .bar-value span {{ font-size: 9px; color: #64748b; }}
-      .bar {{ width: 100%; border-radius: 4px 4px 0 0; background: #334155; }}
-      .bar-label {{ font-size: 10px; font-weight: 700; color: #334155; margin-top: 4px; }}
-      .bar-sub {{ font-size: 9px; color: #64748b; }}
+      .chart svg {{ width: 100%; display: block; }}
       .kpi-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
       .rank-title {{ color: #059669; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 6px; }}
       .rank-row {{ border: 1px solid #cbd5e1; border-radius: 10px; background: #f8fafc; padding: 8px 9px; margin-bottom: 6px; }}
@@ -313,7 +423,13 @@ def _render_quick_report_html(
         <div class=\"card\"><div class=\"label\">Tickets del año</div><div class=\"value\">{_format_count(total_year_tickets)}</div><div class=\"note\">Movimientos positivos</div></div>
         <div class=\"card\"><div class=\"label\">Promedio mensual</div><div class=\"value\">{_format_money(avg_month)}</div><div class=\"note\">Corte acumulado</div></div>
       </div>
-      <div class=\"chart\"><div class=\"bars\">{annual_bars}</div></div>
+      <div class=\"chart\">
+        <svg viewBox="0 0 {annual_chart["width"]} {annual_chart["height"]}" width="100%">
+          {annual_grid}
+          {annual_average_line}
+          {annual_bars_svg}
+        </svg>
+      </div>
     </section>
 
     <section class=\"section\">
@@ -324,11 +440,16 @@ def _render_quick_report_html(
         <div class=\"card\"><div class=\"label\">Tickets del mes</div><div class=\"value\">{_format_count(total_month_tickets)}</div><div class=\"note\">Movimientos positivos</div></div>
         <div class=\"card\"><div class=\"label\">Promedio diario</div><div class=\"value\">{_format_money(avg_daily)}</div><div class=\"note\">{max(1, day_count)} días</div></div>
       </div>
-      <div class=\"chart\"><div class=\"bars\">{monthly_bars}</div></div>
+      <div class=\"chart\">
+        <svg viewBox="0 0 {daily_chart["width"]} {daily_chart["height"]}" width="100%">
+          {daily_grid}
+          {daily_average_line}
+          {daily_bars_svg}
+        </svg>
+      </div>
     </section>
 
     <section class=\"section\">
-      <h2>KPIs de abajo</h2>
       <div class=\"kpi-grid\">
         <div>
           <div class=\"rank-title\">Top productos</div>

@@ -210,6 +210,22 @@ class ProductRead(ProductBase):
         from_attributes = True
 
 
+class ComercioWebCatalogPublicationStats(BaseModel):
+    configured: int
+    published: int
+    featured: int
+    discounted: int
+    consult: int
+
+
+class ComercioWebCatalogPublicationPage(BaseModel):
+    items: List[ProductRead] = Field(default_factory=list)
+    total: int
+    skip: int
+    limit: int
+    stats: ComercioWebCatalogPublicationStats
+
+
 class ProductAuditLogRead(BaseModel):
     id: int
     product_id: int

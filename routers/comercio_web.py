@@ -51,20 +51,59 @@ def list_comercio_web_catalog_products(
     limit: int = Query(default=1000, ge=1, le=5000),
     q: Optional[str] = Query(default=None),
     published_only: Optional[bool] = Query(default=None),
+    configured_only: Optional[bool] = Query(default=None),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
     _: models.PosUser = Depends(require_module_access("commerce_web")),
 ):
     tenant_id = _tenant_id_for_user(db, current_user)
-    if q is not None or published_only is not None or skip != 0 or limit != 1000:
+    if (
+        q is not None
+        or published_only is not None
+        or configured_only is not None
+        or skip != 0
+        or limit != 1000
+    ):
         return crud.search_comercio_web_catalog_products(
             db,
             tenant_id=tenant_id,
             q=q,
             published_only=published_only,
+            configured_only=configured_only,
+            skip=skip,
             limit=limit,
         )
     return crud.get_products(db, skip=skip, limit=limit, tenant_id=tenant_id)
+
+
+@router.get(
+    "/catalog/publications",
+    response_model=schemas.ComercioWebCatalogPublicationPage,
+)
+def list_comercio_web_publications(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    q: Optional[str] = Query(default=None),
+    field: str = Query(default="all"),
+    status_filter: str = Query(default="all"),
+    featured_filter: str = Query(default="all"),
+    badge_filter: str = Query(default="all"),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_publications_page(
+        db,
+        tenant_id=tenant_id,
+        q=q,
+        field=field,
+        status_filter=status_filter,
+        featured_filter=featured_filter,
+        badge_filter=badge_filter,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.put("/catalog/products/{product_id}", response_model=schemas.ProductRead)
