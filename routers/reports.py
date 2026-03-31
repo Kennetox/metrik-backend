@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 import os
@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import List, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,14 +15,17 @@ from openpyxl.drawing.image import Image as XlsxImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
+from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import crud
 import models
 import schemas
 from database import get_db
-from dependencies import require_permission
+from dependencies import require_any_permission, require_permission
 from services import email as email_service
+from services import monthly_report_email
 from services import pdf_utils
 
 router = APIRouter(
@@ -34,6 +38,81 @@ class ReportPdfExportRequest(BaseModel):
     title: Optional[str] = None
     document_html: str
     preset_id: Optional[str] = None
+
+
+@router.get(
+    "/favorites",
+    response_model=schemas.ReportFavoritesResponse,
+)
+def get_report_favorites(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    rows = (
+        db.query(models.ReportFavorite.preset_id)
+        .filter(models.ReportFavorite.tenant_id == tenant_id)
+        .filter(models.ReportFavorite.user_id == current_user.id)
+        .order_by(models.ReportFavorite.created_at.asc(), models.ReportFavorite.id.asc())
+        .all()
+    )
+    return schemas.ReportFavoritesResponse(
+        preset_ids=[row.preset_id for row in rows if row.preset_id]
+    )
+
+
+@router.put(
+    "/favorites",
+    response_model=schemas.ReportFavoritesResponse,
+)
+def update_report_favorites(
+    payload: schemas.ReportFavoritesUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in payload.preset_ids:
+        preset_id = raw.strip()
+        if not preset_id or len(preset_id) > 80 or preset_id in seen:
+            continue
+        seen.add(preset_id)
+        normalized.append(preset_id)
+
+    (
+        db.query(models.ReportFavorite)
+        .filter(models.ReportFavorite.tenant_id == tenant_id)
+        .filter(models.ReportFavorite.user_id == current_user.id)
+        .delete(synchronize_session=False)
+    )
+    for preset_id in normalized:
+        db.add(
+            models.ReportFavorite(
+                tenant_id=tenant_id,
+                user_id=current_user.id,
+                preset_id=preset_id,
+            )
+        )
+    db.commit()
+    return schemas.ReportFavoritesResponse(preset_ids=normalized)
+
+
+def _month_utc_bounds(year: int, month: int) -> tuple[datetime, datetime]:
+    bogota_tz = ZoneInfo("America/Bogota")
+    start_bogota = datetime(year, month, 1, tzinfo=bogota_tz)
+    if month == 12:
+        end_bogota = datetime(year + 1, 1, 1, tzinfo=bogota_tz)
+    else:
+        end_bogota = datetime(year, month + 1, 1, tzinfo=bogota_tz)
+    return (
+        start_bogota.astimezone(timezone.utc).replace(tzinfo=None),
+        end_bogota.astimezone(timezone.utc).replace(tzinfo=None),
+    )
 
 
 @router.post("/email")
@@ -114,6 +193,140 @@ def export_report_pdf(
         iter([pdf_bytes]),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/monthly-quick/send-now",
+    response_model=schemas.MonthlyQuickReportSendResponse,
+)
+def send_monthly_quick_report_now(
+    payload: schemas.MonthlyQuickReportSendRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("settings.manage")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    try:
+        result = monthly_report_email.send_monthly_quick_report(
+            db,
+            tenant_id=tenant_id,
+            year=payload.year,
+            month=payload.month,
+            force=payload.force,
+            trigger="manual",
+        )
+        return schemas.MonthlyQuickReportSendResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except email_service.EmailDeliveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get(
+    "/quick/insights",
+    response_model=schemas.ReportsQuickInsightsResponse,
+)
+def get_quick_insights(
+    year: int,
+    month: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="Mes inválido")
+    if year < 2000 or year > 2200:
+        raise HTTPException(status_code=400, detail="Año inválido")
+
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    start_utc, end_utc = _month_utc_bounds(year, month)
+
+    min_sale_at, max_sale_at = (
+        db.query(
+            func.min(models.Sale.created_at),
+            func.max(models.Sale.created_at),
+        )
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .first()
+        or (None, None)
+    )
+    bogota_tz = ZoneInfo("America/Bogota")
+    now_year = datetime.now(bogota_tz).year
+    min_year = (
+        min_sale_at.replace(tzinfo=timezone.utc).astimezone(bogota_tz).year
+        if min_sale_at
+        else now_year
+    )
+    max_year = (
+        max_sale_at.replace(tzinfo=timezone.utc).astimezone(bogota_tz).year
+        if max_sale_at
+        else now_year
+    )
+
+    top_products_rows = (
+        db.query(
+            models.SaleItem.product_name.label("name"),
+            func.sum(models.SaleItem.quantity).label("units"),
+            func.sum(models.SaleItem.total).label("total"),
+        )
+        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.created_at >= start_utc)
+        .filter(models.Sale.created_at < end_utc)
+        .group_by(models.SaleItem.product_name)
+        .order_by(func.sum(models.SaleItem.total).desc())
+        .limit(5)
+        .all()
+    )
+
+    group_name_expr = func.coalesce(models.Product.group_name, "Sin grupo")
+    top_groups_rows = (
+        db.query(
+            group_name_expr.label("name"),
+            func.sum(models.SaleItem.quantity).label("units"),
+            func.sum(models.SaleItem.total).label("total"),
+        )
+        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+        .outerjoin(models.Product, models.Product.id == models.SaleItem.product_id)
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.created_at >= start_utc)
+        .filter(models.Sale.created_at < end_utc)
+        .group_by(group_name_expr)
+        .order_by(func.sum(models.SaleItem.total).desc())
+        .limit(5)
+        .all()
+    )
+
+    top_products = [
+        schemas.ReportsQuickTopRow(
+            name=str(row.name or "Producto"),
+            units=float(row.units or 0.0),
+            total=float(row.total or 0.0),
+        )
+        for row in top_products_rows
+    ]
+    top_groups = [
+        schemas.ReportsQuickTopRow(
+            name=str(row.name or "Sin grupo"),
+            units=float(row.units or 0.0),
+            total=float(row.total or 0.0),
+        )
+        for row in top_groups_rows
+    ]
+
+    return schemas.ReportsQuickInsightsResponse(
+        year=year,
+        month=month,
+        min_year=min_year,
+        max_year=max_year,
+        top_products=top_products,
+        top_groups=top_groups,
     )
 
 

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, date
 from typing import Any, Dict, Optional, List, Literal, Annotated
 
@@ -49,11 +50,15 @@ class ProductBase(BaseModel):
     web_short_description: Optional[str] = None
     web_long_description: Optional[str] = None
     web_compare_price: Optional[float] = None
+    web_price_source: Literal["base", "fixed", "discount_percent"] = "base"
+    web_price_value: Optional[float] = None
     web_badge_text: Optional[str] = None
+    web_category_key: Optional[str] = None
     web_sort_order: int = 0
     web_visible_when_out_of_stock: bool = True
     web_price_mode: Literal["visible", "consultar"] = "visible"
     web_whatsapp_message: Optional[str] = None
+    web_gallery_urls: List[str] = Field(default_factory=list)
 
 
 class ProductCreate(ProductBase):
@@ -92,16 +97,45 @@ class ProductUpdate(BaseModel):
     web_short_description: Optional[str] = None
     web_long_description: Optional[str] = None
     web_compare_price: Optional[float] = None
+    web_price_source: Optional[Literal["base", "fixed", "discount_percent"]] = None
+    web_price_value: Optional[float] = None
     web_badge_text: Optional[str] = None
+    web_category_key: Optional[str] = None
     web_sort_order: Optional[int] = None
     web_visible_when_out_of_stock: Optional[bool] = None
     web_price_mode: Optional[Literal["visible", "consultar"]] = None
     web_whatsapp_message: Optional[str] = None
+    web_gallery_urls: Optional[List[str]] = None
     tile_color: Optional[str] = Field(
         default=None,
         pattern=r"^#([0-9a-fA-F]{6})$",
         description="Hex color like #112233",
     )
+
+    @field_validator("web_gallery_urls", mode="before")
+    @classmethod
+    def _parse_gallery_urls(cls, value: Any):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                return []
+            try:
+                parsed = json.loads(text_value)
+            except Exception:
+                return []
+            value = parsed
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if normalized and normalized not in clean:
+                clean.append(normalized)
+        return clean[:3]
 
 
 class ProductGroupBase(BaseModel):
@@ -146,6 +180,31 @@ class ProductGroupRead(ProductGroupBase):
 class ProductRead(ProductBase):
     id: int
     group_meta: Optional[ProductGroupRead] = None
+
+    @field_validator("web_gallery_urls", mode="before")
+    @classmethod
+    def _parse_gallery_urls(cls, value: Any):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                return []
+            try:
+                parsed = json.loads(text_value)
+            except Exception:
+                return []
+            value = parsed
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if normalized and normalized not in clean:
+                clean.append(normalized)
+        return clean[:3]
 
     class Config:
         from_attributes = True
@@ -198,10 +257,12 @@ class WebCatalogProductCard(BaseModel):
     badge_text: Optional[str] = None
     short_description: Optional[str] = None
     brand: Optional[str] = None
+    group_name: Optional[str] = None
     category_path: Optional[str] = None
     category_name: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
+    gallery: List[str] = Field(default_factory=list)
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
     compare_price: Optional[float] = None
@@ -237,11 +298,12 @@ class WebCatalogProductDetail(BaseModel):
     short_description: Optional[str] = None
     long_description: Optional[str] = None
     brand: Optional[str] = None
+    group_name: Optional[str] = None
     category_path: Optional[str] = None
     category_name: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
-    gallery: List[str]
+    gallery: List[str] = Field(default_factory=list)
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
     compare_price: Optional[float] = None
@@ -287,6 +349,7 @@ class InventoryMovementCreate(InventoryMovementBase):
 class InventoryMovementRead(InventoryMovementBase):
     id: int
     product_name: str
+    sku: Optional[str] = None
     created_at: datetime
     created_by_user_id: Optional[int] = None
     sale_pos_name: Optional[str] = None
@@ -558,6 +621,7 @@ class InventoryLatestEntryRead(BaseModel):
     source: Literal["app", "manual"]
     product_id: int
     product_name: str
+    sku: Optional[str] = None
     qty_delta: float
     reason: Optional[InventoryReason] = None
     reference_type: Optional[str] = None
@@ -2104,6 +2168,43 @@ class ReportPdfExportRequest(BaseModel):
     title: Optional[str] = None
     document_html: str
     preset_id: Optional[str] = None
+
+
+class MonthlyQuickReportSendRequest(BaseModel):
+    year: Optional[int] = None
+    month: Optional[int] = None
+    force: bool = True
+
+
+class MonthlyQuickReportSendResponse(BaseModel):
+    status: str
+    period_year: int
+    period_month: int
+    recipients: List[str] = Field(default_factory=list)
+    detail: Optional[str] = None
+
+
+class ReportsQuickTopRow(BaseModel):
+    name: str
+    units: float
+    total: float
+
+
+class ReportsQuickInsightsResponse(BaseModel):
+    year: int
+    month: int
+    min_year: int
+    max_year: int
+    top_products: List[ReportsQuickTopRow] = Field(default_factory=list)
+    top_groups: List[ReportsQuickTopRow] = Field(default_factory=list)
+
+
+class ReportFavoritesUpdateRequest(BaseModel):
+    preset_ids: List[str] = Field(default_factory=list)
+
+
+class ReportFavoritesResponse(BaseModel):
+    preset_ids: List[str] = Field(default_factory=list)
 
 
 class ReportExportCompanyInfo(BaseModel):

@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_IMAGE_SIZE = 2 * 1024 * 1024  # 2MB
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -181,7 +181,7 @@ async def save_product_image(
 
     contents = await file.read()
     if len(contents) > MAX_IMAGE_SIZE:
-        raise ValueError("La imagen supera los 2MB permitidos")
+        raise ValueError("La imagen supera los 10MB permitidos")
 
     filename = f"{uuid4().hex}{extension}"
 

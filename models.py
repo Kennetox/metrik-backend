@@ -127,11 +127,15 @@ class Product(Base):
     web_short_description = Column(String(280), nullable=True)
     web_long_description = Column(Text, nullable=True)
     web_compare_price = Column(Float, nullable=True)
+    web_price_source = Column(String(24), nullable=False, default="base")
+    web_price_value = Column(Float, nullable=True)
     web_badge_text = Column(String(80), nullable=True)
+    web_category_key = Column(String(64), nullable=True)
     web_sort_order = Column(Integer, nullable=False, default=0)
     web_visible_when_out_of_stock = Column(Boolean, nullable=False, default=True)
     web_price_mode = Column(String(24), nullable=False, default="visible")
     web_whatsapp_message = Column(Text, nullable=True)
+    web_gallery_urls = Column(Text, nullable=True)
 
     stock_min = Column(Integer, default=0)
     active = Column(Boolean, default=True)
@@ -819,6 +823,21 @@ class PosSettings(Base):
     station_closure_email_overrides = Column(JSON, nullable=True)
 
 
+class MonthlyReportDispatch(Base):
+    __tablename__ = "monthly_report_dispatches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    report_year = Column(Integer, nullable=False, index=True)
+    report_month = Column(Integer, nullable=False, index=True)
+    trigger = Column(String(16), nullable=False, default="manual")
+    status = Column(String(16), nullable=False, default="pending")
+    recipients = Column(JSON, nullable=True)
+    subject = Column(String(180), nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PosCustomer(Base):
     __tablename__ = "pos_customers"
 
@@ -1240,6 +1259,26 @@ class PosSession(Base):
     revoked_reason = Column(String, nullable=True)
 
     user = relationship("PosUser", back_populates="sessions")
+
+
+class ReportFavorite(Base):
+    __tablename__ = "report_favorites"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "preset_id",
+            name="report_favorites_tenant_user_preset_key",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    preset_id = Column(String(80), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("PosUser")
 
 
 class PosUserDocument(Base):

@@ -198,7 +198,7 @@ def get_inventory_overview(
     status_rows_sorted = sorted(status_rows, key=status_rank)[:status_limit]
 
     movement_rows = (
-        db.query(models.InventoryMovement, models.Product.name)
+        db.query(models.InventoryMovement, models.Product.name, models.Product.sku)
         .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(
             models.InventoryMovement.tenant_id == tenant_id
@@ -218,12 +218,12 @@ def get_inventory_overview(
     recent_movements: List[schemas.InventoryMovementRead] = []
     sale_ids: List[int] = [
         int(movement.reference_id)
-        for movement, _ in movement_rows
+        for movement, _, _ in movement_rows
         if movement.reference_type == "sale" and movement.reference_id is not None
     ]
     sale_context = _sale_context_by_id(db, sale_ids, tenant_id)
 
-    for movement, product_name in movement_rows:
+    for movement, product_name, product_sku in movement_rows:
         sale_meta = (
             sale_context.get(int(movement.reference_id))
             if movement.reference_type == "sale" and movement.reference_id is not None
@@ -234,6 +234,7 @@ def get_inventory_overview(
                 id=movement.id,
                 product_id=movement.product_id,
                 product_name=product_name,
+                sku=product_sku,
                 qty_delta=float(movement.qty_delta or 0.0),
                 reason=movement.reason,
                 notes=movement.notes,
@@ -270,7 +271,7 @@ def list_inventory_movements(
 ):
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
     movement_rows = (
-        db.query(models.InventoryMovement, models.Product.name)
+        db.query(models.InventoryMovement, models.Product.name, models.Product.sku)
         .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
         .filter(
             models.InventoryMovement.tenant_id == tenant_id
@@ -291,12 +292,12 @@ def list_inventory_movements(
     results: List[schemas.InventoryMovementRead] = []
     sale_ids: List[int] = [
         int(movement.reference_id)
-        for movement, _ in movement_rows
+        for movement, _, _ in movement_rows
         if movement.reference_type == "sale" and movement.reference_id is not None
     ]
     sale_context = _sale_context_by_id(db, sale_ids, tenant_id)
 
-    for movement, product_name in movement_rows:
+    for movement, product_name, product_sku in movement_rows:
         sale_meta = (
             sale_context.get(int(movement.reference_id))
             if movement.reference_type == "sale" and movement.reference_id is not None
@@ -307,6 +308,7 @@ def list_inventory_movements(
                 id=movement.id,
                 product_id=movement.product_id,
                 product_name=product_name,
+                sku=product_sku,
                 qty_delta=float(movement.qty_delta or 0.0),
                 reason=movement.reason,
                 notes=movement.notes,
@@ -338,7 +340,7 @@ def list_latest_inventory_entries(
 
     if include_manual:
         manual_rows = (
-            db.query(models.InventoryMovement, models.Product.name)
+            db.query(models.InventoryMovement, models.Product.name, models.Product.sku)
             .join(models.Product, models.Product.id == models.InventoryMovement.product_id)
             .filter(
                 models.InventoryMovement.tenant_id == tenant_id
@@ -357,13 +359,14 @@ def list_latest_inventory_entries(
             .all()
         )
 
-        for movement, product_name in manual_rows:
+        for movement, product_name, product_sku in manual_rows:
             entries.append(
                 schemas.InventoryLatestEntryRead(
                     id=f"manual-{movement.id}",
                     source="manual",
                     product_id=movement.product_id,
                     product_name=product_name,
+                    sku=product_sku,
                     qty_delta=float(movement.qty_delta or 0.0),
                     reason=movement.reason,
                     reference_type=movement.reference_type,
@@ -407,6 +410,7 @@ def list_latest_inventory_entries(
                     source=resolved_source,
                     product_id=item.product_id,
                     product_name=item.product_name_snapshot,
+                    sku=item.sku_snapshot,
                     qty_delta=float(item.qty_received or 0.0),
                     reason="purchase",
                     reference_type="receiving_lot",
@@ -1908,6 +1912,7 @@ def create_inventory_movement(
         id=movement.id,
         product_id=movement.product_id,
         product_name=product.name,
+        sku=product.sku,
         qty_delta=float(movement.qty_delta or 0.0),
         reason=movement.reason,
         notes=movement.notes,

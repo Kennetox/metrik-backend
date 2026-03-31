@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ import models
 import crud
 from db_migrations import run_schema_upgrades
 from services import storage
+from services import monthly_report_email
 from routers import (
     uploads as uploads_router,
     labels as labels_router,
@@ -87,6 +89,53 @@ if platform_owner_email and platform_owner_password:
         bootstrap_db.close()
 
 logger = logging.getLogger("kensar.validation")
+scheduler_logger = logging.getLogger("kensar.scheduler")
+_monthly_report_task: asyncio.Task | None = None
+
+
+def _monthly_report_scheduler_enabled() -> bool:
+    raw = os.getenv("MONTHLY_REPORT_SCHEDULER_ENABLED", "true").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    # Evita ruido en ejecución de tests
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+async def _monthly_report_scheduler_loop():
+    await asyncio.sleep(8)
+    while True:
+        try:
+            result = monthly_report_email.run_auto_monthly_dispatch()
+            if result.get("status") != "idle":
+                scheduler_logger.info("Monthly report scheduler: %s", result)
+        except Exception:
+            scheduler_logger.exception("Monthly report scheduler failed")
+        await asyncio.sleep(15 * 60)
+
+
+@app.on_event("startup")
+async def _start_monthly_report_scheduler():
+    global _monthly_report_task
+    if not _monthly_report_scheduler_enabled():
+        return
+    if _monthly_report_task and not _monthly_report_task.done():
+        return
+    _monthly_report_task = asyncio.create_task(_monthly_report_scheduler_loop())
+
+
+@app.on_event("shutdown")
+async def _stop_monthly_report_scheduler():
+    global _monthly_report_task
+    if _monthly_report_task is None:
+        return
+    _monthly_report_task.cancel()
+    try:
+        await _monthly_report_task
+    except asyncio.CancelledError:
+        pass
+    _monthly_report_task = None
 
 app.include_router(uploads_router.router)
 app.include_router(labels_router.router)

@@ -728,3 +728,133 @@ def get_monthly_sales(
         )
         for month, values in sorted(monthly.items())
     ]
+
+
+@router.get(
+    "/daily-sales",
+    response_model=List[schemas.SalesTrendPoint],
+)
+def get_daily_sales(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    tenant_id: int = Depends(get_current_tenant_id),
+    db: Session = Depends(get_db),
+):
+    """Devuelve ventas netas y tickets por día usando la misma lógica del dashboard."""
+
+    bogota_tz = ZoneInfo("America/Bogota")
+    today_bogota = datetime.utcnow().replace(tzinfo=timezone.utc).astimezone(bogota_tz).date()
+
+    if date_from is None and date_to is None:
+        start_date = today_bogota.replace(day=1)
+        end_date = today_bogota
+    else:
+        start_date = date_from or date_to
+        end_date = date_to or date_from
+
+    if start_date is None or end_date is None:
+        raise HTTPException(status_code=400, detail="Rango de fechas inválido")
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="date_from no puede ser mayor que date_to")
+    if (end_date - start_date).days > 400:
+        raise HTTPException(status_code=400, detail="Rango máximo permitido: 400 días")
+
+    start_utc = datetime(
+        start_date.year, start_date.month, start_date.day, tzinfo=bogota_tz
+    ).astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = (
+        datetime(end_date.year, end_date.month, end_date.day, tzinfo=bogota_tz)
+        + timedelta(days=1)
+    ).astimezone(timezone.utc).replace(tzinfo=None)
+
+    sales = (
+        db.query(models.Sale)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(models.Sale.created_at >= start_utc)
+        .filter(models.Sale.created_at < end_utc)
+        .all()
+    )
+    returns = (
+        db.query(models.SaleReturn)
+        .filter(models.SaleReturn.tenant_id == tenant_id)
+        .filter(models.SaleReturn.created_at >= start_utc)
+        .filter(models.SaleReturn.created_at < end_utc)
+        .filter(models.SaleReturn.status == "confirmed")
+        .filter(models.SaleReturn.adjustment_reference.is_(None))
+        .all()
+    )
+    changes = (
+        db.query(models.SaleChange)
+        .filter(models.SaleChange.tenant_id == tenant_id)
+        .filter(models.SaleChange.created_at >= start_utc)
+        .filter(models.SaleChange.created_at < end_utc)
+        .filter(models.SaleChange.status == "confirmed")
+        .all()
+    )
+    separated_payments = (
+        db.query(models.SeparatedOrderPayment)
+        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+        .filter(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
+        .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
+        .filter(models.SeparatedOrderPayment.paid_at < end_utc)
+        .all()
+    )
+
+    totals_by_day = defaultdict(float)
+    tickets_by_day = defaultdict(int)
+    refunds_by_day = defaultdict(float)
+    change_extra_by_day = defaultdict(float)
+    change_refund_by_day = defaultdict(float)
+    _, total_delta_by_sale = _collect_sale_adjustments(
+        db, [sale.id for sale in sales], tenant_id
+    )
+
+    for sale in sales:
+        day = _to_bogota_date(sale.created_at, bogota_tz)
+        cash_total = _sale_cash_total(sale)
+        delta = float(total_delta_by_sale.get(sale.id, 0.0))
+        effective_total = cash_total + delta
+        if effective_total > 0:
+            totals_by_day[day] += effective_total
+            tickets_by_day[day] += 1
+
+    for payment in separated_payments:
+        day = _to_bogota_date(payment.paid_at, bogota_tz)
+        totals_by_day[day] += float(payment.amount or 0.0)
+
+    for ret in returns:
+        day = _to_bogota_date(ret.created_at, bogota_tz)
+        refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
+        refunds_by_day[day] += refund_total
+
+    for change in changes:
+        day = _to_bogota_date(change.created_at, bogota_tz)
+        change_extra_by_day[day] += float(change.extra_payment or 0.0)
+        change_refund_by_day[day] += float(change.refund_due or 0.0)
+
+    points: List[schemas.SalesTrendPoint] = []
+    cursor = start_date
+    while cursor <= end_date:
+        day_total = (
+            totals_by_day[cursor]
+            + change_extra_by_day[cursor]
+            - refunds_by_day[cursor]
+            - change_refund_by_day[cursor]
+        )
+        day_dt = datetime(cursor.year, cursor.month, cursor.day, tzinfo=bogota_tz)
+        points.append(
+            schemas.SalesTrendPoint(
+                date=day_dt,
+                total=float(day_total),
+                tickets=int(tickets_by_day[cursor]),
+            )
+        )
+        cursor += timedelta(days=1)
+
+    return points

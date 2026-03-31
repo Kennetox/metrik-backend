@@ -532,6 +532,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(
                     connection,
                     "products",
+                    "web_price_source",
+                    "TEXT DEFAULT 'base'",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_price_value",
+                    "DOUBLE PRECISION",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
                     "web_badge_text",
                     "VARCHAR(80)",
                 )
@@ -558,6 +570,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "web_whatsapp_message",
                     "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_gallery_urls",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_category_key",
+                    "VARCHAR(64)",
                 )
                 connection.execute(
                     text(
@@ -601,6 +625,15 @@ def run_schema_upgrades(engine: Engine) -> None:
                         UPDATE products
                         SET web_price_mode = 'visible'
                         WHERE web_price_mode IS NULL OR btrim(web_price_mode) = ''
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_price_source = 'base'
+                        WHERE web_price_source IS NULL OR btrim(web_price_source) = ''
                         """
                     )
                 )
@@ -1319,6 +1352,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_column(connection, "products", "web_short_description", "TEXT")
                     _ensure_column(connection, "products", "web_long_description", "TEXT")
                     _ensure_column(connection, "products", "web_compare_price", "REAL")
+                    _ensure_column(connection, "products", "web_price_source", "TEXT DEFAULT 'base'")
+                    _ensure_column(connection, "products", "web_price_value", "REAL")
                     _ensure_column(connection, "products", "web_badge_text", "TEXT")
                     _ensure_column(connection, "products", "web_sort_order", "INTEGER DEFAULT 0")
                     _ensure_column(
@@ -1329,6 +1364,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                     )
                     _ensure_column(connection, "products", "web_price_mode", "TEXT DEFAULT 'visible'")
                     _ensure_column(connection, "products", "web_whatsapp_message", "TEXT")
+                    _ensure_column(connection, "products", "web_gallery_urls", "TEXT")
+                    _ensure_column(connection, "products", "web_category_key", "TEXT")
                     connection.execute(
                         text(
                             """
@@ -1371,6 +1408,15 @@ def run_schema_upgrades(engine: Engine) -> None:
                             UPDATE products
                             SET web_price_mode = 'visible'
                             WHERE web_price_mode IS NULL OR trim(web_price_mode) = ''
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_price_source = 'base'
+                            WHERE web_price_source IS NULL OR trim(web_price_source) = ''
                             """
                         )
                     )

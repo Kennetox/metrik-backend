@@ -36,6 +36,40 @@ DEFAULT_PRODUCT_LABEL_FORMAT = "Kensar1"
 CABLES_PRODUCT_LABEL_FORMAT = "Cables_1"
 
 
+def _parse_product_gallery_urls(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not text_value:
+            return []
+        try:
+            parsed = json.loads(text_value)
+        except Exception:
+            return []
+        value = parsed
+    if not isinstance(value, list):
+        return []
+    clean: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if normalized and normalized not in clean:
+            clean.append(normalized)
+    return clean[:3]
+
+
+def _build_product_gallery_urls(product: models.Product) -> list[str]:
+    urls = _parse_product_gallery_urls(getattr(product, "web_gallery_urls", None))
+    for candidate in [product.image_url, product.image_thumb_url]:
+        if isinstance(candidate, str):
+            normalized = candidate.strip()
+            if normalized and normalized not in urls:
+                urls.append(normalized)
+    return urls[:3]
+
+
 def _is_cables_group(group_name: Optional[str]) -> bool:
     if not isinstance(group_name, str):
         return False
@@ -75,6 +109,84 @@ def build_product_web_slug(name: Optional[str], sku: Optional[str] = None) -> st
         return base[:160]
     fallback = _slugify_text(sku)
     return (fallback or "producto")[:160]
+
+
+WEB_CATALOG_CATEGORY_OPTIONS = [
+    {"key": "audio-profesional", "label": "Audio profesional"},
+    {"key": "instrumentos", "label": "Instrumentos"},
+    {"key": "microfonos", "label": "Microfonos"},
+    {"key": "accesorios", "label": "Accesorios"},
+    {"key": "camaras", "label": "Camaras"},
+]
+
+WEB_CATALOG_CATEGORY_LABELS = {
+    item["key"]: item["label"] for item in WEB_CATALOG_CATEGORY_OPTIONS
+}
+WEB_PRICE_SOURCE_DEFAULT = "base"
+WEB_PRICE_SOURCE_FIXED = "fixed"
+WEB_PRICE_SOURCE_DISCOUNT_PERCENT = "discount_percent"
+WEB_PRICE_SOURCE_OPTIONS = {
+    WEB_PRICE_SOURCE_DEFAULT,
+    WEB_PRICE_SOURCE_FIXED,
+    WEB_PRICE_SOURCE_DISCOUNT_PERCENT,
+}
+
+
+def _normalize_web_price_source(value: Optional[str], *, strict: bool = False) -> str:
+    normalized = (value or WEB_PRICE_SOURCE_DEFAULT).strip().lower()
+    if normalized not in WEB_PRICE_SOURCE_OPTIONS:
+        if strict:
+            raise ValueError("Origen de precio web inválido")
+        return WEB_PRICE_SOURCE_DEFAULT
+    return normalized
+
+
+def resolve_web_product_sale_price(product: models.Product) -> float:
+    base_price = float(product.price or 0.0)
+    source = _normalize_web_price_source(getattr(product, "web_price_source", None))
+    value = float(getattr(product, "web_price_value", 0.0) or 0.0)
+    if source == WEB_PRICE_SOURCE_FIXED:
+        return round(max(0.0, value), 2)
+    if source == WEB_PRICE_SOURCE_DISCOUNT_PERCENT:
+        discount_percent = min(max(value, 0.0), 100.0)
+        return round(max(0.0, base_price * (1.0 - (discount_percent / 100.0))), 2)
+    return round(max(0.0, base_price), 2)
+
+
+def resolve_web_compare_price(
+    product: models.Product,
+    *,
+    sale_price: Optional[float] = None,
+) -> Optional[float]:
+    compare = getattr(product, "web_compare_price", None)
+    if compare is None:
+        return None
+    normalized = float(compare)
+    target_price = float(sale_price) if sale_price is not None else resolve_web_product_sale_price(product)
+    if normalized <= target_price:
+        return None
+    return normalized
+
+
+def _build_web_sale_price_sql_expression():
+    source_col = func.coalesce(models.Product.web_price_source, WEB_PRICE_SOURCE_DEFAULT)
+    value_col = func.coalesce(models.Product.web_price_value, 0.0)
+    base_col = func.coalesce(models.Product.price, 0.0)
+    return case(
+        (source_col == WEB_PRICE_SOURCE_FIXED, value_col),
+        (
+            source_col == WEB_PRICE_SOURCE_DISCOUNT_PERCENT,
+            base_col * (1.0 - (value_col / 100.0)),
+        ),
+        else_=base_col,
+    )
+
+
+def resolve_web_catalog_category_label(category_key: Optional[str]) -> Optional[str]:
+    if not isinstance(category_key, str):
+        return None
+    normalized = category_key.strip().lower()
+    return WEB_CATALOG_CATEGORY_LABELS.get(normalized)
 
 
 def _should_sync_company_name_from_tenant(
@@ -1715,6 +1827,36 @@ def create_product(
     tenant_id: Optional[int] = None,
 ):
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    web_price_source = _normalize_web_price_source(product_in.web_price_source, strict=True)
+    web_price_value = (
+        float(product_in.web_price_value) if product_in.web_price_value is not None else None
+    )
+    if web_price_source == WEB_PRICE_SOURCE_DEFAULT:
+        web_price_value = None
+    elif web_price_value is None:
+        raise ValueError("Debes indicar un valor para el precio web")
+    elif web_price_source == WEB_PRICE_SOURCE_FIXED and web_price_value <= 0:
+        raise ValueError("El precio web fijo debe ser mayor que cero")
+    elif (
+        web_price_source == WEB_PRICE_SOURCE_DISCOUNT_PERCENT
+        and (web_price_value <= 0 or web_price_value >= 100)
+    ):
+        raise ValueError("El descuento web debe estar entre 0 y 100")
+
+    base_price = float(product_in.price or 0.0)
+    if web_price_source == WEB_PRICE_SOURCE_FIXED:
+        sale_price = float(web_price_value or 0.0)
+    elif web_price_source == WEB_PRICE_SOURCE_DISCOUNT_PERCENT:
+        discount_percent = float(web_price_value or 0.0)
+        sale_price = max(0.0, base_price * (1.0 - (discount_percent / 100.0)))
+    else:
+        sale_price = max(0.0, base_price)
+    compare_price = (
+        float(product_in.web_compare_price)
+        if product_in.web_compare_price is not None and float(product_in.web_compare_price) > sale_price
+        else None
+    )
+
     db_product = models.Product(
         tenant_id=effective_tenant_id,
         sku=product_in.sku,
@@ -1754,12 +1896,20 @@ def create_product(
         web_featured=product_in.web_featured,
         web_short_description=product_in.web_short_description,
         web_long_description=product_in.web_long_description,
-        web_compare_price=product_in.web_compare_price,
+        web_compare_price=compare_price,
+        web_price_source=web_price_source,
+        web_price_value=web_price_value,
         web_badge_text=product_in.web_badge_text,
+        web_category_key=product_in.web_category_key,
         web_sort_order=product_in.web_sort_order,
         web_visible_when_out_of_stock=product_in.web_visible_when_out_of_stock,
         web_price_mode=product_in.web_price_mode,
         web_whatsapp_message=product_in.web_whatsapp_message,
+        web_gallery_urls=(
+            json.dumps(_parse_product_gallery_urls(product_in.web_gallery_urls), ensure_ascii=False)
+            if _parse_product_gallery_urls(product_in.web_gallery_urls)
+            else None
+        ),
     )
     db.add(db_product)
     db.commit()
@@ -1774,11 +1924,76 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    if "web_gallery_urls" in data:
+        gallery = _parse_product_gallery_urls(data.get("web_gallery_urls"))
+        data["web_gallery_urls"] = json.dumps(gallery, ensure_ascii=False) if gallery else None
+        if gallery:
+            data["image_url"] = gallery[0]
+            data["image_thumb_url"] = gallery[0]
+        elif "image_url" not in data:
+            data["image_url"] = None
+            data["image_thumb_url"] = None
     if "web_slug" in data:
         data["web_slug"] = build_product_web_slug(
             data.get("web_slug") or data.get("web_name") or data.get("name") or db_product.name,
             data.get("sku") or db_product.sku,
         )
+    if "web_category_key" in data:
+        next_category = (data.get("web_category_key") or "").strip().lower()
+        data["web_category_key"] = next_category or None
+        if next_category and next_category not in WEB_CATALOG_CATEGORY_LABELS:
+            raise ValueError("Categoría web inválida")
+    if "web_price_source" in data:
+        data["web_price_source"] = _normalize_web_price_source(
+            data.get("web_price_source"),
+            strict=True,
+        )
+    next_web_price_source = _normalize_web_price_source(
+        data.get("web_price_source", db_product.web_price_source)
+    )
+    next_web_price_value_raw = data.get("web_price_value", db_product.web_price_value)
+    next_web_price_value: Optional[float]
+    if next_web_price_source == WEB_PRICE_SOURCE_DEFAULT:
+        next_web_price_value = None
+        data["web_price_value"] = None
+    else:
+        if next_web_price_value_raw is None:
+            raise ValueError("Debes indicar un valor para el precio web")
+        next_web_price_value = float(next_web_price_value_raw)
+        if next_web_price_source == WEB_PRICE_SOURCE_FIXED:
+            if next_web_price_value <= 0:
+                raise ValueError("El precio web fijo debe ser mayor que cero")
+        elif next_web_price_source == WEB_PRICE_SOURCE_DISCOUNT_PERCENT:
+            if next_web_price_value <= 0 or next_web_price_value >= 100:
+                raise ValueError("El descuento web debe estar entre 0 y 100")
+        data["web_price_value"] = next_web_price_value
+
+    next_base_price = float(data.get("price", db_product.price) or 0.0)
+    if next_web_price_source == WEB_PRICE_SOURCE_FIXED:
+        next_sale_price = float(next_web_price_value or 0.0)
+    elif next_web_price_source == WEB_PRICE_SOURCE_DISCOUNT_PERCENT:
+        discount_percent = float(next_web_price_value or 0.0)
+        next_sale_price = max(0.0, next_base_price * (1.0 - (discount_percent / 100.0)))
+    else:
+        next_sale_price = max(0.0, next_base_price)
+    if "web_compare_price" in data:
+        compare_value = data.get("web_compare_price")
+        if compare_value is None:
+            data["web_compare_price"] = None
+        else:
+            next_compare_price = float(compare_value)
+            data["web_compare_price"] = (
+                next_compare_price if next_compare_price > next_sale_price else None
+            )
+    elif (
+        db_product.web_compare_price is not None
+        and float(db_product.web_compare_price) <= next_sale_price
+    ):
+        data["web_compare_price"] = None
+    next_web_published = bool(data.get("web_published", db_product.web_published))
+    next_web_category = (data.get("web_category_key", db_product.web_category_key) or "").strip().lower()
+    if next_web_published and not next_web_category:
+        raise ValueError("Debes asignar una categoría web antes de publicar")
     now = datetime.utcnow()
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
@@ -2221,6 +2436,7 @@ def _build_web_catalog_filters(
                 models.Product.barcode.ilike(like),
                 models.Product.brand.ilike(like),
                 models.Product.group_name.ilike(like),
+                models.Product.web_category_key.ilike(like),
                 models.Product.web_short_description.ilike(like),
             )
         )
@@ -2229,26 +2445,25 @@ def _build_web_catalog_filters(
 
     category_rows = (
         query.with_entities(
-            models.Product.group_name,
+            models.Product.web_category_key,
             func.count(models.Product.id),
         )
-        .filter(models.Product.group_name.isnot(None))
-        .group_by(models.Product.group_name)
-        .order_by(func.count(models.Product.id).desc(), models.Product.group_name.asc())
+        .filter(models.Product.web_category_key.isnot(None))
+        .group_by(models.Product.web_category_key)
+        .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
         .all()
     )
-    categories = []
-    for path, count in category_rows:
-        if not path:
-            continue
-        group = get_product_group_by_path(db, path, tenant_id=tenant_id)
-        categories.append(
-            schemas.WebCatalogFilterOption(
-                value=path,
-                label=(group.display_name if group else path),
-                count=int(count or 0),
-            )
+    category_counts = {
+        (path or "").strip().lower(): int(count or 0) for path, count in category_rows if path
+    }
+    categories = [
+        schemas.WebCatalogFilterOption(
+            value=item["key"],
+            label=item["label"],
+            count=category_counts.get(item["key"], 0),
         )
+        for item in WEB_CATALOG_CATEGORY_OPTIONS
+    ]
 
     brand_rows = (
         query.with_entities(
@@ -2317,40 +2532,35 @@ def get_web_catalog_categories(
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
     query = (
         db.query(
-            models.ProductGroup.path,
-            models.ProductGroup.display_name,
-            models.ProductGroup.image_url,
-            models.ProductGroup.tile_color,
+            models.Product.web_category_key,
             func.count(models.Product.id).label("product_count"),
         )
-        .join(models.Product, models.Product.group_name == models.ProductGroup.path)
         .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
     )
     if effective_tenant_id is not None:
-        query = query.filter(
-            models.ProductGroup.tenant_id == effective_tenant_id,
-            models.Product.tenant_id == effective_tenant_id,
-        )
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
     rows = (
         query.group_by(
-            models.ProductGroup.path,
-            models.ProductGroup.display_name,
-            models.ProductGroup.image_url,
-            models.ProductGroup.tile_color,
+            models.Product.web_category_key,
         )
-        .order_by(func.count(models.Product.id).desc(), models.ProductGroup.display_name.asc())
+        .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
         .all()
     )
+    counts = {
+        (row.web_category_key or "").strip().lower(): int(row.product_count or 0)
+        for row in rows
+        if row.web_category_key
+    }
     return [
         schemas.WebCatalogCategory(
-            id=row.path,
-            path=row.path,
-            name=row.display_name,
-            image_url=row.image_url,
-            tile_color=row.tile_color,
-            product_count=int(row.product_count or 0),
+            id=item["key"],
+            path=item["key"],
+            name=item["label"],
+            image_url=None,
+            tile_color=None,
+            product_count=counts.get(item["key"], 0),
         )
-        for row in rows
+        for item in WEB_CATALOG_CATEGORY_OPTIONS
     ]
 
 
@@ -2398,17 +2608,19 @@ def get_web_catalog_products(
                 models.Product.barcode.ilike(like),
                 models.Product.brand.ilike(like),
                 models.Product.group_name.ilike(like),
+                models.Product.web_category_key.ilike(like),
                 models.Product.web_short_description.ilike(like),
             )
         )
     if category:
-        query = query.filter(models.Product.group_name == category)
+        query = query.filter(models.Product.web_category_key == category)
     if brand:
         query = query.filter(models.Product.brand == brand)
     if featured is not None:
         query = query.filter(models.Product.web_featured.is_(featured))
 
     qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
+    web_sale_price_col = _build_web_sale_price_sql_expression()
     query = query.filter(
         or_(
             models.Product.web_visible_when_out_of_stock.is_(True),
@@ -2418,9 +2630,9 @@ def get_web_catalog_products(
         )
     )
     if sort == "price_asc":
-        query = query.order_by(models.Product.price.asc(), models.Product.name.asc())
+        query = query.order_by(web_sale_price_col.asc(), models.Product.name.asc())
     elif sort == "price_desc":
-        query = query.order_by(models.Product.price.desc(), models.Product.name.asc())
+        query = query.order_by(web_sale_price_col.desc(), models.Product.name.asc())
     elif sort == "name_asc":
         query = query.order_by(models.Product.name.asc())
     else:
@@ -2440,7 +2652,8 @@ def get_web_catalog_products(
         if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
             continue
         price_mode = (product.web_price_mode or "visible").strip().lower()
-        price = float(product.price) if price_mode == "visible" else None
+        sale_price = resolve_web_product_sale_price(product)
+        price = sale_price if price_mode == "visible" else None
         items.append(
             schemas.WebCatalogProductCard(
                 id=product.id,
@@ -2450,17 +2663,15 @@ def get_web_catalog_products(
                 badge_text=(product.web_badge_text or None),
                 short_description=product.web_short_description,
                 brand=product.brand,
-                category_path=product.group_name,
-                category_name=category_name or product.group_name,
+                group_name=category_name or product.group_name,
+                category_path=product.web_category_key,
+                category_name=resolve_web_catalog_category_label(product.web_category_key),
                 image_url=product.image_url,
                 image_thumb_url=product.image_thumb_url,
+                gallery=_build_product_gallery_urls(product),
                 price_mode=price_mode,
                 price=price,
-                compare_price=(
-                    float(product.web_compare_price)
-                    if product.web_compare_price is not None and price_mode == "visible"
-                    else None
-                ),
+                compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
                 stock_status=stock_status,
                 featured=bool(product.web_featured),
             )
@@ -2520,6 +2731,7 @@ def get_web_catalog_product_by_slug(
         if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
             return None
         price_mode = (product.web_price_mode or "visible").strip().lower()
+        sale_price = resolve_web_product_sale_price(product)
         return schemas.WebCatalogProductDetail(
             id=product.id,
             sku=product.sku,
@@ -2529,18 +2741,15 @@ def get_web_catalog_product_by_slug(
             short_description=product.web_short_description,
             long_description=product.web_long_description,
             brand=product.brand,
-            category_path=product.group_name,
-            category_name=category_name or product.group_name,
+            group_name=category_name or product.group_name,
+            category_path=product.web_category_key,
+            category_name=resolve_web_catalog_category_label(product.web_category_key),
             image_url=product.image_url,
             image_thumb_url=product.image_thumb_url,
-            gallery=[url for url in [product.image_url, product.image_thumb_url] if url],
+            gallery=_build_product_gallery_urls(product),
             price_mode=price_mode,
-            price=(float(product.price) if price_mode == "visible" else None),
-            compare_price=(
-                float(product.web_compare_price)
-                if product.web_compare_price is not None and price_mode == "visible"
-                else None
-            ),
+            price=(sale_price if price_mode == "visible" else None),
+            compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
             stock_status=stock_status,
             specs={},
             whatsapp_message=product.web_whatsapp_message,
@@ -6515,7 +6724,7 @@ def _serialize_web_cart(
         product = item.product
         if not product:
             continue
-        unit_price = float(item.unit_price_snapshot or product.price or 0.0)
+        unit_price = float(item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
         quantity = float(item.quantity or 0.0)
         line_total = unit_price * quantity
         subtotal += line_total
@@ -6565,16 +6774,17 @@ def add_item_to_web_cart(
         raise ValueError("Producto no disponible para web")
 
     existing = _get_cart_item(db, cart.id, product.id)
+    web_unit_price = resolve_web_product_sale_price(product)
     if existing:
         existing.quantity = float(existing.quantity or 0.0) + float(payload.quantity)
-        existing.unit_price_snapshot = float(product.price or 0.0)
+        existing.unit_price_snapshot = float(web_unit_price or 0.0)
     else:
         existing = models.WebCartItem(
             tenant_id=cart.tenant_id,
             cart_id=cart.id,
             product_id=product.id,
             quantity=float(payload.quantity),
-            unit_price_snapshot=float(product.price or 0.0),
+            unit_price_snapshot=float(web_unit_price or 0.0),
         )
         db.add(existing)
 
@@ -7211,7 +7421,7 @@ def create_web_order_from_cart(
         product = cart_item.product
         if not product or not product.active or not product.web_published:
             raise ValueError("El carrito contiene productos no disponibles para web")
-        unit_price = float(cart_item.unit_price_snapshot or product.price or 0.0)
+        unit_price = float(cart_item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
         quantity = float(cart_item.quantity or 0.0)
         line_total = unit_price * quantity
         subtotal += line_total
