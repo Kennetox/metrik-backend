@@ -135,6 +135,7 @@ class Product(Base):
     web_visible_when_out_of_stock = Column(Boolean, nullable=False, default=True)
     web_price_mode = Column(String(24), nullable=False, default="visible")
     web_whatsapp_message = Column(Text, nullable=True)
+    web_warranty_text = Column(String(160), nullable=True)
     web_gallery_urls = Column(Text, nullable=True)
 
     stock_min = Column(Integer, default=0)
@@ -915,6 +916,9 @@ class WebCart(Base):
     account_id = Column(Integer, ForeignKey("web_customer_accounts.id"), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="active")
     currency = Column(String(8), nullable=False, default="COP")
+    coupon_code = Column(String(64), nullable=True)
+    coupon_discount_percent = Column(Float, nullable=False, default=0)
+    coupon_discount_code_id = Column(Integer, ForeignKey("web_discount_codes.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,
@@ -925,6 +929,7 @@ class WebCart(Base):
     converted_at = Column(DateTime, nullable=True)
 
     account = relationship("WebCustomerAccount")
+    coupon = relationship("WebDiscountCode")
     items = relationship(
         "WebCartItem",
         back_populates="cart",
@@ -954,6 +959,56 @@ class WebCartItem(Base):
 
     cart = relationship("WebCart", back_populates="items")
     product = relationship("Product")
+
+
+class WebDiscountCode(Base):
+    __tablename__ = "web_discount_codes"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="web_discount_codes_tenant_code_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    code = Column(String(64), nullable=False, index=True)
+    discount_percent = Column(Float, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    max_uses = Column(Integer, nullable=True)
+    uses_count = Column(Integer, nullable=False, default=0)
+    starts_at = Column(DateTime, nullable=True)
+    ends_at = Column(DateTime, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    creator = relationship("PosUser")
+
+
+class WebCatalogCategory(Base):
+    __tablename__ = "web_catalog_categories"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="web_catalog_categories_tenant_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    key = Column(String(64), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    image_url = Column(String(512), nullable=True)
+    tile_color = Column(String(7), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
 
 
 class WebOrder(Base):

@@ -66,3 +66,23 @@ def clear_cart(
 ):
     crud.clear_web_cart(db, account)
     return Response(status_code=204)
+
+
+@router.put("/coupon", response_model=schemas.WebCartRead)
+def apply_cart_coupon(
+    payload: schemas.WebCartCouponApplyRequest,
+    db: Session = Depends(get_db),
+    account: models.WebCustomerAccount = Depends(require_web_customer_auth),
+):
+    try:
+        return crud.apply_coupon_to_web_cart(db, account, payload.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/coupon", response_model=schemas.WebCartRead)
+def clear_cart_coupon(
+    db: Session = Depends(get_db),
+    account: models.WebCustomerAccount = Depends(require_web_customer_auth),
+):
+    return crud.clear_coupon_from_web_cart(db, account)

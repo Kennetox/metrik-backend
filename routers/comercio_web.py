@@ -132,6 +132,165 @@ def update_comercio_web_catalog_product(
     return updated
 
 
+@router.get(
+    "/catalog/categories",
+    response_model=list[schemas.ComercioWebCatalogCategoryRead],
+)
+def list_comercio_web_catalog_categories(
+    include_inactive: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_catalog_categories(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=include_inactive,
+    )
+
+
+@router.post(
+    "/catalog/categories",
+    response_model=schemas.ComercioWebCatalogCategoryRead,
+)
+def create_comercio_web_catalog_category(
+    payload: schemas.ComercioWebCatalogCategoryCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_comercio_web_catalog_category(
+            db,
+            tenant_id=tenant_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put(
+    "/catalog/categories/{category_id}",
+    response_model=schemas.ComercioWebCatalogCategoryRead,
+)
+def update_comercio_web_catalog_category(
+    category_id: int,
+    payload: schemas.ComercioWebCatalogCategoryUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_catalog_category(
+            db,
+            tenant_id=tenant_id,
+            category_id=category_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.delete("/catalog/categories/{category_id}")
+def delete_comercio_web_catalog_category(
+    category_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        crud.delete_comercio_web_catalog_category(
+            db,
+            tenant_id=tenant_id,
+            category_id=category_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return {"ok": True}
+
+
+@router.get(
+    "/catalog/discount-codes",
+    response_model=schemas.ComercioWebDiscountCodePage,
+)
+def list_comercio_web_discount_codes(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    q: Optional[str] = Query(default=None),
+    active_only: Optional[bool] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_discount_codes_page(
+        db,
+        tenant_id=tenant_id,
+        q=q,
+        active_only=active_only,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/catalog/discount-codes",
+    response_model=schemas.ComercioWebDiscountCodeRead,
+)
+def create_comercio_web_discount_code(
+    payload: schemas.ComercioWebDiscountCodeCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_comercio_web_discount_code(
+            db,
+            tenant_id=tenant_id,
+            payload=payload,
+            actor_user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put(
+    "/catalog/discount-codes/{discount_code_id}",
+    response_model=schemas.ComercioWebDiscountCodeRead,
+)
+def update_comercio_web_discount_code(
+    discount_code_id: int,
+    payload: schemas.ComercioWebDiscountCodeUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_discount_code(
+            db,
+            tenant_id=tenant_id,
+            discount_code_id=discount_code_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrado" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
 @router.get("/orders/{order_id}", response_model=schemas.WebOrderRead)
 def get_comercio_web_order(
     order_id: int,

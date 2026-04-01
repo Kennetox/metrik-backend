@@ -111,17 +111,13 @@ def build_product_web_slug(name: Optional[str], sku: Optional[str] = None) -> st
     return (fallback or "producto")[:160]
 
 
-WEB_CATALOG_CATEGORY_OPTIONS = [
-    {"key": "audio-profesional", "label": "Audio profesional"},
-    {"key": "instrumentos", "label": "Instrumentos"},
-    {"key": "microfonos", "label": "Microfonos"},
-    {"key": "accesorios", "label": "Accesorios"},
-    {"key": "camaras", "label": "Camaras"},
+DEFAULT_WEB_CATALOG_CATEGORIES = [
+    {"key": "audio-profesional", "name": "Audio profesional", "sort_order": 10},
+    {"key": "instrumentos", "name": "Instrumentos", "sort_order": 20},
+    {"key": "microfonos", "name": "Microfonos", "sort_order": 30},
+    {"key": "accesorios", "name": "Accesorios", "sort_order": 40},
+    {"key": "camaras", "name": "Camaras", "sort_order": 50},
 ]
-
-WEB_CATALOG_CATEGORY_LABELS = {
-    item["key"]: item["label"] for item in WEB_CATALOG_CATEGORY_OPTIONS
-}
 WEB_PRICE_SOURCE_DEFAULT = "base"
 WEB_PRICE_SOURCE_FIXED = "fixed"
 WEB_PRICE_SOURCE_DISCOUNT_PERCENT = "discount_percent"
@@ -182,11 +178,146 @@ def _build_web_sale_price_sql_expression():
     )
 
 
-def resolve_web_catalog_category_label(category_key: Optional[str]) -> Optional[str]:
-    if not isinstance(category_key, str):
+def _normalize_web_catalog_category_key(value: Optional[str]) -> str:
+    normalized = _slugify_text(value or "")
+    return normalized[:64]
+
+
+def _humanize_web_catalog_category_key(value: str) -> str:
+    chunks = [chunk for chunk in (value or "").replace("_", "-").split("-") if chunk]
+    if not chunks:
+        return "Categoria"
+    return " ".join(chunk.capitalize() for chunk in chunks)
+
+
+def _seed_default_web_catalog_categories(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+) -> None:
+    existing_count = (
+        db.query(func.count(models.WebCatalogCategory.id))
+        .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+        .scalar()
+    )
+    now = datetime.utcnow()
+    if int(existing_count or 0) == 0:
+        rows = [
+            models.WebCatalogCategory(
+                tenant_id=tenant_id,
+                key=item["key"],
+                name=item["name"],
+                sort_order=int(item["sort_order"]),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            for item in DEFAULT_WEB_CATALOG_CATEGORIES
+        ]
+        db.add_all(rows)
+        db.commit()
+
+    # Backfill any legacy keys already assigned to products but missing in category table.
+    used_rows = (
+        db.query(models.Product.web_category_key)
+        .filter(
+            models.Product.tenant_id == tenant_id if tenant_id is not None else true(),
+            models.Product.web_category_key.isnot(None),
+            func.trim(models.Product.web_category_key) != "",
+        )
+        .group_by(models.Product.web_category_key)
+        .all()
+    )
+    existing_keys = {
+        _normalize_web_catalog_category_key(item.key)
+        for item in (
+            db.query(models.WebCatalogCategory)
+            .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+            .all()
+        )
+    }
+    next_order_base = 1000
+    pending_rows: list[models.WebCatalogCategory] = []
+    for index, (raw_key,) in enumerate(used_rows):
+        normalized_key = _normalize_web_catalog_category_key(raw_key)
+        if not normalized_key or normalized_key in existing_keys:
+            continue
+        pending_rows.append(
+            models.WebCatalogCategory(
+                tenant_id=tenant_id,
+                key=normalized_key,
+                name=_humanize_web_catalog_category_key(normalized_key),
+                sort_order=next_order_base + index,
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        existing_keys.add(normalized_key)
+    if pending_rows:
+        db.add_all(pending_rows)
+        db.commit()
+
+
+def _get_tenant_web_catalog_categories(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    include_inactive: bool = False,
+    ensure_seeded: bool = True,
+) -> list[models.WebCatalogCategory]:
+    if ensure_seeded:
+        _seed_default_web_catalog_categories(db, tenant_id=tenant_id)
+    query = db.query(models.WebCatalogCategory).filter(models.WebCatalogCategory.tenant_id == tenant_id)
+    if not include_inactive:
+        query = query.filter(models.WebCatalogCategory.is_active.is_(True))
+    return (
+        query.order_by(
+            models.WebCatalogCategory.sort_order.asc(),
+            models.WebCatalogCategory.name.asc(),
+            models.WebCatalogCategory.id.asc(),
+        )
+        .all()
+    )
+
+
+def _get_tenant_web_catalog_category_map(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    include_inactive: bool = True,
+    ensure_seeded: bool = True,
+) -> dict[str, models.WebCatalogCategory]:
+    rows = _get_tenant_web_catalog_categories(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=include_inactive,
+        ensure_seeded=ensure_seeded,
+    )
+    mapping: dict[str, models.WebCatalogCategory] = {}
+    for item in rows:
+        normalized = _normalize_web_catalog_category_key(item.key)
+        if normalized:
+            mapping[normalized] = item
+    return mapping
+
+
+def resolve_web_catalog_category_label(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    category_key: Optional[str],
+) -> Optional[str]:
+    normalized = _normalize_web_catalog_category_key(category_key)
+    if not normalized:
         return None
-    normalized = category_key.strip().lower()
-    return WEB_CATALOG_CATEGORY_LABELS.get(normalized)
+    category = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    ).get(normalized)
+    return category.name if category else None
 
 
 def _should_sync_company_name_from_tenant(
@@ -1745,6 +1876,10 @@ def _web_publication_configured_expression():
         models.Product.web_whatsapp_message.is_not(None),
         func.trim(models.Product.web_whatsapp_message) != "",
     )
+    has_non_empty_warranty = and_(
+        models.Product.web_warranty_text.is_not(None),
+        func.trim(models.Product.web_warranty_text) != "",
+    )
     return or_(
         models.Product.web_published.is_(True),
         models.Product.web_featured.is_(True),
@@ -1760,6 +1895,7 @@ def _web_publication_configured_expression():
         func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "consultar",
         models.Product.web_visible_when_out_of_stock.is_(False),
         has_non_empty_whatsapp_message,
+        has_non_empty_warranty,
         func.coalesce(models.Product.web_sort_order, 0) > 0,
     )
 
@@ -1963,6 +2099,344 @@ def list_comercio_web_publications_page(
     }
 
 
+def list_comercio_web_catalog_categories(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    include_inactive: bool = True,
+) -> list[schemas.ComercioWebCatalogCategoryRead]:
+    rows = _get_tenant_web_catalog_categories(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=include_inactive,
+        ensure_seeded=True,
+    )
+    count_rows = (
+        db.query(
+            models.Product.web_category_key,
+            func.count(models.Product.id).label("product_count"),
+        )
+        .filter(
+            models.Product.tenant_id == tenant_id if tenant_id is not None else true(),
+            models.Product.web_category_key.isnot(None),
+            func.trim(models.Product.web_category_key) != "",
+        )
+        .group_by(models.Product.web_category_key)
+        .all()
+    )
+    counts = {
+        _normalize_web_catalog_category_key(path): int(total or 0)
+        for path, total in count_rows
+        if path
+    }
+    return [
+        schemas.ComercioWebCatalogCategoryRead(
+            id=item.id,
+            key=item.key,
+            name=item.name,
+            image_url=item.image_url,
+            tile_color=item.tile_color,
+            sort_order=int(item.sort_order or 0),
+            is_active=bool(item.is_active),
+            product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+        for item in rows
+    ]
+
+
+def create_comercio_web_catalog_category(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    payload: schemas.ComercioWebCatalogCategoryCreate,
+) -> schemas.ComercioWebCatalogCategoryRead:
+    key = _normalize_web_catalog_category_key(payload.key)
+    if not key:
+        raise ValueError("Clave de categoría inválida")
+    existing = (
+        db.query(models.WebCatalogCategory)
+        .filter(
+            models.WebCatalogCategory.tenant_id == tenant_id,
+            models.WebCatalogCategory.key == key,
+        )
+        .first()
+    )
+    if existing:
+        raise ValueError("Ya existe una categoría con esa clave")
+    now = datetime.utcnow()
+    row = models.WebCatalogCategory(
+        tenant_id=tenant_id,
+        key=key,
+        name=payload.name.strip(),
+        image_url=(payload.image_url or None),
+        tile_color=(payload.tile_color or None),
+        sort_order=int(payload.sort_order or 0),
+        is_active=bool(payload.is_active),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return schemas.ComercioWebCatalogCategoryRead(
+        id=row.id,
+        key=row.key,
+        name=row.name,
+        image_url=row.image_url,
+        tile_color=row.tile_color,
+        sort_order=int(row.sort_order or 0),
+        is_active=bool(row.is_active),
+        product_count=0,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def update_comercio_web_catalog_category(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    category_id: int,
+    payload: schemas.ComercioWebCatalogCategoryUpdate,
+) -> schemas.ComercioWebCatalogCategoryRead:
+    row = (
+        db.query(models.WebCatalogCategory)
+        .filter(
+            models.WebCatalogCategory.id == category_id,
+            models.WebCatalogCategory.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Categoría no encontrada")
+    data = payload.model_dump(exclude_unset=True)
+    old_key = _normalize_web_catalog_category_key(row.key)
+    if "key" in data:
+        next_key = _normalize_web_catalog_category_key(data.get("key"))
+        if not next_key:
+            raise ValueError("Clave de categoría inválida")
+        duplicate = (
+            db.query(models.WebCatalogCategory.id)
+            .filter(
+                models.WebCatalogCategory.tenant_id == tenant_id,
+                models.WebCatalogCategory.key == next_key,
+                models.WebCatalogCategory.id != row.id,
+            )
+            .first()
+        )
+        if duplicate:
+            raise ValueError("Ya existe una categoría con esa clave")
+        row.key = next_key
+    if "name" in data:
+        row.name = (data.get("name") or "").strip()
+    if "image_url" in data:
+        row.image_url = data.get("image_url") or None
+    if "tile_color" in data:
+        row.tile_color = data.get("tile_color") or None
+    if "sort_order" in data:
+        row.sort_order = int(data.get("sort_order") or 0)
+    if "is_active" in data:
+        row.is_active = bool(data.get("is_active"))
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+
+    # Keep published assignments aligned when key changes.
+    next_key = _normalize_web_catalog_category_key(row.key)
+    if old_key and next_key and old_key != next_key:
+        (
+            db.query(models.Product)
+            .filter(
+                models.Product.tenant_id == tenant_id if tenant_id is not None else true(),
+                models.Product.web_category_key == old_key,
+            )
+            .update({models.Product.web_category_key: next_key}, synchronize_session=False)
+        )
+    db.commit()
+    db.refresh(row)
+    assigned_count = (
+        db.query(func.count(models.Product.id))
+        .filter(
+            models.Product.tenant_id == tenant_id if tenant_id is not None else true(),
+            models.Product.web_category_key == row.key,
+        )
+        .scalar()
+    )
+    return schemas.ComercioWebCatalogCategoryRead(
+        id=row.id,
+        key=row.key,
+        name=row.name,
+        image_url=row.image_url,
+        tile_color=row.tile_color,
+        sort_order=int(row.sort_order or 0),
+        is_active=bool(row.is_active),
+        product_count=int(assigned_count or 0),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def delete_comercio_web_catalog_category(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    category_id: int,
+) -> None:
+    row = (
+        db.query(models.WebCatalogCategory)
+        .filter(
+            models.WebCatalogCategory.id == category_id,
+            models.WebCatalogCategory.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Categoría no encontrada")
+    assigned_count = (
+        db.query(func.count(models.Product.id))
+        .filter(
+            models.Product.tenant_id == tenant_id if tenant_id is not None else true(),
+            models.Product.web_category_key == row.key,
+        )
+        .scalar()
+    )
+    if int(assigned_count or 0) > 0:
+        raise ValueError("No puedes eliminar una categoría con productos asignados")
+    db.delete(row)
+    db.commit()
+
+
+def _normalize_discount_code(value: str) -> str:
+    return (value or "").strip().upper()
+
+
+def list_comercio_web_discount_codes_page(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    q: Optional[str] = None,
+    active_only: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> schemas.ComercioWebDiscountCodePage:
+    query = db.query(models.WebDiscountCode)
+    if tenant_id is not None:
+        query = query.filter(models.WebDiscountCode.tenant_id == tenant_id)
+
+    term = (q or "").strip()
+    if term:
+        query = query.filter(models.WebDiscountCode.code.ilike(f"%{term}%"))
+
+    if active_only is True:
+        query = query.filter(models.WebDiscountCode.is_active.is_(True))
+    elif active_only is False:
+        query = query.filter(models.WebDiscountCode.is_active.is_(False))
+
+    total = query.count()
+    rows = (
+        query.order_by(
+            models.WebDiscountCode.is_active.desc(),
+            models.WebDiscountCode.updated_at.desc(),
+            models.WebDiscountCode.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return schemas.ComercioWebDiscountCodePage(items=rows, total=total, skip=skip, limit=limit)
+
+
+def create_comercio_web_discount_code(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    payload: schemas.ComercioWebDiscountCodeCreate,
+    actor_user_id: Optional[int] = None,
+) -> models.WebDiscountCode:
+    code = _normalize_discount_code(payload.code)
+    if not code:
+        raise ValueError("El código no puede estar vacío")
+    if payload.ends_at and payload.starts_at and payload.ends_at < payload.starts_at:
+        raise ValueError("La fecha fin debe ser mayor o igual a la fecha inicio")
+    if payload.max_uses is not None and int(payload.max_uses) < 1:
+        raise ValueError("El uso máximo debe ser mayor a 0")
+
+    existing = db.query(models.WebDiscountCode).filter(
+        models.WebDiscountCode.tenant_id == tenant_id,
+        models.WebDiscountCode.code == code,
+    ).first()
+    if existing:
+        raise ValueError("Ya existe un código con ese nombre")
+
+    row = models.WebDiscountCode(
+        tenant_id=tenant_id,
+        code=code,
+        discount_percent=float(payload.discount_percent),
+        is_active=bool(payload.is_active),
+        max_uses=int(payload.max_uses) if payload.max_uses is not None else None,
+        uses_count=0,
+        starts_at=payload.starts_at,
+        ends_at=payload.ends_at,
+        created_by_user_id=actor_user_id,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_comercio_web_discount_code(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    discount_code_id: int,
+    payload: schemas.ComercioWebDiscountCodeUpdate,
+) -> models.WebDiscountCode:
+    row = db.query(models.WebDiscountCode).filter(
+        models.WebDiscountCode.id == discount_code_id,
+        models.WebDiscountCode.tenant_id == tenant_id,
+    ).first()
+    if not row:
+        raise ValueError("Código de descuento no encontrado")
+
+    data = payload.model_dump(exclude_unset=True)
+    if "code" in data:
+        normalized_code = _normalize_discount_code(str(data["code"]))
+        if not normalized_code:
+            raise ValueError("El código no puede estar vacío")
+        duplicate = db.query(models.WebDiscountCode).filter(
+            models.WebDiscountCode.tenant_id == tenant_id,
+            models.WebDiscountCode.code == normalized_code,
+            models.WebDiscountCode.id != row.id,
+        ).first()
+        if duplicate:
+            raise ValueError("Ya existe un código con ese nombre")
+        row.code = normalized_code
+
+    if "discount_percent" in data and data["discount_percent"] is not None:
+        row.discount_percent = float(data["discount_percent"])
+    if "is_active" in data and data["is_active"] is not None:
+        row.is_active = bool(data["is_active"])
+    if "max_uses" in data:
+        max_uses = data.get("max_uses")
+        if max_uses is not None and int(max_uses) < 1:
+            raise ValueError("El uso máximo debe ser mayor a 0")
+        row.max_uses = int(max_uses) if max_uses is not None else None
+    if "starts_at" in data:
+        row.starts_at = data["starts_at"]
+    if "ends_at" in data:
+        row.ends_at = data["ends_at"]
+
+    if row.ends_at and row.starts_at and row.ends_at < row.starts_at:
+        raise ValueError("La fecha fin debe ser mayor o igual a la fecha inicio")
+
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def get_catalog_version(
     db: Session,
     tenant_id: Optional[int] = None,
@@ -2068,6 +2542,20 @@ def create_product(
         if product_in.web_compare_price is not None and float(product_in.web_compare_price) > sale_price
         else None
     )
+    normalized_web_category_key = _normalize_web_catalog_category_key(product_in.web_category_key)
+    if normalized_web_category_key:
+        category_map = _get_tenant_web_catalog_category_map(
+            db,
+            tenant_id=effective_tenant_id,
+            include_inactive=True,
+            ensure_seeded=True,
+        )
+        if normalized_web_category_key not in category_map:
+            raise ValueError("Categoría web inválida")
+        if not bool(category_map[normalized_web_category_key].is_active):
+            raise ValueError("La categoría web seleccionada está inactiva")
+    if product_in.web_published and not normalized_web_category_key:
+        raise ValueError("Debes asignar una categoría web antes de publicar")
 
     db_product = models.Product(
         tenant_id=effective_tenant_id,
@@ -2112,11 +2600,12 @@ def create_product(
         web_price_source=web_price_source,
         web_price_value=web_price_value,
         web_badge_text=product_in.web_badge_text,
-        web_category_key=product_in.web_category_key,
+        web_category_key=(normalized_web_category_key or None),
         web_sort_order=product_in.web_sort_order,
         web_visible_when_out_of_stock=product_in.web_visible_when_out_of_stock,
         web_price_mode=product_in.web_price_mode,
         web_whatsapp_message=product_in.web_whatsapp_message,
+        web_warranty_text=product_in.web_warranty_text,
         web_gallery_urls=(
             json.dumps(_parse_product_gallery_urls(product_in.web_gallery_urls), ensure_ascii=False)
             if _parse_product_gallery_urls(product_in.web_gallery_urls)
@@ -2151,10 +2640,19 @@ def update_product(
             data.get("sku") or db_product.sku,
         )
     if "web_category_key" in data:
-        next_category = (data.get("web_category_key") or "").strip().lower()
+        next_category = _normalize_web_catalog_category_key(data.get("web_category_key"))
         data["web_category_key"] = next_category or None
-        if next_category and next_category not in WEB_CATALOG_CATEGORY_LABELS:
-            raise ValueError("Categoría web inválida")
+        if next_category:
+            category_map = _get_tenant_web_catalog_category_map(
+                db,
+                tenant_id=db_product.tenant_id,
+                include_inactive=True,
+                ensure_seeded=True,
+            )
+            if next_category not in category_map:
+                raise ValueError("Categoría web inválida")
+            if not bool(category_map[next_category].is_active):
+                raise ValueError("La categoría web seleccionada está inactiva")
     if "web_price_source" in data:
         data["web_price_source"] = _normalize_web_price_source(
             data.get("web_price_source"),
@@ -2203,9 +2701,23 @@ def update_product(
     ):
         data["web_compare_price"] = None
     next_web_published = bool(data.get("web_published", db_product.web_published))
-    next_web_category = (data.get("web_category_key", db_product.web_category_key) or "").strip().lower()
+    next_web_category = _normalize_web_catalog_category_key(
+        data.get("web_category_key", db_product.web_category_key)
+    )
     if next_web_published and not next_web_category:
         raise ValueError("Debes asignar una categoría web antes de publicar")
+    if next_web_published and next_web_category:
+        category_map = _get_tenant_web_catalog_category_map(
+            db,
+            tenant_id=db_product.tenant_id,
+            include_inactive=True,
+            ensure_seeded=True,
+        )
+        category_def = category_map.get(_normalize_web_catalog_category_key(next_web_category))
+        if category_def is None:
+            raise ValueError("Categoría web inválida")
+        if not bool(category_def.is_active):
+            raise ValueError("La categoría web seleccionada está inactiva")
     now = datetime.utcnow()
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
@@ -2666,15 +3178,23 @@ def _build_web_catalog_filters(
         .all()
     )
     category_counts = {
-        (path or "").strip().lower(): int(count or 0) for path, count in category_rows if path
+        _normalize_web_catalog_category_key(path): int(count or 0)
+        for path, count in category_rows
+        if path
     }
+    category_defs = _get_tenant_web_catalog_categories(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=False,
+        ensure_seeded=True,
+    )
     categories = [
         schemas.WebCatalogFilterOption(
-            value=item["key"],
-            label=item["label"],
-            count=category_counts.get(item["key"], 0),
+            value=item.key,
+            label=item.name,
+            count=category_counts.get(_normalize_web_catalog_category_key(item.key), 0),
         )
-        for item in WEB_CATALOG_CATEGORY_OPTIONS
+        for item in category_defs
     ]
 
     brand_rows = (
@@ -2752,27 +3272,31 @@ def get_web_catalog_categories(
     if effective_tenant_id is not None:
         query = query.filter(models.Product.tenant_id == effective_tenant_id)
     rows = (
-        query.group_by(
-            models.Product.web_category_key,
-        )
+        query.group_by(models.Product.web_category_key)
         .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
         .all()
     )
     counts = {
-        (row.web_category_key or "").strip().lower(): int(row.product_count or 0)
+        _normalize_web_catalog_category_key(row.web_category_key): int(row.product_count or 0)
         for row in rows
         if row.web_category_key
     }
+    categories = _get_tenant_web_catalog_categories(
+        db,
+        tenant_id=effective_tenant_id,
+        include_inactive=False,
+        ensure_seeded=True,
+    )
     return [
         schemas.WebCatalogCategory(
-            id=item["key"],
-            path=item["key"],
-            name=item["label"],
-            image_url=None,
-            tile_color=None,
-            product_count=counts.get(item["key"], 0),
+            id=item.key,
+            path=item.key,
+            name=item.name,
+            image_url=item.image_url,
+            tile_color=item.tile_color,
+            product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
         )
-        for item in WEB_CATALOG_CATEGORY_OPTIONS
+        for item in categories
     ]
 
 
@@ -2789,6 +3313,12 @@ def get_web_catalog_products(
     page_size: int = 24,
 ) -> schemas.WebCatalogProductList:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    category_map = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=effective_tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    )
     stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
 
     query = (
@@ -2825,7 +3355,7 @@ def get_web_catalog_products(
             )
         )
     if category:
-        query = query.filter(models.Product.web_category_key == category)
+        query = query.filter(models.Product.web_category_key == _normalize_web_catalog_category_key(category))
     if brand:
         query = query.filter(models.Product.brand == brand)
     if featured is not None:
@@ -2860,6 +3390,7 @@ def get_web_catalog_products(
     rows = query.offset(skip).limit(page_size).all()
     items: List[schemas.WebCatalogProductCard] = []
     for product, qty_on_hand, category_name in rows:
+        category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
         stock_status = resolve_web_product_stock_status(product, qty_on_hand)
         if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
             continue
@@ -2877,7 +3408,7 @@ def get_web_catalog_products(
                 brand=product.brand,
                 group_name=category_name or product.group_name,
                 category_path=product.web_category_key,
-                category_name=resolve_web_catalog_category_label(product.web_category_key),
+                category_name=(category_def.name if category_def else None),
                 image_url=product.image_url,
                 image_thumb_url=product.image_thumb_url,
                 gallery=_build_product_gallery_urls(product),
@@ -2910,6 +3441,12 @@ def get_web_catalog_product_by_slug(
     tenant_id: Optional[int] = None,
 ) -> Optional[schemas.WebCatalogProductDetail]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    category_map = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=effective_tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    )
     stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
     rows = (
         db.query(
@@ -2936,6 +3473,7 @@ def get_web_catalog_product_by_slug(
     )
     normalized_slug = build_product_web_slug(slug)
     for product, qty_on_hand, category_name in rows:
+        category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
         resolved_slug = resolve_product_web_slug(product)
         if resolved_slug != normalized_slug:
             continue
@@ -2950,12 +3488,13 @@ def get_web_catalog_product_by_slug(
             slug=resolved_slug,
             name=resolve_product_web_name(product),
             badge_text=(product.web_badge_text or None),
+            featured=bool(product.web_featured),
             short_description=product.web_short_description,
             long_description=product.web_long_description,
             brand=product.brand,
             group_name=category_name or product.group_name,
             category_path=product.web_category_key,
-            category_name=resolve_web_catalog_category_label(product.web_category_key),
+            category_name=(category_def.name if category_def else None),
             image_url=product.image_url,
             image_thumb_url=product.image_thumb_url,
             gallery=_build_product_gallery_urls(product),
@@ -2963,6 +3502,7 @@ def get_web_catalog_product_by_slug(
             price=(sale_price if price_mode == "visible" else None),
             compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
             stock_status=stock_status,
+            warranty_text=product.web_warranty_text,
             specs={},
             whatsapp_message=product.web_whatsapp_message,
         )
@@ -6744,26 +7284,35 @@ def create_web_customer_account(
     tenant_id: Optional[int] = None,
 ) -> models.WebCustomerAccount:
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    normalized_name = payload.name.strip()
+    if not normalized_name:
+        raise ValueError("El nombre es obligatorio")
     normalized_email = payload.email.strip().lower()
+    normalized_phone = payload.phone.strip() if payload.phone and payload.phone.strip() else None
+    normalized_tax_id = payload.tax_id.strip() if payload.tax_id and payload.tax_id.strip() else None
+    normalized_address = payload.address.strip() if payload.address and payload.address.strip() else None
     existing = get_web_customer_account_by_email(db, normalized_email, tenant_id=effective_tenant_id)
     if existing:
         raise ValueError("Ya existe una cuenta registrada con ese correo")
 
     customer = _find_pos_customer_by_email(db, normalized_email, tenant_id=effective_tenant_id)
     if customer:
-        customer.name = payload.name
-        customer.phone = payload.phone
-        customer.tax_id = payload.tax_id
-        customer.address = payload.address
+        customer.name = normalized_name
+        if normalized_phone is not None:
+            customer.phone = normalized_phone
+        if normalized_tax_id is not None:
+            customer.tax_id = normalized_tax_id
+        if normalized_address is not None:
+            customer.address = normalized_address
         customer.is_active = True
     else:
         customer = models.PosCustomer(
             tenant_id=effective_tenant_id,
-            name=payload.name,
-            phone=payload.phone,
+            name=normalized_name,
+            phone=normalized_phone,
             email=normalized_email,
-            tax_id=payload.tax_id,
-            address=payload.address,
+            tax_id=normalized_tax_id,
+            address=normalized_address,
             is_active=True,
         )
         db.add(customer)
@@ -6922,6 +7471,60 @@ def _get_web_cart_stock_snapshot(
     return {int(product_id): float(qty_on_hand or 0.0) for product_id, qty_on_hand in rows}
 
 
+def _resolve_valid_discount_code(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    code: Optional[str] = None,
+    discount_code_id: Optional[int] = None,
+) -> Optional[models.WebDiscountCode]:
+    query = db.query(models.WebDiscountCode).filter(
+        models.WebDiscountCode.tenant_id == tenant_id,
+    )
+    if discount_code_id is not None:
+        query = query.filter(models.WebDiscountCode.id == int(discount_code_id))
+    elif code:
+        query = query.filter(models.WebDiscountCode.code == _normalize_discount_code(code))
+    else:
+        return None
+
+    row = query.first()
+    if not row:
+        return None
+
+    now = datetime.utcnow()
+    if not bool(row.is_active):
+        return None
+    if row.starts_at and row.starts_at > now:
+        return None
+    if row.ends_at and row.ends_at < now:
+        return None
+    if row.max_uses is not None and int(row.uses_count or 0) >= int(row.max_uses):
+        return None
+    return row
+
+
+def _resolve_cart_coupon_snapshot(
+    db: Session,
+    cart: models.WebCart,
+) -> tuple[Optional[str], float, Optional[models.WebDiscountCode]]:
+    saved_code = _normalize_discount_code(getattr(cart, "coupon_code", None) or "")
+    saved_percent = float(getattr(cart, "coupon_discount_percent", 0.0) or 0.0)
+    saved_code_id = getattr(cart, "coupon_discount_code_id", None)
+    if not saved_code or saved_percent <= 0:
+        return None, 0.0, None
+
+    valid_row = _resolve_valid_discount_code(
+        db,
+        tenant_id=cart.tenant_id,
+        code=saved_code,
+        discount_code_id=saved_code_id,
+    )
+    if not valid_row:
+        return None, 0.0, None
+    return saved_code, min(100.0, max(0.0, saved_percent)), valid_row
+
+
 def _serialize_web_cart(
     db: Session,
     cart: models.WebCart,
@@ -6930,7 +7533,7 @@ def _serialize_web_cart(
     product_ids = [item.product_id for item in items]
     qty_by_product = _get_web_cart_stock_snapshot(db, cart.tenant_id, product_ids)
     serialized_items: list[schemas.WebCartItemRead] = []
-    subtotal = 0.0
+    subtotal_base = 0.0
 
     for item in items:
         product = item.product
@@ -6939,7 +7542,7 @@ def _serialize_web_cart(
         unit_price = float(item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
         quantity = float(item.quantity or 0.0)
         line_total = unit_price * quantity
-        subtotal += line_total
+        subtotal_base += line_total
         serialized_items.append(
             schemas.WebCartItemRead(
                 id=item.id,
@@ -6952,9 +7555,17 @@ def _serialize_web_cart(
                 stock_status=resolve_web_product_stock_status(product, qty_by_product.get(product.id, 0.0)),
                 quantity=quantity,
                 unit_price=unit_price,
+                compare_price=resolve_web_compare_price(product, sale_price=unit_price),
                 line_total=line_total,
             )
         )
+
+    coupon_code, coupon_discount_percent, _ = _resolve_cart_coupon_snapshot(db, cart)
+    discount_amount = 0.0
+    if coupon_code and coupon_discount_percent > 0:
+        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
+        discount_amount = min(discount_amount, subtotal_base)
+    total = max(0.0, subtotal_base - discount_amount)
 
     return schemas.WebCartRead(
         id=cart.id,
@@ -6962,7 +7573,12 @@ def _serialize_web_cart(
         currency=cart.currency,
         items=serialized_items,
         items_count=len(serialized_items),
-        subtotal=subtotal,
+        subtotal_base=subtotal_base,
+        discount_amount=discount_amount,
+        subtotal=total,
+        total=total,
+        coupon_code=coupon_code,
+        coupon_discount_percent=coupon_discount_percent,
         updated_at=cart.updated_at,
     )
 
@@ -7035,6 +7651,51 @@ def clear_web_cart(
     cart = get_or_create_active_web_cart(db, account)
     for item in list(cart.items or []):
         db.delete(item)
+    cart.coupon_code = None
+    cart.coupon_discount_percent = 0.0
+    cart.coupon_discount_code_id = None
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+    return get_web_cart(db, account)
+
+
+def apply_coupon_to_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+    code: str,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    if not list(cart.items or []):
+        raise ValueError("El carrito está vacío")
+    normalized = _normalize_discount_code(code)
+    if not normalized:
+        raise ValueError("Ingresa un código válido")
+    row = _resolve_valid_discount_code(
+        db,
+        tenant_id=account.tenant_id,
+        code=normalized,
+    )
+    if not row:
+        raise ValueError("El código no está disponible o ya venció")
+
+    cart.coupon_code = normalized
+    cart.coupon_discount_percent = float(row.discount_percent or 0.0)
+    cart.coupon_discount_code_id = int(row.id)
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+    return get_web_cart(db, account)
+
+
+def clear_coupon_from_web_cart(
+    db: Session,
+    account: models.WebCustomerAccount,
+) -> schemas.WebCartRead:
+    cart = get_or_create_active_web_cart(db, account)
+    cart.coupon_code = None
+    cart.coupon_discount_percent = 0.0
+    cart.coupon_discount_code_id = None
     cart.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(cart)
@@ -7603,7 +8264,7 @@ def create_web_order_from_cart(
     number = get_next_web_order_number(db, tenant_id=account.tenant_id)
     document_number = f"OW-{number:06d}"
 
-    subtotal = 0.0
+    subtotal_base = 0.0
     order = models.WebOrder(
         tenant_id=account.tenant_id,
         web_order_number=number,
@@ -7636,7 +8297,7 @@ def create_web_order_from_cart(
         unit_price = float(cart_item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
         quantity = float(cart_item.quantity or 0.0)
         line_total = unit_price * quantity
-        subtotal += line_total
+        subtotal_base += line_total
         db.add(
             models.WebOrderItem(
                 tenant_id=order.tenant_id,
@@ -7652,8 +8313,15 @@ def create_web_order_from_cart(
             )
         )
 
-    order.subtotal = subtotal
-    order.total = subtotal
+    coupon_code, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
+    discount_amount = 0.0
+    if coupon_code and coupon_discount_percent > 0:
+        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
+        discount_amount = min(discount_amount, subtotal_base)
+
+    order.subtotal = subtotal_base
+    order.discount_amount = discount_amount
+    order.total = max(0.0, subtotal_base - discount_amount)
     _create_web_order_status_log(
         db,
         order,
@@ -7664,6 +8332,12 @@ def create_web_order_from_cart(
     )
 
     cart.status = "converted"
+    if valid_coupon is not None:
+        valid_coupon.uses_count = int(valid_coupon.uses_count or 0) + 1
+        db.add(valid_coupon)
+    cart.coupon_code = None
+    cart.coupon_discount_percent = 0.0
+    cart.coupon_discount_code_id = None
     cart.converted_at = datetime.utcnow()
     cart.updated_at = datetime.utcnow()
 

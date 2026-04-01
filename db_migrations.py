@@ -56,6 +56,38 @@ def _ensure_column_postgres(
     )
 
 
+def _ensure_web_discount_code_schema(connection, backend: str) -> None:
+    table = "web_discount_codes"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        _ensure_column_postgres(connection, table, "max_uses", "INTEGER")
+        _ensure_column_postgres(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
+        return
+
+    if not _table_exists(connection, table):
+        return
+    _ensure_column(connection, table, "max_uses", "INTEGER")
+    _ensure_column(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_web_cart_coupon_schema(connection, backend: str) -> None:
+    table = "web_carts"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        _ensure_column_postgres(connection, table, "coupon_code", "VARCHAR(64)")
+        _ensure_column_postgres(connection, table, "coupon_discount_percent", "FLOAT NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "coupon_discount_code_id", "INTEGER")
+        return
+
+    if not _table_exists(connection, table):
+        return
+    _ensure_column(connection, table, "coupon_code", "TEXT")
+    _ensure_column(connection, table, "coupon_discount_percent", "FLOAT NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "coupon_discount_code_id", "INTEGER")
+
+
 def _table_exists_postgres(connection, table: str) -> bool:
     row = connection.execute(
         text(
@@ -570,6 +602,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "products",
                     "web_whatsapp_message",
                     "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
+                    "web_warranty_text",
+                    "VARCHAR(160)",
                 )
                 _ensure_column_postgres(
                     connection,
@@ -1103,6 +1141,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _backfill_legacy_users_to_default_tenant_postgres(connection)
                 _backfill_company_name_from_tenant_postgres(connection)
+                _ensure_web_discount_code_schema(connection, backend="postgresql")
+                _ensure_web_cart_coupon_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -1364,6 +1404,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     )
                     _ensure_column(connection, "products", "web_price_mode", "TEXT DEFAULT 'visible'")
                     _ensure_column(connection, "products", "web_whatsapp_message", "TEXT")
+                    _ensure_column(connection, "products", "web_warranty_text", "TEXT")
                     _ensure_column(connection, "products", "web_gallery_urls", "TEXT")
                     _ensure_column(connection, "products", "web_category_key", "TEXT")
                     connection.execute(
@@ -2186,6 +2227,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                     },
                 )
                 _backfill_legacy_users_to_default_tenant_sqlite(connection)
+                _ensure_web_discount_code_schema(connection, backend="sqlite")
+                _ensure_web_cart_coupon_schema(connection, backend="sqlite")
+
+
 def _ensure_table_password_resets(connection) -> None:
     if not _table_exists(connection, "password_resets"):
         connection.execute(

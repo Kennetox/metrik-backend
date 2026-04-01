@@ -17,14 +17,33 @@ router = APIRouter(
 )
 
 
+def _split_customer_name(full_name: Optional[str]) -> tuple[str, str]:
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def _compose_customer_name(first_name: Optional[str], last_name: Optional[str]) -> str:
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    combined = f"{first} {last}".strip()
+    return combined
+
+
 def _serialize_web_customer(account: models.WebCustomerAccount) -> schemas.WebCustomerRead:
     customer = account.customer
     if not customer:
         raise HTTPException(status_code=500, detail="Cuenta web sin cliente asociado")
+    first_name, last_name = _split_customer_name(customer.name)
     return schemas.WebCustomerRead(
         id=account.id,
         pos_customer_id=customer.id,
         name=customer.name,
+        first_name=first_name or None,
+        last_name=last_name or None,
         email=account.email,
         phone=customer.phone,
         tax_id=customer.tax_id,
@@ -185,6 +204,44 @@ def login_web_customer(
 def get_current_web_customer(
     account: models.WebCustomerAccount = Depends(require_web_customer_auth),
 ):
+    return _serialize_web_customer(account)
+
+
+@router.patch("/me", response_model=schemas.WebCustomerRead)
+def update_current_web_customer(
+    payload: schemas.WebCustomerProfileUpdateRequest,
+    account: models.WebCustomerAccount = Depends(require_web_customer_auth),
+    db: Session = Depends(get_db),
+):
+    customer = account.customer
+    if not customer:
+        raise HTTPException(status_code=500, detail="Cuenta web sin cliente asociado")
+
+    current_first_name, current_last_name = _split_customer_name(customer.name)
+    next_first_name = (
+        payload.first_name.strip()
+        if payload.first_name is not None
+        else current_first_name
+    )
+    next_last_name = (
+        payload.last_name.strip()
+        if payload.last_name is not None
+        else current_last_name
+    )
+
+    next_name = _compose_customer_name(next_first_name, next_last_name)
+    if not next_name:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio")
+
+    customer.name = next_name
+    customer.phone = payload.phone.strip() if payload.phone is not None and payload.phone.strip() else None
+    customer.tax_id = payload.tax_id.strip() if payload.tax_id is not None and payload.tax_id.strip() else None
+    customer.address = payload.address.strip() if payload.address is not None and payload.address.strip() else None
+
+    db.add(customer)
+    db.commit()
+    db.refresh(account)
+
     return _serialize_web_customer(account)
 
 

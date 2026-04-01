@@ -58,6 +58,7 @@ class ProductBase(BaseModel):
     web_visible_when_out_of_stock: bool = True
     web_price_mode: Literal["visible", "consultar"] = "visible"
     web_whatsapp_message: Optional[str] = None
+    web_warranty_text: Optional[str] = None
     web_gallery_urls: List[str] = Field(default_factory=list)
 
 
@@ -105,6 +106,7 @@ class ProductUpdate(BaseModel):
     web_visible_when_out_of_stock: Optional[bool] = None
     web_price_mode: Optional[Literal["visible", "consultar"]] = None
     web_whatsapp_message: Optional[str] = None
+    web_warranty_text: Optional[str] = None
     web_gallery_urls: Optional[List[str]] = None
     tile_color: Optional[str] = Field(
         default=None,
@@ -226,6 +228,86 @@ class ComercioWebCatalogPublicationPage(BaseModel):
     stats: ComercioWebCatalogPublicationStats
 
 
+class ComercioWebDiscountCodeBase(BaseModel):
+    code: str = Field(min_length=3, max_length=64)
+    discount_percent: float = Field(gt=0, le=100)
+    is_active: bool = True
+    max_uses: Optional[int] = Field(default=None, ge=1)
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+
+class ComercioWebDiscountCodeCreate(ComercioWebDiscountCodeBase):
+    pass
+
+
+class ComercioWebDiscountCodeUpdate(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=3, max_length=64)
+    discount_percent: Optional[float] = Field(default=None, gt=0, le=100)
+    is_active: Optional[bool] = None
+    max_uses: Optional[int] = Field(default=None, ge=1)
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+
+
+class ComercioWebDiscountCodeRead(ComercioWebDiscountCodeBase):
+    id: int
+    uses_count: int = 0
+    created_by_user_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ComercioWebDiscountCodePage(BaseModel):
+    items: List[ComercioWebDiscountCodeRead] = Field(default_factory=list)
+    total: int
+    skip: int
+    limit: int
+
+
+class ComercioWebCatalogCategoryBase(BaseModel):
+    key: SlugStr
+    name: NonEmptyStr
+    image_url: Optional[str] = None
+    tile_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
+    sort_order: int = 0
+    is_active: bool = True
+
+
+class ComercioWebCatalogCategoryCreate(ComercioWebCatalogCategoryBase):
+    pass
+
+
+class ComercioWebCatalogCategoryUpdate(BaseModel):
+    key: Optional[SlugStr] = None
+    name: Optional[NonEmptyStr] = None
+    image_url: Optional[str] = None
+    tile_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class ComercioWebCatalogCategoryRead(ComercioWebCatalogCategoryBase):
+    id: int
+    product_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ProductAuditLogRead(BaseModel):
     id: int
     product_id: int
@@ -311,6 +393,7 @@ class WebCatalogProductDetail(BaseModel):
     slug: str
     name: str
     badge_text: Optional[str] = None
+    featured: bool
     short_description: Optional[str] = None
     long_description: Optional[str] = None
     brand: Optional[str] = None
@@ -324,6 +407,7 @@ class WebCatalogProductDetail(BaseModel):
     price: Optional[float] = None
     compare_price: Optional[float] = None
     stock_status: WebCatalogStockStatus
+    warranty_text: Optional[str] = None
     specs: Dict[str, str]
     whatsapp_message: Optional[str] = None
 
@@ -1672,6 +1756,8 @@ class WebCustomerRead(BaseModel):
     id: int
     pos_customer_id: int
     name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: EmailStr
     phone: Optional[str] = None
     tax_id: Optional[str] = None
@@ -1687,6 +1773,14 @@ class WebCustomerAuthResponse(BaseModel):
     expires_at: datetime
 
 
+class WebCustomerProfileUpdateRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    tax_id: Optional[str] = None
+    address: Optional[str] = None
+
+
 class WebCartItemMutationRequest(BaseModel):
     product_id: int
     quantity: float = Field(gt=0)
@@ -1694,6 +1788,10 @@ class WebCartItemMutationRequest(BaseModel):
 
 class WebCartItemUpdateRequest(BaseModel):
     quantity: float = Field(ge=0)
+
+
+class WebCartCouponApplyRequest(BaseModel):
+    code: str = Field(min_length=3, max_length=64)
 
 
 class WebCartItemRead(BaseModel):
@@ -1707,6 +1805,7 @@ class WebCartItemRead(BaseModel):
     stock_status: WebCatalogStockStatus
     quantity: float
     unit_price: float
+    compare_price: Optional[float] = None
     line_total: float
 
 
@@ -1716,7 +1815,12 @@ class WebCartRead(BaseModel):
     currency: str
     items: List[WebCartItemRead]
     items_count: int
+    subtotal_base: float = 0
+    discount_amount: float = 0
     subtotal: float
+    total: float
+    coupon_code: Optional[str] = None
+    coupon_discount_percent: float = 0
     updated_at: datetime
 
 
