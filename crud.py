@@ -3319,6 +3319,11 @@ def get_web_catalog_products(
         include_inactive=True,
         ensure_seeded=True,
     )
+    inactive_category_keys = {
+        _normalize_web_catalog_category_key(item.key)
+        for item in category_map.values()
+        if not bool(item.is_active)
+    }
     stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
 
     query = (
@@ -3339,6 +3344,13 @@ def get_web_catalog_products(
     )
     if effective_tenant_id is not None:
         query = query.filter(models.Product.tenant_id == effective_tenant_id)
+    if inactive_category_keys:
+        query = query.filter(
+            or_(
+                models.Product.web_category_key.is_(None),
+                ~models.Product.web_category_key.in_(inactive_category_keys),
+            )
+        )
 
     term = (q or "").strip()
     if term:
@@ -3447,6 +3459,11 @@ def get_web_catalog_product_by_slug(
         include_inactive=True,
         ensure_seeded=True,
     )
+    inactive_category_keys = {
+        _normalize_web_catalog_category_key(item.key)
+        for item in category_map.values()
+        if not bool(item.is_active)
+    }
     stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
     rows = (
         db.query(
@@ -3473,6 +3490,9 @@ def get_web_catalog_product_by_slug(
     )
     normalized_slug = build_product_web_slug(slug)
     for product, qty_on_hand, category_name in rows:
+        normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
+        if normalized_category_key and normalized_category_key in inactive_category_keys:
+            continue
         category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
         resolved_slug = resolve_product_web_slug(product)
         if resolved_slug != normalized_slug:
