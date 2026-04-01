@@ -1092,6 +1092,7 @@ def get_receiving_lot_item(
 def search_receiving_products(
     db: Session,
     q: str,
+    skip: int = 0,
     limit: int = 20,
     tenant_id: Optional[int] = None,
 ) -> List[models.Product]:
@@ -1111,6 +1112,7 @@ def search_receiving_products(
         )
     return (
         query.order_by(models.Product.name.asc(), models.Product.id.asc())
+        .offset(skip)
         .limit(limit)
         .all()
     )
@@ -2733,15 +2735,26 @@ def update_product(
     if "investment_status" in data:
         next_status = (data.get("investment_status") or "").strip().lower()
         if next_status in {"active", "paused", "archived"}:
-            if not bool(data.get("is_investment", db_product.is_investment)):
-                data["is_investment"] = True
-            if next_status == "active":
-                data["investment_enabled_at"] = now
-                data["investment_disabled_at"] = None
-            else:
-                if db_product.investment_enabled_at is None:
-                    data["investment_enabled_at"] = now
+            explicit_is_investment = "is_investment" in data
+            next_is_investment = bool(data.get("is_investment", db_product.is_investment))
+
+            # Si el request desactiva explícitamente inversión, ese valor manda
+            # y evita que investment_status reactive el producto.
+            if explicit_is_investment and not next_is_investment:
+                data["investment_status"] = "archived"
+                data["investment_enabled_at"] = None
                 data["investment_disabled_at"] = now
+            else:
+                if not next_is_investment:
+                    data["is_investment"] = True
+                    next_is_investment = True
+                if next_status == "active":
+                    data["investment_enabled_at"] = now
+                    data["investment_disabled_at"] = None
+                else:
+                    if db_product.investment_enabled_at is None:
+                        data["investment_enabled_at"] = now
+                    data["investment_disabled_at"] = now
     if "label_format" in data or "group_name" in data:
         next_group_name = data.get("group_name", db_product.group_name)
         if "label_format" in data:

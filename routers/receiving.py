@@ -245,12 +245,19 @@ def list_receiving_lots(
 @router.get("/products/search", response_model=List[schemas.ReceivingProductLookup])
 def search_receiving_products(
     q: str = Query(default="", min_length=0),
+    skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
     tenant_id = _require_tenant_id(db, current_user)
-    products = crud.search_receiving_products(db, q=q, limit=limit, tenant_id=tenant_id)
+    products = crud.search_receiving_products(
+        db,
+        q=q,
+        skip=skip,
+        limit=limit,
+        tenant_id=tenant_id,
+    )
     return [schemas.ReceivingProductLookup.model_validate(product) for product in products]
 
 
