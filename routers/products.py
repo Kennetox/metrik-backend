@@ -247,6 +247,9 @@ def create_product(
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
+    if actor.role != "Administrador":
+        product_in = product_in.model_copy(update={"is_investment": False})
+
     tenant_id = crud.resolve_user_tenant_id(db, actor)
     # Si quieres evitar SKUs duplicados:
     if product_in.sku:
@@ -300,6 +303,14 @@ def update_product(
     db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    if actor.role != "Administrador":
+        sanitized = _model_dump(product_in)
+        sanitized.pop("is_investment", None)
+        sanitized.pop("investment_status", None)
+        sanitized.pop("investment_enabled_at", None)
+        sanitized.pop("investment_disabled_at", None)
+        product_in = schemas.ProductUpdate(**sanitized)
 
     # Si cambia el SKU, comprobamos duplicado
     if product_in.sku and product_in.sku != db_product.sku:
