@@ -1094,9 +1094,12 @@ def search_receiving_products(
     q: str,
     skip: int = 0,
     limit: int = 20,
+    include_inactive: bool = False,
     tenant_id: Optional[int] = None,
 ) -> List[models.Product]:
-    query = db.query(models.Product).filter(models.Product.active.is_(True))
+    query = db.query(models.Product)
+    if not include_inactive:
+        query = query.filter(models.Product.active.is_(True))
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.Product.tenant_id == effective_tenant_id)

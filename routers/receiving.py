@@ -247,6 +247,7 @@ def search_receiving_products(
     q: str = Query(default="", min_length=0),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
+    include_inactive: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
@@ -256,6 +257,7 @@ def search_receiving_products(
         q=q,
         skip=skip,
         limit=limit,
+        include_inactive=include_inactive,
         tenant_id=tenant_id,
     )
     return [schemas.ReceivingProductLookup.model_validate(product) for product in products]
