@@ -71,6 +71,11 @@ def _get_webhook_url() -> str:
     return (os.getenv("MERCADOPAGO_WEBHOOK_URL") or "https://api.metrikpos.com/web/payments/mercadopago/webhook").strip()
 
 
+def _is_guest_order_reuse_enabled() -> bool:
+    raw = (os.getenv("WEB_GUEST_REUSE_PENDING_ORDER") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _mercadopago_request(
     method: str,
     path: str,
@@ -730,46 +735,47 @@ def _create_guest_order(
     currency = "COP"
 
     crud.expire_stale_web_orders(db, tenant_id=tenant_id)
-    reusable = crud.find_reusable_pending_web_order(
-        db,
-        tenant_id=tenant_id,
-        account_id=guest_account.id,
-        customer_email=customer_email,
-        currency=currency,
-        subtotal=subtotal_amount,
-        discount_amount=0.0,
-        total=subtotal_amount,
-        item_signature=crud.build_web_order_item_signature(line_items_payload),
-    )
-    if reusable:
-        if reusable.status == "payment_failed":
-            crud._transition_web_order_status(
+    if _is_guest_order_reuse_enabled():
+        reusable = crud.find_reusable_pending_web_order(
+            db,
+            tenant_id=tenant_id,
+            account_id=guest_account.id,
+            customer_email=customer_email,
+            currency=currency,
+            subtotal=subtotal_amount,
+            discount_amount=0.0,
+            total=subtotal_amount,
+            item_signature=crud.build_web_order_item_signature(line_items_payload),
+        )
+        if reusable:
+            if reusable.status == "payment_failed":
+                crud._transition_web_order_status(
+                    db,
+                    reusable,
+                    to_status="pending_payment",
+                    note="Reintento de pago en checkout invitado",
+                    actor_type="guest",
+                )
+            reusable.customer_name = customer_name
+            reusable.customer_email = customer_email
+            reusable.customer_phone = customer_phone
+            reusable.customer_tax_id = customer_tax_id
+            reusable.customer_address = customer_address
+            reusable.notes = ((payload.notes or "").strip() or reusable.notes)
+            reusable.updated_at = datetime.utcnow()
+            crud._create_web_order_status_log(
                 db,
                 reusable,
-                to_status="pending_payment",
-                note="Reintento de pago en checkout invitado",
+                from_status=reusable.status,
+                to_status=reusable.status,
+                note="Orden invitada reutilizada para reintento de pago",
                 actor_type="guest",
             )
-        reusable.customer_name = customer_name
-        reusable.customer_email = customer_email
-        reusable.customer_phone = customer_phone
-        reusable.customer_tax_id = customer_tax_id
-        reusable.customer_address = customer_address
-        reusable.notes = ((payload.notes or "").strip() or reusable.notes)
-        reusable.updated_at = datetime.utcnow()
-        crud._create_web_order_status_log(
-            db,
-            reusable,
-            from_status=reusable.status,
-            to_status=reusable.status,
-            note="Orden invitada reutilizada para reintento de pago",
-            actor_type="guest",
-        )
-        db.commit()
-        stored = crud.get_backoffice_web_order(db, reusable.id, tenant_id=tenant_id)
-        if not stored:
-            raise HTTPException(status_code=500, detail="No se pudo recuperar la orden invitada.")
-        return stored
+            db.commit()
+            stored = crud.get_backoffice_web_order(db, reusable.id, tenant_id=tenant_id)
+            if not stored:
+                raise HTTPException(status_code=500, detail="No se pudo recuperar la orden invitada.")
+            return stored
 
     number = crud.get_next_web_order_number(db, tenant_id=tenant_id)
     document_number = f"OW-{number:06d}"
