@@ -352,6 +352,17 @@ def test_send_sale_email_requires_recipients(client: TestClient, monkeypatch):
     assert "Ticket" in captured["subject"]
     assert captured["smtp_config"]["smtp_host"] == "smtp.kensar.com"
     assert captured["cc"] == ["cc@example.com"]
+    assert "Resumen de valores" in captured["html_body"]
+    assert "Adjunto encontrarás el PDF" in captured["html_body"]
+    assert "Efectivo" in captured["html_body"]
+    assert "POS:" not in captured["html_body"]
+    assert "Descuento carrito" not in captured["html_body"]
+    assert "<strong>Productos</strong>" in captured["html_body"]
+    assert "Nombre" in captured["html_body"]
+    assert "Cantidad" in captured["html_body"]
+    assert "Precio" in captured["html_body"]
+    assert "Descuento" in captured["html_body"]
+    assert "Total" in captured["html_body"]
 
     resp = client.post(
         f"/pos/sales/{sale_id}/email",

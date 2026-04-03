@@ -1941,6 +1941,72 @@ class WebOrderConvertToSaleRequest(BaseModel):
     note: Optional[str] = None
 
 
+class MercadoPagoPayerIdentification(BaseModel):
+    type: Optional[str] = None
+    number: Optional[str] = None
+
+
+class MercadoPagoPayerInput(BaseModel):
+    email: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    identification: Optional[MercadoPagoPayerIdentification] = None
+
+
+class WebMercadoPagoCheckoutCreateRequest(BaseModel):
+    order_id: int
+    payer: Optional[MercadoPagoPayerInput] = None
+
+
+class WebGuestCheckoutItemInput(BaseModel):
+    product_id: int
+    quantity: float = Field(gt=0)
+
+
+class WebGuestMercadoPagoCheckoutCreateRequest(BaseModel):
+    items: List[WebGuestCheckoutItemInput]
+    customer_email: EmailStr
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_tax_id: Optional[str] = None
+    customer_address: Optional[str] = None
+    notes: Optional[str] = None
+    payer: Optional[MercadoPagoPayerInput] = None
+
+
+class WebMercadoPagoCheckoutCreateResponse(BaseModel):
+    order_id: int
+    provider: str
+    preference_id: str
+    init_point: Optional[str] = None
+    sandbox_init_point: Optional[str] = None
+    public_key: Optional[str] = None
+    order_access_token: Optional[str] = None
+
+
+class WebMercadoPagoOrderPaymentStatusResponse(BaseModel):
+    order_id: int
+    web_order_number: Optional[int] = None
+    document_number: Optional[str] = None
+    status: WebOrderStatus
+    payment_status: WebOrderPaymentStatus
+    subtotal: float = 0.0
+    discount_amount: float = 0.0
+    shipping_amount: float = 0.0
+    total: float = 0.0
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    sale_id: Optional[int] = None
+    sale_document_number: Optional[str] = None
+    provider: Optional[str] = None
+    provider_reference: Optional[str] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    payment_record_status: Optional[WebOrderPaymentStatus] = None
+    items: List[WebOrderItemRead] = Field(default_factory=list)
+    updated_at: datetime
+
+
 class ReturnPaymentBase(BaseModel):
     method: str
     amount: float
@@ -2742,12 +2808,14 @@ class EmailSendRequest(BaseModel):
     message: Optional[str] = None
     attach_pdf: bool = False
     document_type: Literal["ticket", "invoice"] = "ticket"
+    send_both_documents: bool = False
     extra_html_attachments: List[HtmlAttachment] = Field(default_factory=list)
 
 
 class EmailSendResponse(BaseModel):
     status: str = "sent"
     document_type: Literal["ticket", "invoice"] = "ticket"
+    sent_both_documents: bool = False
 
 
 class SaleDocumentResponse(BaseModel):

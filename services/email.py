@@ -1,6 +1,7 @@
 import os
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr, parseaddr
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -47,6 +48,11 @@ def send_email(
 
     smtp_host = _get_config_value(smtp_config, "smtp_host") or os.getenv("SMTP_HOST")
     email_from = _get_config_value(smtp_config, "email_from") or os.getenv("EMAIL_FROM")
+    email_from_name = (
+        _get_config_value(smtp_config, "email_from_name")
+        or _get_config_value(smtp_config, "company_name")
+        or os.getenv("EMAIL_FROM_NAME")
+    )
     config_port = _get_config_value(smtp_config, "smtp_port")
     smtp_port = int(config_port) if config_port else int(os.getenv("SMTP_PORT", "587"))
     smtp_user = _get_config_value(smtp_config, "smtp_user") or os.getenv("SMTP_USER")
@@ -66,9 +72,14 @@ def send_email(
     cc_list = [addr for addr in (cc or []) if addr]
     all_recipients = list(recipient_list) + cc_list
 
+    parsed_name, parsed_email = parseaddr(str(email_from))
+    sender_email = (parsed_email or str(email_from or "")).strip()
+    sender_name = (str(email_from_name or "").strip() or parsed_name.strip())
+    from_header = formataddr((sender_name, sender_email)) if sender_name else sender_email
+
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = email_from
+    message["From"] = from_header
     message["To"] = ", ".join(recipient_list)
     if cc_list:
         message["Cc"] = ", ".join(cc_list)
@@ -96,6 +107,6 @@ def send_email(
         with server:
             if smtp_user and smtp_password:
                 server.login(smtp_user, smtp_password)
-            server.sendmail(email_from, all_recipients, message.as_string())
+            server.sendmail(sender_email, all_recipients, message.as_string())
     except Exception as exc:  # pragma: no cover - actual network errors
         raise EmailDeliveryError(str(exc)) from exc

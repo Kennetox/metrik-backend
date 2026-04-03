@@ -1044,6 +1044,10 @@ class WebOrder(Base):
     converted_to_sale_at = Column(DateTime, nullable=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True, index=True)
     sale_document_number = Column(String, nullable=True)
+    customer_approval_email_sent_at = Column(DateTime, nullable=True)
+    customer_approval_email_last_error = Column(Text, nullable=True)
+    internal_approval_email_sent_at = Column(DateTime, nullable=True)
+    internal_approval_email_last_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,

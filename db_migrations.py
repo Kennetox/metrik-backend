@@ -1136,6 +1136,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_tenant_index_postgres(connection, table)
                 for table in shared_tenant_tables:
                     _ensure_tenant_index_postgres(connection, table)
+                _ensure_column_postgres(connection, "web_orders", "customer_approval_email_sent_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "web_orders", "customer_approval_email_last_error", "TEXT")
+                _ensure_column_postgres(connection, "web_orders", "internal_approval_email_sent_at", "TIMESTAMP")
+                _ensure_column_postgres(connection, "web_orders", "internal_approval_email_last_error", "TEXT")
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
@@ -2826,6 +2830,30 @@ def _ensure_table_document_adjustments(connection) -> None:
             "document_adjustments",
             "created_at",
             "DATETIME",
+        )
+        _ensure_column(
+            connection,
+            "web_orders",
+            "customer_approval_email_sent_at",
+            "DATETIME",
+        )
+        _ensure_column(
+            connection,
+            "web_orders",
+            "customer_approval_email_last_error",
+            "TEXT",
+        )
+        _ensure_column(
+            connection,
+            "web_orders",
+            "internal_approval_email_sent_at",
+            "DATETIME",
+        )
+        _ensure_column(
+            connection,
+            "web_orders",
+            "internal_approval_email_last_error",
+            "TEXT",
         )
         _ensure_products_tenant_scoped_unique_indexes(connection, backend="sqlite")
         _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="sqlite")

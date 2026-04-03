@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from dotenv import load_dotenv
 from database import Base, engine, SessionLocal
 import models
 import crud
@@ -32,6 +33,7 @@ from routers import (
     web_customers as web_customers_router,
     web_cart as web_cart_router,
     web_orders as web_orders_router,
+    web_payments_mercadopago as web_payments_mercadopago_router,
     comercio_web as comercio_web_router,
     platform as platform_router,
     investment as investment_router,
@@ -42,6 +44,9 @@ app = FastAPI(
     version="0.1.0",
     description="Backend inicial del sistema Kensar 2.0"
 )
+
+# Carga variables desde `.env` para entorno local/dev.
+load_dotenv()
 
 # Kill switch del modulo de horarios (queda completamente apagado).
 ENABLE_SCHEDULE_MODULE = False
@@ -185,6 +190,7 @@ app.include_router(web_catalog_router.router)
 app.include_router(web_customers_router.router)
 app.include_router(web_cart_router.router)
 app.include_router(web_orders_router.router)
+app.include_router(web_payments_mercadopago_router.router)
 app.include_router(comercio_web_router.router)
 app.include_router(platform_router.router)
 app.include_router(investment_router.router)

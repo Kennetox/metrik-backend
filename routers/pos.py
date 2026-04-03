@@ -89,7 +89,343 @@ def _smtp_settings_dict(settings: models.PosSettings) -> dict:
         "smtp_password": settings.smtp_password,
         "smtp_use_tls": settings.smtp_use_tls,
         "email_from": settings.email_from,
+        "company_name": settings.company_name,
     }
+
+
+def _payment_method_labels_by_slug(
+    db: Session,
+    tenant_id: Optional[int],
+) -> dict[str, str]:
+    payment_methods = crud.list_payment_methods(db, tenant_id=tenant_id)
+    return {
+        (method.slug or "").strip().lower(): method.name.strip()
+        for method in payment_methods
+        if (method.slug or "").strip() and (method.name or "").strip()
+    }
+
+
+def _format_money_cop(value: float | int | None) -> str:
+    amount = float(value or 0.0)
+    formatted = f"{amount:,.2f}"
+    formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"${formatted}"
+
+
+def _format_datetime_bogota(dt_value: Optional[datetime]) -> str:
+    if not dt_value:
+        return "-"
+    bogota_tz = ZoneInfo("America/Bogota")
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=timezone.utc)
+    return dt_value.astimezone(bogota_tz).strftime("%d/%m/%Y %H:%M")
+
+
+def _payment_method_label_es(method: Optional[str]) -> str:
+    normalized = (method or "").strip().lower()
+    mapping = {
+        "cash": "Efectivo",
+        "efectivo": "Efectivo",
+        "card": "Tarjeta",
+        "tarjeta": "Tarjeta",
+        "credit_card": "Tarjeta",
+        "debit_card": "Tarjeta débito",
+        "debit": "Tarjeta débito",
+        "qr": "QR",
+        "nequi": "Nequi",
+        "daviplata": "Daviplata",
+        "transfer": "Transferencia",
+        "transferencia": "Transferencia",
+        "bank_transfer": "Transferencia",
+        "mixed": "Pago mixto",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    return method.strip().title() if method else "Método"
+
+
+def _resolve_payment_method_label(
+    method: Optional[str],
+    custom_labels: Optional[dict[str, str]] = None,
+) -> str:
+    normalized = (method or "").strip().lower()
+    if custom_labels and normalized and normalized in custom_labels:
+        return custom_labels[normalized]
+    return _payment_method_label_es(method)
+
+
+def _resolve_email_asset_url(raw_url: Optional[str]) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://", "data:")):
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+
+    base_candidates = [
+        os.getenv("POS_LOGO_BASE_URL"),
+        os.getenv("APP_BASE_URL"),
+        os.getenv("PUBLIC_APP_URL"),
+    ]
+    base_url = next((value.strip() for value in base_candidates if value and value.strip()), "")
+    if not base_url:
+        return url
+    return f"{base_url.rstrip('/')}/{url.lstrip('/')}"
+
+
+def _build_email_logo_footer(settings: Optional[models.PosSettings]) -> str:
+    if not settings:
+        return ""
+    logo_url = _resolve_email_asset_url(
+        settings.ticket_logo_url or settings.logo_url
+    )
+    company_name = (settings.company_name or "Kensar Electronic").strip()
+    company_address = (settings.address or "").strip()
+    company_phone = (settings.contact_phone or "").strip()
+    company_tax_id = (settings.tax_id or "").strip()
+
+    info_lines: List[str] = [
+        f"<div style='font-weight:700; margin-bottom:4px;'>{escape(company_name)}</div>"
+    ]
+    if company_address:
+        info_lines.append(f"<div><strong>Dirección:</strong> {escape(company_address)}</div>")
+    if company_phone:
+        info_lines.append(f"<div><strong>Teléfono:</strong> {escape(company_phone)}</div>")
+    if company_tax_id:
+        info_lines.append(f"<div><strong>NIT:</strong> {escape(company_tax_id)}</div>")
+
+    logo_cell = (
+        f"<img src='{escape(logo_url)}' alt='Logo {escape(company_name)}' "
+        "style='display:block; max-width:250px; max-height:100px; width:auto; height:auto;'/>"
+        if logo_url
+        else ""
+    )
+    if not logo_cell and len(info_lines) <= 1:
+        return ""
+
+    return (
+        "<div style='margin-top:18px; padding-top:12px; border-top:1px solid #e5e7eb;'>"
+        "<table role='presentation' style='width:auto; border-collapse:collapse;'>"
+        "<tr>"
+        f"<td style='width:1%; white-space:nowrap; vertical-align:top; padding:0 2px 0 0;'>{logo_cell}</td>"
+        "<td style='vertical-align:top; font-size:13px; line-height:1.5; color:#374151;'>"
+        f"{''.join(info_lines)}"
+        "</td>"
+        "</tr>"
+        "</table>"
+        "</div>"
+    )
+
+
+def _build_sale_email_body(
+    sale: models.Sale,
+    document_type: Literal["ticket", "invoice"],
+    send_both_documents: bool = False,
+    message: Optional[str] = None,
+    settings: Optional[models.PosSettings] = None,
+    payment_labels: Optional[dict[str, str]] = None,
+) -> str:
+    document_label = "Factura" if document_type == "invoice" else "Ticket"
+    document_number = sale.document_number or f"V-{sale.id:06d}"
+    sale_number = sale.sale_number or sale.id
+    customer_name = sale.customer_name or "Cliente final"
+    vendor_name = sale.vendor_name or "No definido"
+    customer_tax_id = (sale.customer_tax_id or "").strip()
+    customer_phone = (sale.customer_phone or "").strip()
+    customer_email = (sale.customer_email or "").strip()
+    customer_address = (sale.customer_address or "").strip()
+
+    payments = list(sale.payments or [])
+    payment_lines: List[str] = []
+    if payments:
+        for payment in payments:
+            method_label = _resolve_payment_method_label(
+                payment.method,
+                payment_labels,
+            )
+            payment_lines.append(
+                f"<li><strong>{escape(method_label)}:</strong> "
+                f"{_format_money_cop(payment.amount)}</li>"
+            )
+    else:
+        fallback_payment_method = _resolve_payment_method_label(
+            sale.payment_method,
+            payment_labels,
+        )
+        payment_lines.append(
+            f"<li><strong>{escape(fallback_payment_method)}:</strong> "
+            f"{_format_money_cop(sale.paid_amount)}</li>"
+        )
+
+    cart_discount_value = float(sale.cart_discount_value or 0.0)
+    item_discount_value = sum(
+        float(item.line_discount_value or 0.0) for item in (sale.items or [])
+    )
+    if item_discount_value <= 0:
+        item_discount_value = sum(float(item.discount or 0.0) for item in (sale.items or []))
+    surcharge_value = float(sale.surcharge_amount or 0.0)
+    total_value = float(sale.total or 0.0)
+    paid_value = float(sale.paid_amount or 0.0)
+    change_value = float(sale.change_amount or 0.0)
+    net_value = max(0.0, paid_value - change_value)
+
+    optional_message = (
+        f"<p><strong>Mensaje:</strong> {escape(message)}</p>" if message else ""
+    )
+    surcharge_row = (
+        f"<tr><td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:left;'>{escape(sale.surcharge_label or 'Recargo')}</td>"
+        f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(surcharge_value)}</td></tr>"
+        if surcharge_value > 0
+        else ""
+    )
+    total_discount_value = cart_discount_value + item_discount_value
+    cart_discount_row = (
+        f"<tr><td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:left;'>Descuento carrito</td>"
+        f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(cart_discount_value)}</td></tr>"
+        if cart_discount_value > 0
+        else ""
+    )
+    item_discount_row = (
+        f"<tr><td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:left;'>Descuento artículos</td>"
+        f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(item_discount_value)}</td></tr>"
+        if item_discount_value > 0
+        else ""
+    )
+    discounts_total_row = (
+        f"<tr><td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:left;'>Descuentos</td>"
+        f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(total_discount_value)}</td></tr>"
+        if total_discount_value > 0
+        else ""
+    )
+    product_rows: List[str] = []
+    for item in list(sale.items or []):
+        quantity = float(item.quantity or 0.0)
+        unit_price = float(item.unit_price_original or item.unit_price or 0.0)
+        line_discount = float(item.line_discount_value or item.discount or 0.0)
+        line_total = float(item.total or 0.0)
+        line_discount_label = _format_money_cop(line_discount) if line_discount > 0 else "-"
+        product_rows.append(
+            "<tr>"
+            f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:left; max-width:380px; word-break:break-word;'>{escape(item.product_name or 'Producto')}</td>"
+            f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{quantity:g}</td>"
+            f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(unit_price)}</td>"
+            f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{line_discount_label}</td>"
+            f"<td style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>{_format_money_cop(line_total)}</td>"
+            "</tr>"
+        )
+    if not product_rows:
+        product_rows.append(
+            "<tr>"
+            "<td colspan='5' style='padding:8px; border:1px solid #e5e7eb; text-align:center; color:#6b7280;'>"
+            "Sin productos registrados"
+            "</td>"
+            "</tr>"
+        )
+    customer_tax_id_row = (
+        f"<strong>NIT / ID:</strong> {escape(customer_tax_id)}<br/>"
+        if customer_tax_id
+        else ""
+    )
+    customer_phone_row = (
+        f"<strong>Teléfono:</strong> {escape(customer_phone)}<br/>"
+        if customer_phone
+        else ""
+    )
+    customer_email_row = (
+        f"<strong>Correo:</strong> {escape(customer_email)}<br/>"
+        if customer_email
+        else ""
+    )
+    customer_address_row = (
+        f"<strong>Dirección:</strong> {escape(customer_address)}<br/>"
+        if customer_address
+        else ""
+    )
+    sale_notes = (sale.notes or "").strip()
+    sale_notes_block = (
+        "<p style='margin: 0 0 14px;'>"
+        "<strong>Notas de la venta</strong><br/>"
+        f"<span style='white-space: pre-wrap;'>{escape(sale_notes)}</span>"
+        "</p>"
+        if sale_notes
+        else ""
+    )
+    logo_footer = _build_email_logo_footer(settings)
+    attachment_line = (
+        "Adjunto encontrarás el PDF de tu ticket y tu factura de venta."
+        if send_both_documents
+        else f"Adjunto encontrarás el PDF de tu {document_label.lower()} de venta."
+    )
+
+    return f"""
+<div style="font-family: Arial, sans-serif; font-size: 16px; line-height: 1.45; color: #111827;">
+  <p>Hola,</p>
+  <p>Te compartimos el resumen de tu compra.</p>
+  <p>{attachment_line}</p>
+  {optional_message}
+  <p>
+    <strong>{document_label}:</strong> {escape(document_number)}<br/>
+    <strong>No. venta:</strong> {sale_number}<br/>
+    <strong>Fecha:</strong> {_format_datetime_bogota(sale.created_at)}<br/>
+    <strong>Cliente:</strong> {escape(customer_name)}<br/>
+    {customer_tax_id_row}
+    {customer_phone_row}
+    {customer_email_row}
+    {customer_address_row}
+    <strong>Vendedor:</strong> {escape(vendor_name)}
+  </p>
+  {sale_notes_block}
+  <p><strong>Resumen de valores</strong></p>
+  <table style="border-collapse: collapse; width: 100%; max-width: 420px; margin-bottom: 14px;">
+    <tbody>
+      <tr>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:left;">Total venta</td>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">{_format_money_cop(total_value)}</td>
+      </tr>
+      {discounts_total_row}
+      {cart_discount_row}
+      {item_discount_row}
+      {surcharge_row}
+      <tr>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:left;">Pagado</td>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">{_format_money_cop(paid_value)}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:left;">Cambio</td>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">{_format_money_cop(change_value)}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:left;"><strong>Neto</strong></td>
+        <td style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;"><strong>{_format_money_cop(net_value)}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p><strong>Productos</strong></p>
+  <table style="border-collapse: collapse; width: 100%; max-width: 760px; margin-bottom: 12px;">
+    <thead>
+      <tr>
+        <th style="padding:6px 8px; border:1px solid #e5e7eb; text-align:left;">Nombre</th>
+        <th style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">Cantidad</th>
+        <th style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">Precio</th>
+        <th style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">Descuento</th>
+        <th style="padding:6px 8px; border:1px solid #e5e7eb; text-align:right;">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(product_rows)}
+    </tbody>
+  </table>
+  <p><strong>Pagos registrados</strong></p>
+  <ul>
+    {"".join(payment_lines)}
+  </ul>
+  <p>Si tienes dudas, responde este correo.</p>
+  <p>Gracias por tu compra.</p>
+  {logo_footer}
+</div>
+"""
 
 
 def _load_qz_env(name: str) -> str:
@@ -902,36 +1238,68 @@ def email_sale_ticket(
         )
 
     settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    payment_labels = _payment_method_labels_by_slug(db, tenant_id)
     mode = (
-        ticket_renderer.CLASSIC_INVOICE_MODE
+        ticket_renderer.INVOICE_MODE
         if email_in.document_type == "invoice"
-        else ticket_renderer.TICKET_MODE
+        else ticket_renderer.THERMAL_TICKET_MODE
     )
-    ticket_html = ticket_renderer.render_sale_ticket_html(
-        sale,
+    send_both_documents = bool(email_in.send_both_documents)
+    body_html = _build_sale_email_body(
+        sale=sale,
+        document_type=email_in.document_type,
+        send_both_documents=send_both_documents,
+        message=email_in.message,
         settings=settings,
-        mode=mode,
+        payment_labels=payment_labels,
     )
-    body_parts = []
-    if email_in.message:
-        body_parts.append(f"<p>{escape(email_in.message)}</p>")
-    body_parts.append(ticket_html)
 
     attachments = []
     if email_in.attach_pdf:
-        pdf_bytes = ticket_renderer.render_sale_ticket_pdf(
-            sale,
-            settings=settings,
-            mode=mode,
-        )
-        filename_prefix = "factura" if email_in.document_type == "invoice" else "ticket"
-        attachments.append(
-            (
-                f"{filename_prefix}_{sale.sale_number or sale.id}.pdf",
-                pdf_bytes,
-                "application/pdf",
+        if send_both_documents:
+            ticket_pdf = ticket_renderer.render_sale_ticket_pdf(
+                sale,
+                settings=settings,
+                mode=ticket_renderer.THERMAL_TICKET_MODE,
+                payment_method_labels=payment_labels,
             )
-        )
+            invoice_pdf = ticket_renderer.render_sale_ticket_pdf(
+                sale,
+                settings=settings,
+                mode=ticket_renderer.INVOICE_MODE,
+                payment_method_labels=payment_labels,
+            )
+            attachments.extend(
+                [
+                    (
+                        f"ticket_{sale.sale_number or sale.id}.pdf",
+                        ticket_pdf,
+                        "application/pdf",
+                    ),
+                    (
+                        f"factura_{sale.sale_number or sale.id}.pdf",
+                        invoice_pdf,
+                        "application/pdf",
+                    ),
+                ]
+            )
+        else:
+            pdf_bytes = ticket_renderer.render_sale_ticket_pdf(
+                sale,
+                settings=settings,
+                mode=mode,
+                payment_method_labels=payment_labels,
+            )
+            filename_prefix = (
+                "factura" if email_in.document_type == "invoice" else "ticket"
+            )
+            attachments.append(
+                (
+                    f"{filename_prefix}_{sale.sale_number or sale.id}.pdf",
+                    pdf_bytes,
+                    "application/pdf",
+                )
+            )
 
     cc = list(settings.ticket_email_cc or [])
 
@@ -948,7 +1316,7 @@ def email_sale_ticket(
         email_service.send_email(
             recipients=recipients,
             subject=subject,
-            html_body="".join(body_parts),
+            html_body=body_html,
             cc=cc,
             attachments=attachments,
             smtp_config=_smtp_settings_dict(settings),
@@ -958,7 +1326,11 @@ def email_sale_ticket(
     except email_service.EmailDeliveryError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return schemas.EmailSendResponse(status="sent", document_type=email_in.document_type)
+    return schemas.EmailSendResponse(
+        status="sent",
+        document_type=email_in.document_type,
+        sent_both_documents=send_both_documents,
+    )
 
 
 @router.get(
@@ -979,8 +1351,9 @@ def get_sale_document(
         raise HTTPException(status_code=404, detail="Venta no encontrada")
 
     settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    payment_labels = _payment_method_labels_by_slug(db, tenant_id)
     mode = (
-        ticket_renderer.CLASSIC_INVOICE_MODE
+        ticket_renderer.INVOICE_MODE
         if document_type == "invoice"
         else ticket_renderer.TICKET_MODE
     )
@@ -988,6 +1361,7 @@ def get_sale_document(
         sale,
         settings=settings,
         mode=mode,
+        payment_method_labels=payment_labels,
     )
     prefix = "factura" if document_type == "invoice" else "ticket"
     return schemas.SaleDocumentResponse(
@@ -1028,8 +1402,9 @@ def view_sale_document(
         raise HTTPException(status_code=404, detail="Venta no encontrada")
 
     settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    payment_labels = _payment_method_labels_by_slug(db, tenant_id)
     if document_type == "invoice":
-        mode = ticket_renderer.CLASSIC_INVOICE_MODE
+        mode = ticket_renderer.INVOICE_MODE
     elif layout == "thermal":
         mode = ticket_renderer.THERMAL_TICKET_MODE
     else:
@@ -1038,6 +1413,7 @@ def view_sale_document(
         sale,
         settings=settings,
         mode=mode,
+        payment_method_labels=payment_labels,
     )
     return Response(content=document_html, media_type="text/html; charset=utf-8")
 
@@ -1203,6 +1579,7 @@ def send_settings_test_email(
             else settings.smtp_use_tls
         ),
         "email_from": payload.email_from or settings.email_from,
+        "company_name": settings.company_name,
     }
     subject = payload.subject or "Prueba de correo - Kensar POS"
     message = payload.message or "Este es un correo de prueba del POS."
@@ -1953,6 +2330,9 @@ def email_closure_report(
     if email_in.message:
         body_parts.append(f"<p>{escape(email_in.message)}</p>")
     body_parts.append(closure_html)
+    logo_footer = _build_email_logo_footer(settings)
+    if logo_footer:
+        body_parts.append(logo_footer)
 
     attachments = []
     if email_in.attach_pdf:

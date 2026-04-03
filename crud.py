@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import string
@@ -30,6 +31,62 @@ def _clean_field(value):
         if value == "":
             return None
     return value
+
+
+def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 60 * 24 * 365) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, parsed))
+
+
+def _web_order_pending_expiry_minutes() -> int:
+    return _env_int("WEB_ORDER_PENDING_EXPIRY_MINUTES", 180)
+
+
+def _web_order_reuse_window_minutes() -> int:
+    return _env_int("WEB_ORDER_REUSE_WINDOW_MINUTES", 24 * 60)
+
+
+def _normalize_web_order_item_signature_value(value: Any, *, digits: int) -> float:
+    return round(float(value or 0.0), digits)
+
+
+def build_web_order_item_signature(items: Sequence[Any]) -> tuple[tuple[int, float, float, float], ...]:
+    rows: list[tuple[int, float, float, float]] = []
+    for item in (items or []):
+        if isinstance(item, dict):
+            product_id = item.get("product_id")
+            quantity = item.get("quantity")
+            unit_price = item.get("unit_price_snapshot", item.get("unit_price"))
+            line_total = item.get("line_total")
+        else:
+            product_id = getattr(item, "product_id", None)
+            quantity = getattr(item, "quantity", None)
+            unit_price = getattr(item, "unit_price_snapshot", getattr(item, "unit_price", None))
+            line_total = getattr(item, "line_total", None)
+        try:
+            pid = int(product_id)
+        except Exception:
+            continue
+        rows.append(
+            (
+                pid,
+                _normalize_web_order_item_signature_value(quantity, digits=4),
+                _normalize_web_order_item_signature_value(unit_price, digits=2),
+                _normalize_web_order_item_signature_value(line_total, digits=2),
+            )
+        )
+    rows.sort(key=lambda row: (row[0], row[2], row[1], row[3]))
+    return tuple(rows)
+
+
+def _money_eq(left: Any, right: Any) -> bool:
+    return abs(round(float(left or 0.0), 2) - round(float(right or 0.0), 2)) <= 0.01
 
 
 DEFAULT_PRODUCT_LABEL_FORMAT = "Kensar1"
@@ -3595,6 +3652,7 @@ def create_sale(
     db: Session,
     sale_in: schemas.SaleCreate,
     created_by_user_id: int | None = None,
+    tenant_id: int | None = None,
 ) -> models.Sale:
     """
     Crea una venta con sus ítems y pagos.
@@ -3725,8 +3783,8 @@ def create_sale(
     else:
         main_method = "mixed"
 
-    effective_tenant_id = get_default_tenant_id(db)
-    if created_by_user_id:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if tenant_id is None and created_by_user_id:
         creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
         if creator:
             effective_tenant_id = resolve_user_tenant_id(db, creator)
@@ -7368,6 +7426,54 @@ def create_web_customer_account(
     return get_web_customer_account(db, account.id, tenant_id=effective_tenant_id)
 
 
+def get_or_create_guest_web_customer_account(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> models.WebCustomerAccount:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    guest_email = "__guest_checkout__@kensar.local"
+    existing = get_web_customer_account_by_email(db, guest_email, tenant_id=effective_tenant_id)
+    if existing:
+        return existing
+
+    guest_customer = (
+        db.query(models.PosCustomer)
+        .filter(
+            models.PosCustomer.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true(),
+            func.lower(models.PosCustomer.email) == guest_email,
+        )
+        .first()
+    )
+    if not guest_customer:
+        guest_customer = models.PosCustomer(
+            tenant_id=effective_tenant_id,
+            name="Cliente invitado web",
+            phone=None,
+            email=guest_email,
+            tax_id=None,
+            address=None,
+            is_active=True,
+        )
+        db.add(guest_customer)
+        db.flush()
+
+    account = models.WebCustomerAccount(
+        tenant_id=effective_tenant_id,
+        pos_customer_id=guest_customer.id,
+        email=guest_email,
+        password_hash=hash_password(secrets.token_urlsafe(24)),
+        is_active=True,
+        email_verified=False,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return get_web_customer_account(db, account.id, tenant_id=effective_tenant_id)
+
+
 def revoke_web_customer_sessions(
     db: Session,
     account_id: int,
@@ -7805,6 +7911,7 @@ def list_web_orders(
     account: models.WebCustomerAccount,
     limit: int = 50,
 ) -> list[models.WebOrder]:
+    expire_stale_web_orders(db, tenant_id=account.tenant_id)
     return (
         db.query(models.WebOrder)
         .options(
@@ -7822,6 +7929,108 @@ def list_web_orders(
         .limit(limit)
         .all()
     )
+
+
+def expire_stale_web_orders(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    minutes = _web_order_pending_expiry_minutes()
+    if minutes <= 0:
+        return 0
+    instant = now or datetime.utcnow()
+    cutoff = instant - timedelta(minutes=minutes)
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+
+    query = (
+        db.query(models.WebOrder)
+        .filter(models.WebOrder.sale_id.is_(None))
+        .filter(models.WebOrder.status.in_(["pending_payment", "payment_failed"]))
+        .filter(models.WebOrder.payment_status.in_(["pending", "failed", "cancelled"]))
+        .filter(func.coalesce(models.WebOrder.updated_at, models.WebOrder.created_at) <= cutoff)
+    )
+    if effective_tenant_id is not None:
+        query = query.filter(models.WebOrder.tenant_id == effective_tenant_id)
+
+    stale_orders = query.all()
+    if not stale_orders:
+        return 0
+
+    expired = 0
+    for order in stale_orders:
+        try:
+            _transition_web_order_status(
+                db,
+                order,
+                to_status="cancelled",
+                note=f"Orden expirada por inactividad de pago (>{minutes} min).",
+                actor_type="system",
+            )
+            expired += 1
+        except ValueError:
+            continue
+    if expired > 0:
+        db.commit()
+    return expired
+
+
+def find_reusable_pending_web_order(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    account_id: int,
+    customer_email: Optional[str],
+    currency: Optional[str],
+    subtotal: float,
+    discount_amount: float,
+    total: float,
+    item_signature: tuple[tuple[int, float, float, float], ...],
+    reuse_window_minutes: Optional[int] = None,
+) -> Optional[models.WebOrder]:
+    if not item_signature:
+        return None
+    window_minutes = reuse_window_minutes
+    if window_minutes is None:
+        window_minutes = _web_order_reuse_window_minutes()
+    if window_minutes <= 0:
+        return None
+
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    normalized_currency = (currency or "COP").strip().upper()
+    normalized_email = _clean_field(customer_email)
+    if isinstance(normalized_email, str):
+        normalized_email = normalized_email.lower()
+
+    query = (
+        db.query(models.WebOrder)
+        .options(joinedload(models.WebOrder.items))
+        .filter(models.WebOrder.account_id == account_id)
+        .filter(models.WebOrder.sale_id.is_(None))
+        .filter(models.WebOrder.status.in_(["pending_payment", "payment_failed"]))
+        .filter(models.WebOrder.payment_status.in_(["pending", "failed", "cancelled"]))
+        .filter(models.WebOrder.created_at >= cutoff)
+    )
+    if tenant_id is not None:
+        query = query.filter(models.WebOrder.tenant_id == tenant_id)
+    if normalized_email:
+        query = query.filter(func.lower(models.WebOrder.customer_email) == normalized_email)
+
+    candidates = query.order_by(models.WebOrder.created_at.desc()).limit(20).all()
+    for candidate in candidates:
+        if (candidate.currency or "COP").strip().upper() != normalized_currency:
+            continue
+        if not _money_eq(candidate.subtotal, subtotal):
+            continue
+        if not _money_eq(candidate.discount_amount, discount_amount):
+            continue
+        if not _money_eq(candidate.total, total):
+            continue
+        if build_web_order_item_signature(candidate.items or []) != item_signature:
+            continue
+        return candidate
+    return None
 
 
 def _serialize_web_order(
@@ -7933,6 +8142,7 @@ def list_backoffice_web_orders(
     payment_status: Optional[str] = None,
     search: Optional[str] = None,
 ) -> list[models.WebOrder]:
+    expire_stale_web_orders(db, tenant_id=tenant_id)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     query = db.query(models.WebOrder).options(
         joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
@@ -8046,12 +8256,46 @@ def record_web_order_payment(
         raise ValueError("El monto del pago debe ser mayor que cero")
 
     payment_status = payload.status or "approved"
+    provider = _clean_field(payload.provider)
+    provider_reference = _clean_field(payload.provider_reference)
+    method = _clean_field(payload.method)
+
+    if provider and provider_reference:
+        duplicate = (
+            db.query(models.WebOrderPayment)
+            .filter(
+                models.WebOrderPayment.web_order_id == order.id,
+                models.WebOrderPayment.provider == provider,
+                models.WebOrderPayment.provider_reference == provider_reference,
+            )
+            .first()
+        )
+        if duplicate:
+            stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+            if not stored:
+                raise ValueError("No se pudo recuperar la orden actualizada")
+            return _serialize_web_order(stored)
+
+    if payment_status == "approved":
+        approved_total = (
+            db.query(func.coalesce(func.sum(models.WebOrderPayment.amount), 0.0))
+            .filter(
+                models.WebOrderPayment.web_order_id == order.id,
+                models.WebOrderPayment.status == "approved",
+            )
+            .scalar()
+        )
+        next_total = round(float(approved_total or 0.0) + amount, 2)
+        order_total = round(float(order.total or 0.0), 2)
+        if next_total - order_total > 0.01:
+            raise ValueError("El pago supera el total de la orden")
+
     payment = models.WebOrderPayment(
         tenant_id=order.tenant_id,
         web_order_id=order.id,
-        provider=_clean_field(payload.provider),
-        provider_reference=_clean_field(payload.provider_reference),
-        method=_clean_field(payload.method),
+        provider=provider,
+        provider_reference=provider_reference,
+        method=method,
         status=payment_status,
         amount=amount,
         currency=order.currency,
@@ -8255,7 +8499,12 @@ def convert_web_order_to_sale(
             for payment in approved_payments
         ],
     )
-    sale = create_sale(db, sale_payload, created_by_user_id=actor_user_id)
+    sale = create_sale(
+        db,
+        sale_payload,
+        created_by_user_id=actor_user_id,
+        tenant_id=order.tenant_id,
+    )
 
     order.sale_id = sale.id
     order.sale_document_number = sale.document_number
@@ -8297,10 +8546,93 @@ def create_web_order_from_cart(
     if not cart or not cart.items:
         raise ValueError("El carrito está vacío")
 
+    line_items_payload: list[dict[str, Any]] = []
+    subtotal_base = 0.0
+    for cart_item in cart.items:
+        product = cart_item.product
+        if not product or not product.active or not product.web_published:
+            raise ValueError("El carrito contiene productos no disponibles para web")
+        unit_price = float(cart_item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
+        quantity = float(cart_item.quantity or 0.0)
+        if quantity <= 0:
+            continue
+        line_total = unit_price * quantity
+        subtotal_base += line_total
+        line_items_payload.append(
+            {
+                "product_id": product.id,
+                "product_name_snapshot": product.name,
+                "product_sku_snapshot": product.sku,
+                "product_barcode_snapshot": product.barcode,
+                "unit_price_snapshot": unit_price,
+                "quantity": quantity,
+                "line_discount_value": 0.0,
+                "line_total": line_total,
+            }
+        )
+    if subtotal_base <= 0 or not line_items_payload:
+        raise ValueError("El carrito no tiene productos válidos para crear la orden")
+
+    coupon_code, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
+    discount_amount = 0.0
+    if coupon_code and coupon_discount_percent > 0:
+        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
+        discount_amount = min(discount_amount, subtotal_base)
+    total_amount = max(0.0, subtotal_base - discount_amount)
+    currency = (cart.currency or "COP").strip().upper()
+
+    expire_stale_web_orders(db, tenant_id=account.tenant_id)
+    reusable = find_reusable_pending_web_order(
+        db,
+        tenant_id=account.tenant_id,
+        account_id=account.id,
+        customer_email=account.email,
+        currency=currency,
+        subtotal=subtotal_base,
+        discount_amount=discount_amount,
+        total=total_amount,
+        item_signature=build_web_order_item_signature(line_items_payload),
+    )
+    if reusable:
+        if reusable.status == "payment_failed":
+            _transition_web_order_status(
+                db,
+                reusable,
+                to_status="pending_payment",
+                note="Reintento de pago desde checkout web",
+                actor_type="customer",
+            )
+        reusable.pos_customer_id = account.pos_customer_id
+        reusable.customer_name = account.customer.name if account.customer else reusable.customer_name
+        reusable.customer_email = account.email or reusable.customer_email
+        reusable.customer_phone = account.customer.phone if account.customer else reusable.customer_phone
+        reusable.customer_tax_id = account.customer.tax_id if account.customer else reusable.customer_tax_id
+        reusable.customer_address = account.customer.address if account.customer else reusable.customer_address
+        reusable.notes = _clean_field(payload.notes) or reusable.notes
+        reusable.updated_at = datetime.utcnow()
+        _create_web_order_status_log(
+            db,
+            reusable,
+            from_status=reusable.status,
+            to_status=reusable.status,
+            note="Orden reutilizada para reintento de pago desde checkout web",
+            actor_type="customer",
+        )
+
+        cart.status = "converted"
+        cart.coupon_code = None
+        cart.coupon_discount_percent = 0.0
+        cart.coupon_discount_code_id = None
+        cart.converted_at = datetime.utcnow()
+        cart.updated_at = datetime.utcnow()
+        db.commit()
+        existing = get_web_order(db, reusable.id, account.id, tenant_id=account.tenant_id)
+        if not existing:
+            raise ValueError("No se pudo recuperar la orden web reutilizada")
+        return _serialize_web_order(existing)
+
     number = get_next_web_order_number(db, tenant_id=account.tenant_id)
     document_number = f"OW-{number:06d}"
-
-    subtotal_base = 0.0
     order = models.WebOrder(
         tenant_id=account.tenant_id,
         web_order_number=number,
@@ -8319,45 +8651,31 @@ def create_web_order_from_cart(
         discount_amount=0.0,
         shipping_amount=0.0,
         total=0.0,
-        currency=cart.currency,
+        currency=currency,
         notes=_clean_field(payload.notes),
         submitted_at=datetime.utcnow(),
     )
     db.add(order)
     db.flush()
-
-    for cart_item in cart.items:
-        product = cart_item.product
-        if not product or not product.active or not product.web_published:
-            raise ValueError("El carrito contiene productos no disponibles para web")
-        unit_price = float(cart_item.unit_price_snapshot or resolve_web_product_sale_price(product) or 0.0)
-        quantity = float(cart_item.quantity or 0.0)
-        line_total = unit_price * quantity
-        subtotal_base += line_total
+    for line in line_items_payload:
         db.add(
             models.WebOrderItem(
                 tenant_id=order.tenant_id,
                 web_order_id=order.id,
-                product_id=product.id,
-                product_name_snapshot=product.name,
-                product_sku_snapshot=product.sku,
-                product_barcode_snapshot=product.barcode,
-                unit_price_snapshot=unit_price,
-                quantity=quantity,
-                line_discount_value=0.0,
-                line_total=line_total,
+                product_id=int(line["product_id"]),
+                product_name_snapshot=str(line["product_name_snapshot"]),
+                product_sku_snapshot=line.get("product_sku_snapshot"),
+                product_barcode_snapshot=line.get("product_barcode_snapshot"),
+                unit_price_snapshot=float(line["unit_price_snapshot"]),
+                quantity=float(line["quantity"]),
+                line_discount_value=float(line["line_discount_value"]),
+                line_total=float(line["line_total"]),
             )
         )
 
-    coupon_code, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
-    discount_amount = 0.0
-    if coupon_code and coupon_discount_percent > 0:
-        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
-        discount_amount = min(discount_amount, subtotal_base)
-
     order.subtotal = subtotal_base
     order.discount_amount = discount_amount
-    order.total = max(0.0, subtotal_base - discount_amount)
+    order.total = total_amount
     _create_web_order_status_log(
         db,
         order,

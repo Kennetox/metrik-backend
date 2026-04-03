@@ -8,7 +8,8 @@ from services.pdf_utils import build_pdf_from_html, build_simple_pdf
 
 TICKET_MODE = "ticket"
 THERMAL_TICKET_MODE = "thermal_ticket"
-CLASSIC_INVOICE_MODE = "classic_invoice"
+INVOICE_MODE = "invoice"
+CLASSIC_INVOICE_MODE = "classic_invoice"  # backward compatibility
 
 FALLBACK_COMPANY = {
     "name": "Kensar Electronic",
@@ -630,21 +631,23 @@ def _build_invoice_table_rows(items_summary: List[dict]) -> str:
     if not items_summary:
         return (
             "<tr>"
-            "<td class=\"number\">1</td>"
             '<td colspan="5" class="muted">Sin artículos registrados</td>'
-            "<td class=\"right\">$ 0</td>"
             "</tr>"
         )
     rows = []
-    for index, item in enumerate(items_summary, start=1):
+    for item in items_summary:
+        discount_value = float(item["discount"] or 0.0)
+        discount_display = (
+            f"-{_format_money(discount_value)}"
+            if discount_value > 0
+            else "0"
+        )
         rows.append(
             "<tr>"
-            f"<td class=\"number\">{index}</td>"
             f"<td>{_escape_html(item['name'])}</td>"
             f"<td class=\"right\">{_format_quantity(item['quantity'])}</td>"
             f"<td class=\"right\">{_format_money(item['unit_price'])}</td>"
-            '<td class="right">0,00%</td>'
-            f"<td class=\"right\">{_format_money(item['discount'])}</td>"
+            f"<td class=\"right\">{discount_display}</td>"
             f"<td class=\"right\">{_format_money(item['total'])}</td>"
             "</tr>"
         )
@@ -652,11 +655,28 @@ def _build_invoice_table_rows(items_summary: List[dict]) -> str:
 
 
 def _build_payment_rows(sale: models.Sale) -> str:
+    return _build_payment_rows_with_labels(sale, payment_method_labels=None)
+
+
+def _resolve_payment_label(
+    method: Optional[str],
+    payment_method_labels: Optional[dict[str, str]] = None,
+) -> str:
+    normalized = (method or "").strip().lower()
+    if payment_method_labels and normalized in payment_method_labels:
+        return payment_method_labels[normalized]
+    return (method or "").replace("_", " ").title() or "Pago"
+
+
+def _build_payment_rows_with_labels(
+    sale: models.Sale,
+    payment_method_labels: Optional[dict[str, str]] = None,
+) -> str:
     if not sale.payments:
         return '<div class="row"><span>Sin pagos registrados</span><span>$ 0</span></div>'
     rows = []
     for payment in sale.payments:
-        label = (payment.method or "").replace("_", " ").title() or "Pago"
+        label = _resolve_payment_label(payment.method, payment_method_labels)
         rows.append(
             "<div class=\"row\">"
             f"<span>{_escape_html(label)}</span>"
@@ -667,11 +687,18 @@ def _build_payment_rows(sale: models.Sale) -> str:
 
 
 def _build_thermal_payment_rows(sale: models.Sale) -> str:
+    return _build_thermal_payment_rows_with_labels(sale, payment_method_labels=None)
+
+
+def _build_thermal_payment_rows_with_labels(
+    sale: models.Sale,
+    payment_method_labels: Optional[dict[str, str]] = None,
+) -> str:
     if not sale.payments:
         return '<div class="line"><span>Sin pagos registrados</span><span>$ 0</span></div>'
     rows = []
     for payment in sale.payments:
-        label = (payment.method or "").replace("_", " ").title() or "Pago"
+        label = _resolve_payment_label(payment.method, payment_method_labels)
         rows.append(
             "<div class=\"line\">"
             f"<span>{_escape_html(label)}</span>"
@@ -681,28 +708,32 @@ def _build_thermal_payment_rows(sale: models.Sale) -> str:
     return "\n".join(rows)
 
 
-def _build_invoice_payment_rows(sale: models.Sale) -> str:
+def _build_invoice_payment_rows(
+    sale: models.Sale,
+    payment_method_labels: Optional[dict[str, str]] = None,
+) -> str:
     rows = []
+    has_mixed_payments = bool(sale.payments and len(sale.payments) > 1)
+    row_class = " class=\"mixed-payment-row\"" if has_mixed_payments else ""
     if sale.payments:
         for payment in sale.payments:
-            label = (payment.method or "").replace("_", " ").title() or "Pago"
+            label = _resolve_payment_label(payment.method, payment_method_labels)
             rows.append(
-                "<div class=\"row\">"
-                f"<span>{_escape_html(label)}</span>"
-                f"<span>{_format_money(payment.amount)}</span>"
-                "</div>"
+                f"<tr{row_class}>"
+                f"<td>{_escape_html(label)}</td>"
+                f"<td>{_format_money(payment.amount)}</td>"
+                "</tr>"
             )
     else:
-        label = (
-            (sale.main_payment_method or sale.payment_method or "Pago")
-            .replace("_", " ")
-            .title()
+        label = _resolve_payment_label(
+            sale.main_payment_method or sale.payment_method or "Pago",
+            payment_method_labels,
         )
         rows.append(
-            "<div class=\"row\">"
-            f"<span>{_escape_html(label)}</span>"
-            f"<span>{_format_money(sale.paid_amount)}</span>"
-            "</div>"
+            "<tr>"
+            f"<td>{_escape_html(label)}</td>"
+            f"<td>{_format_money(sale.paid_amount)}</td>"
+            "</tr>"
         )
     return "\n".join(rows)
 
@@ -1032,12 +1063,16 @@ def _render_modern_ticket_html(
     items_summary: List[dict],
     subtotal: float,
     line_discount_total: float,
+    payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
     document_number = sale.document_number or f"V-{sale.id:06d}"
     sale_number = sale.sale_number or sale.id
     formatted_date = _format_ticket_datetime(sale.created_at)
     item_rows = _build_ticket_items_rows(items_summary)
-    payment_rows = _build_payment_rows(sale)
+    payment_rows = _build_payment_rows_with_labels(
+        sale,
+        payment_method_labels=payment_method_labels,
+    )
     change_amount = float(sale.change_amount or 0.0)
     change_row = ""
     if change_amount:
@@ -1185,10 +1220,14 @@ def _render_thermal_ticket_html(
     items_summary: List[dict],
     subtotal: float,
     line_discount_total: float,
+    payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
     document_number = sale.document_number or f"V-{sale.id:06d}"
     formatted_date = _format_bogota_short_datetime(sale.created_at)
-    payment_rows = _build_thermal_payment_rows(sale)
+    payment_rows = _build_thermal_payment_rows_with_labels(
+        sale,
+        payment_method_labels=payment_method_labels,
+    )
     cart_discount_label, cart_discount_display = _cart_discount_meta(sale)
     if cart_discount_label == "Desc. carrito":
         cart_discount_label = "Descuento carrito"
@@ -1399,21 +1438,23 @@ def _render_classic_invoice_html(
     items_summary: List[dict],
     subtotal: float,
     line_discount_total: float,
+    payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
     document_number = sale.document_number or f"V-{sale.id:06d}"
     sale_number = sale.sale_number or sale.id
     formatted_date = _format_ticket_datetime(sale.created_at)
-    due_display = formatted_date
     footer_html = _footer_lines(company["footer"])
     table_rows = _build_invoice_table_rows(items_summary)
     cart_discount_label, cart_discount_display = _cart_discount_meta(sale)
     notes_block = _invoice_notes_block(sale.notes)
-    payment_rows = _build_invoice_payment_rows(sale)
+    payment_rows = _build_invoice_payment_rows(
+        sale,
+        payment_method_labels=payment_method_labels,
+    )
     paid_amount = float(sale.paid_amount or 0.0)
     total_amount = _effective_total(sale)
     change_amount = float(sale.change_amount or 0.0)
-    balance = max(0.0, total_amount - paid_amount)
-    payment_status = "Pagado" if balance <= 0.01 else "Pendiente"
+    payment_status = "Pagado" if (total_amount - paid_amount) <= 0.01 else "Pendiente"
 
     company_lines = [
         _escape_html(company["name"]),
@@ -1424,19 +1465,44 @@ def _render_classic_invoice_html(
     company_html = "<br />".join(company_lines)
 
     customer_lines = []
-    if sale.customer_name:
-        customer_lines.append(_escape_html(sale.customer_name))
+    customer_name = (sale.customer_name or "").strip()
+    if customer_name:
+        customer_lines.append(_escape_html(customer_name))
+    else:
+        customer_lines.append("Cliente Final")
     if sale.customer_tax_id:
         customer_lines.append(f"NIT / ID: {_escape_html(sale.customer_tax_id)}")
     if sale.customer_address:
-        customer_lines.append(_escape_html(sale.customer_address))
+        customer_lines.append(f"Dirección: {_escape_html(sale.customer_address)}")
     if sale.customer_phone:
         customer_lines.append(f"Teléfono: {_escape_html(sale.customer_phone)}")
     if sale.customer_email:
         customer_lines.append(f"Email: {_escape_html(sale.customer_email)}")
-    if not customer_lines:
-        customer_lines.append("Mostrador / Genérico")
     customer_html = "<br />".join(customer_lines)
+
+    surcharge_amount = _surcharge_amount(sale)
+    surcharge_row = ""
+    if surcharge_amount > 0:
+        surcharge_row = (
+            "<tr>"
+            f"<td>{_escape_html(_surcharge_label(sale))}</td>"
+            f"<td>{_format_money(surcharge_amount)}</td>"
+            "</tr>"
+        )
+    line_discount_row = ""
+    if line_discount_total > 0:
+        line_discount_row = (
+            "<tr>"
+            f"<td>Descuento artículos</td><td>- {_format_money(line_discount_total)}</td>"
+            "</tr>"
+        )
+    change_row = ""
+    if change_amount > 0:
+        change_row = (
+            "<tr>"
+            f"<td>Cambio</td><td>{_format_money(change_amount)}</td>"
+            "</tr>"
+        )
 
     parts: List[str] = [
         "<!DOCTYPE html>",
@@ -1444,138 +1510,139 @@ def _render_classic_invoice_html(
         "<head>",
         '<meta charset="utf-8" />',
         f"<title>Factura {_escape_html(document_number)}</title>",
-        f"<style>{INVOICE_STYLE}</style>",
+        "<style>",
+        "@page { size: A4; margin: 10mm; }",
+        "* { box-sizing: border-box; }",
+        "html, body { margin: 0; padding: 0; background: #ffffff; }",
+        "body { font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; color: #0f172a; }",
+        ".sheet { width: 100%; max-width: 100%; margin: 0; background: #ffffff; padding: 0; border: none; overflow: hidden; }",
+        "header { display: grid; grid-template-columns: minmax(0, 1fr) 220px; align-items: start; column-gap: 16px; border-bottom: 2px solid #1f2937; padding-bottom: 12px; margin-bottom: 18px; }",
+        ".company h1 { margin: 0; font-size: 22px; letter-spacing: 0.08em; }",
+        ".company p { margin: 2px 0; font-size: 12px; word-break: break-word; overflow-wrap: anywhere; }",
+        ".company { min-width: 0; }",
+        ".meta { font-size: 12px; width: 220px; min-width: 220px; max-width: 220px; justify-self: end; }",
+        ".meta div { margin-bottom: 4px; }",
+        ".meta .doc-number { font-size: 18px; font-weight: 700; margin-bottom: 8px; }",
+        ".meta .meta-row { display: grid; grid-template-columns: 58px 1fr; align-items: start; column-gap: 6px; margin-bottom: 4px; }",
+        ".meta .meta-row .label { font-weight: 600; color: #334155; white-space: nowrap; }",
+        ".meta .meta-row .value { text-align: right; color: #0f172a; word-break: break-word; overflow-wrap: anywhere; }",
+        ".logo img { max-width: 140px; max-height: 60px; object-fit: contain; margin-bottom: 8px; }",
+        ".info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 18px; font-size: 12px; }",
+        ".info-box { border: 1px solid #d1d5db; padding: 12px; }",
+        ".info-box strong { display: block; margin-bottom: 8px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.08em; }",
+        "table { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }",
+        "thead { background: #f8fafc; }",
+        "th, td { padding: 8px 10px; border: 1px solid #e5e7eb; text-align: left; }",
+        "th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #475569; }",
+        ".items-table th:nth-child(1), .items-table td:nth-child(1) { width: 46%; text-align: left; }",
+        ".items-table th:nth-child(2), .items-table td:nth-child(2) { width: 9%; text-align: right; }",
+        ".items-table th:nth-child(3), .items-table td:nth-child(3) { width: 15%; text-align: right; }",
+        ".items-table th:nth-child(4), .items-table td:nth-child(4) { width: 12%; text-align: right; }",
+        ".items-table th:nth-child(5), .items-table td:nth-child(5) { width: 18%; text-align: right; }",
+        ".totals { width: 100%; max-width: 360px; margin-left: auto; margin-top: 16px; font-size: 13px; table-layout: fixed; }",
+        ".totals tr td:first-child { width: 42%; text-align: left; padding-left: 12px; white-space: nowrap; }",
+        ".totals tr td:last-child { text-align: right; font-weight: 600; }",
+        ".totals tr.total td { font-size: 15px; font-weight: 700; }",
+        ".payments { margin-top: 20px; width: 100%; max-width: 360px; font-size: 12px; }",
+        ".payments th, .payments td { text-align: left; }",
+        ".payments td:last-child { text-align: right; }",
+        ".payments .mixed-payment-row td { padding-top: 10px; padding-bottom: 10px; }",
+        ".payments .mixed-payment-row + .mixed-payment-row td { border-top: 1px dashed #cbd5e1; }",
+        ".invoice-notes { margin-top: 16px; border: 1px solid #d1d5db; padding: 10px 12px; font-size: 12px; color: #334155; }",
+        ".invoice-notes .label { margin-bottom: 6px; text-transform: uppercase; font-size: 11px; letter-spacing: 0.08em; color: #64748b; font-weight: 700; }",
+        ".footer-note { margin-top: 24px; font-size: 11.5px; text-align: center; color: #475569; }",
+        "</style>",
         "</head>",
         "<body>",
-        '<div class="invoice-wrapper">',
-        '<div class="invoice-header">',
-        "<div>",
-        '<div class="invoice-title">FACTURA</div>',
-        f'<div class="invoice-company">{company_html}</div>',
+        '<div class="sheet">',
+        "<header>",
+        '<div class="company">',
+        "<h1>FACTURA</h1>",
+        f"<p><strong>{_escape_html(company['name'])}</strong></p>",
+        f"<p>{_escape_html(company.get('address') or '')}</p>",
+        f"<p>Tel: {_escape_html(company.get('phone') or '')} · Email: {_escape_html(company.get('email') or '')}</p>",
+        f"<p>NIT: {_escape_html(company.get('tax_id') or '')}</p>",
         "</div>",
+        '<div class="meta">',
     ]
 
     if company["logo_url"]:
         parts.append(
-            f'<div class="invoice-logo"><img src="{_escape_html(company["logo_url"])}" alt="Logo" /></div>'
+            f'<div class="logo"><img src="{_escape_html(company["logo_url"])}" alt="Logo" /></div>'
         )
-    else:
-        parts.append(
-            f'<div class="invoice-logo"><div style="font-size:22px;font-weight:700;">{_escape_html(company["name"])}</div></div>'
-        )
-    parts.append("</div>")
-
-    parts.append('<div class="invoice-meta">')
-    parts.append('<div class="invoice-card">')
-    parts.append('<div class="label">Cliente</div>')
-    parts.append(f'<div class="value">{customer_html}</div>')
-    parts.append("</div>")
-
-    parts.append('<div class="invoice-card">')
-    parts.append('<div class="label">Documento</div>')
-    parts.append(
-        f'<div class="row"><span>Factura N°</span><span>{_escape_html(document_number)}</span></div>'
+    parts.extend(
+        [
+            f'<div class="doc-number">{_escape_html(document_number)}</div>',
+            '<div class="meta-row"><span class="label">Fecha:</span>'
+            f'<span class="value">{_escape_html(formatted_date)}</span></div>',
+            '<div class="meta-row"><span class="label">POS:</span>'
+            f'<span class="value">{_escape_html(sale.pos_name or "")}</span></div>',
+            '<div class="meta-row"><span class="label">Cajero:</span>'
+            f'<span class="value">{_escape_html(sale.vendor_name or "")}</span></div>',
+            "</div>",
+            "</header>",
+            '<div class="info-grid">',
+            '<div class="info-box">',
+            "<strong>Cliente</strong>",
+            customer_html,
+            "</div>",
+            '<div class="info-box">',
+            "<strong>Resumen</strong>",
+            f"<div>No. venta: {_escape_html(str(sale_number))}</div>",
+            f"<div>Documento: {_escape_html(document_number)}</div>",
+            f"<div>Estado del pago: {payment_status}</div>",
+            "</div>",
+            "</div>",
+            '<table class="items-table">',
+            "<thead><tr><th>Descripción</th><th>Cant.</th><th>Precio</th><th>Desc.</th><th>Total</th></tr></thead>",
+            f"<tbody>{table_rows}</tbody>",
+            "</table>",
+            notes_block,
+            '<table class="totals">',
+            f"<tr><td>Subtotal</td><td>{_format_money(subtotal)}</td></tr>",
+            line_discount_row,
+            f"<tr><td>{_escape_html(cart_discount_label)}</td><td>{_escape_html(cart_discount_display)}</td></tr>",
+            surcharge_row,
+            f"<tr class='total'><td>Total</td><td>{_format_money(total_amount)}</td></tr>",
+            "</table>",
+            '<table class="payments">',
+            "<thead><tr><th>Método</th><th>Monto</th></tr></thead>",
+            f"<tbody>{payment_rows}</tbody>",
+            f"<tfoot><tr><td><strong>Total pagado</strong></td><td><strong>{_format_money(paid_amount)}</strong></td></tr>{change_row}</tfoot>",
+            "</table>",
+        ]
     )
-    parts.append(
-        f'<div class="row"><span>Ticket</span><span>{_escape_html(str(sale_number))}</span></div>'
+    parts.extend(
+        [
+            f'<div class="footer-note">{footer_html}</div>',
+            "</div>",
+            "</body>",
+            "</html>",
+        ]
     )
-    parts.append(
-        f'<div class="row"><span>Fecha</span><span>{_escape_html(formatted_date)}</span></div>'
-    )
-    parts.append(
-        f'<div class="row"><span>Vencimiento</span><span>{_escape_html(due_display)}</span></div>'
-    )
-    parts.append(
-        f'<div class="row"><span>Estado del pago</span><span>{payment_status}</span></div>'
-    )
-    if sale.pos_name:
-        parts.append(
-            f'<div class="row"><span>Punto de venta</span><span>{_escape_html(sale.pos_name)}</span></div>'
-        )
-    if sale.vendor_name:
-        parts.append(
-            f'<div class="row"><span>Vendedor</span><span>{_escape_html(sale.vendor_name)}</span></div>'
-        )
-    parts.append("</div>")
-    parts.append("</div>")
-
-    parts.append('<table class="invoice-table">')
-    parts.append(
-        "<thead><tr>"
-        "<th>#</th>"
-        "<th>Descripción de artículo</th>"
-        "<th>Cantidad</th>"
-        "<th>Precio</th>"
-        "<th>Impuesto</th>"
-        "<th>Descuento</th>"
-        "<th>Total</th>"
-        "</tr></thead>"
-    )
-    parts.append(f"<tbody>{table_rows}</tbody>")
-    parts.append("</table>")
-
-    parts.append('<div class="invoice-summary">')
-    parts.append('<div class="totals-card">')
-    parts.append('<div class="label">Resumen</div>')
-    parts.append(
-        f'<div class="row"><span>Subtotal</span><span>{_format_money(subtotal)}</span></div>'
-    )
-    if line_discount_total > 0:
-        parts.append(
-            f'<div class="row"><span>Desc. artículos</span><span>- {_format_money(line_discount_total)}</span></div>'
-        )
-    parts.append(
-        f'<div class="row"><span>{_escape_html(cart_discount_label)}</span><span>{_escape_html(cart_discount_display)}</span></div>'
-    )
-    surcharge_amount = _surcharge_amount(sale)
-    if surcharge_amount > 0:
-        parts.append(
-            f'<div class="row"><span>{_escape_html(_surcharge_label(sale))}</span><span>{_format_money(surcharge_amount)}</span></div>'
-        )
-    parts.append(
-        f'<div class="row total"><span>Total</span><span>{_format_money(total_amount)}</span></div>'
-    )
-    parts.append("</div>")
-
-    parts.append('<div class="payments-card">')
-    parts.append('<div class="label">Métodos de pago</div>')
-    parts.append(payment_rows)
-    parts.append(
-        f'<div class="row emphasis"><span>Total pagado</span><span>{_format_money(paid_amount)}</span></div>'
-    )
-    if change_amount > 0:
-        parts.append(
-            f'<div class="row"><span>Cambio</span><span>{_format_money(change_amount)}</span></div>'
-        )
-    parts.append(
-        f'<div class="row"><span>Cantidad adeudada</span><span>{_format_money(balance)}</span></div>'
-    )
-    parts.append("</div>")
-    parts.append("</div>")
-
-    if notes_block:
-        parts.append(notes_block)
-
-    parts.append(f'<div class="invoice-footer">{footer_html}</div>')
-    parts.append("</div></body></html>")
-
     return "".join(parts)
+
+
+def _is_invoice_mode(mode: str) -> bool:
+    return mode in {INVOICE_MODE, CLASSIC_INVOICE_MODE}
 
 
 def render_sale_ticket_html(
     sale: models.Sale,
     settings: Optional[models.PosSettings] = None,
     mode: str = TICKET_MODE,
+    payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
     company = _company_profile(settings)
     items_summary, subtotal, line_discount_total = _collect_sale_items(sale)
-    if mode == CLASSIC_INVOICE_MODE:
+    if _is_invoice_mode(mode):
         return _render_classic_invoice_html(
             sale,
             company,
             items_summary,
             subtotal,
             line_discount_total,
+            payment_method_labels=payment_method_labels,
         )
     if mode == THERMAL_TICKET_MODE:
         return _render_thermal_ticket_html(
@@ -1584,6 +1651,7 @@ def render_sale_ticket_html(
             items_summary,
             subtotal,
             line_discount_total,
+            payment_method_labels=payment_method_labels,
         )
     return _render_modern_ticket_html(
         sale,
@@ -1591,6 +1659,7 @@ def render_sale_ticket_html(
         items_summary,
         subtotal,
         line_discount_total,
+        payment_method_labels=payment_method_labels,
     )
 
 
@@ -1598,9 +1667,15 @@ def render_sale_ticket_pdf(
     sale: models.Sale,
     settings: Optional[models.PosSettings] = None,
     mode: str = TICKET_MODE,
+    payment_method_labels: Optional[dict[str, str]] = None,
 ) -> bytes:
-    html = render_sale_ticket_html(sale, settings=settings, mode=mode)
-    label = "Factura" if mode == CLASSIC_INVOICE_MODE else "Ticket"
+    html = render_sale_ticket_html(
+        sale,
+        settings=settings,
+        mode=mode,
+        payment_method_labels=payment_method_labels,
+    )
+    label = "Factura" if _is_invoice_mode(mode) else "Ticket"
     title = f"{label} {sale.document_number or sale.sale_number or sale.id}"
     return build_pdf_from_html(title, html)
 
