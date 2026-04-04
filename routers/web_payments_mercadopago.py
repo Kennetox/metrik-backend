@@ -11,7 +11,7 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 import crud
@@ -1121,6 +1121,66 @@ def _refresh_order_payment_status_from_provider(
         return order
 
 
+def _normalize_checkout_result_hint(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"failure", "failed", "rejected", "cancelled", "canceled"}:
+        return "failed"
+    if normalized in {"success", "approved"}:
+        return "approved"
+    if normalized in {"pending", "in_process", "inprocess"}:
+        return "pending"
+    return ""
+
+
+def _apply_checkout_result_hint(
+    db: Session,
+    order: models.WebOrder,
+    *,
+    payment_hint: Optional[str],
+) -> models.WebOrder:
+    hint = _normalize_checkout_result_hint(payment_hint)
+    if hint != "failed":
+        return order
+    if not order or order.payment_status == "approved":
+        return order
+    if order.status in {"cancelled", "refunded", "fulfilled"}:
+        return order
+
+    provider_reference = f"checkout-result-failure-order-{order.id}"
+    payload = schemas.WebOrderPaymentRecordRequest(
+        method="mercadopago",
+        amount=0.0,
+        provider="mercadopago",
+        provider_reference=provider_reference,
+        status="failed",
+        note="Resultado checkout: pago no aprobado",
+        raw_payload={
+            "source": "checkout_result",
+            "payment_hint": payment_hint,
+            "recorded_at": datetime.utcnow().isoformat(),
+        },
+    )
+    try:
+        crud.record_web_order_payment(db, order, payload, actor_user_id=None)
+        refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        if refreshed:
+            logger.info(
+                "Checkout result hint aplicado | order_id=%s payment_hint=%s status=%s payment_status=%s",
+                refreshed.id,
+                payment_hint,
+                refreshed.status,
+                refreshed.payment_status,
+            )
+            return refreshed
+    except Exception:
+        logger.exception(
+            "No se pudo aplicar checkout result hint a la orden %s (hint=%s)",
+            getattr(order, "id", None),
+            payment_hint,
+        )
+    return order
+
+
 def refresh_backoffice_order_payment_statuses(
     db: Session,
     orders: list[models.WebOrder],
@@ -1255,6 +1315,7 @@ async def receive_mercadopago_webhook(
 @router.get("/orders/{order_id}/status", response_model=schemas.WebMercadoPagoOrderPaymentStatusResponse)
 def get_mercadopago_order_status(
     order_id: int,
+    payment: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     account: models.WebCustomerAccount = Depends(require_web_customer_auth),
 ):
@@ -1262,6 +1323,7 @@ def get_mercadopago_order_status(
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
     order = _refresh_order_payment_status_from_provider(db, order)
+    order = _apply_checkout_result_hint(db, order, payment_hint=payment)
     if order and order.payment_status == "approved" and (
         order.customer_approval_email_sent_at is None or order.internal_approval_email_sent_at is None
     ):
@@ -1274,6 +1336,7 @@ def get_mercadopago_order_status(
 def get_guest_mercadopago_order_status(
     order_id: int,
     access_token: str,
+    payment: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     _require_guest_order_access_token(order_id, access_token)
@@ -1282,6 +1345,7 @@ def get_guest_mercadopago_order_status(
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
     order = _refresh_order_payment_status_from_provider(db, order)
+    order = _apply_checkout_result_hint(db, order, payment_hint=payment)
     if order and order.payment_status == "approved" and (
         order.customer_approval_email_sent_at is None or order.internal_approval_email_sent_at is None
     ):
