@@ -80,6 +80,75 @@ def _get_mercadopago_env_label() -> str:
     return (os.getenv("MERCADOPAGO_ENV") or "unknown").strip().lower() or "unknown"
 
 
+def _mask_email(value: Optional[str]) -> str:
+    email = (value or "").strip().lower()
+    if not email or "@" not in email:
+        return "-"
+    local, domain = email.split("@", 1)
+    if not local:
+        return f"***@{domain}"
+    if len(local) <= 2:
+        masked_local = local[0] + "*"
+    else:
+        masked_local = local[:2] + "*" * max(1, len(local) - 2)
+    return f"{masked_local}@{domain}"
+
+
+def _mask_document(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return "-"
+    if len(digits) <= 2:
+        return "*" * len(digits)
+    return "*" * max(0, len(digits) - 2) + digits[-2:]
+
+
+def _sanitize_payer_for_logs(payer_input: Optional[schemas.MercadoPagoPayerInput]) -> dict[str, Any]:
+    if not payer_input:
+        return {
+            "has_payer": False,
+            "email": "-",
+            "first_name_present": False,
+            "last_name_present": False,
+            "identification_type": "-",
+            "identification_number_masked": "-",
+        }
+    identification = payer_input.identification
+    return {
+        "has_payer": True,
+        "email": _mask_email(payer_input.email),
+        "first_name_present": bool((payer_input.first_name or "").strip()),
+        "last_name_present": bool((payer_input.last_name or "").strip()),
+        "identification_type": (identification.type.strip() if identification and identification.type else "-"),
+        "identification_number_masked": _mask_document(identification.number if identification else None),
+    }
+
+
+def _log_checkout_attempt(
+    *,
+    flow: str,
+    order_id: Optional[int],
+    customer_email: Optional[str],
+    customer_tax_id: Optional[str],
+    customer_address: Optional[str],
+    items_count: Optional[int],
+    payer_input: Optional[schemas.MercadoPagoPayerInput],
+) -> None:
+    payer_data = _sanitize_payer_for_logs(payer_input)
+    logger.info(
+        "Checkout attempt | env=%s flow=%s order_id=%s customer_email=%s customer_tax_id=%s has_address=%s items_count=%s payer=%s",
+        _get_mercadopago_env_label(),
+        flow,
+        order_id if order_id is not None else "-",
+        _mask_email(customer_email),
+        _mask_document(customer_tax_id),
+        bool((customer_address or "").strip()),
+        items_count if items_count is not None else "-",
+        json.dumps(payer_data, ensure_ascii=True),
+    )
+
+
 def _mercadopago_request(
     method: str,
     path: str,
@@ -974,6 +1043,15 @@ def create_mercadopago_checkout(
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
+    _log_checkout_attempt(
+        flow="authenticated",
+        order_id=order.id,
+        customer_email=order.customer_email,
+        customer_tax_id=order.customer_tax_id,
+        customer_address=order.customer_address,
+        items_count=len(order.items or []),
+        payer_input=payload.payer,
+    )
     return _create_checkout_preference_for_order(order, payer_input=payload.payer)
 
 
@@ -982,6 +1060,15 @@ def create_guest_mercadopago_checkout(
     payload: schemas.WebGuestMercadoPagoCheckoutCreateRequest,
     db: Session = Depends(get_db),
 ):
+    _log_checkout_attempt(
+        flow="guest",
+        order_id=None,
+        customer_email=payload.customer_email,
+        customer_tax_id=payload.customer_tax_id,
+        customer_address=payload.customer_address,
+        items_count=len(payload.items or []),
+        payer_input=payload.payer,
+    )
     order = _create_guest_order(db, payload)
     order_access_token = _build_guest_order_access_token(order)
     return _create_checkout_preference_for_order(
