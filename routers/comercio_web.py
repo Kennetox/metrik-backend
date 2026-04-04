@@ -8,6 +8,7 @@ import models
 import schemas
 from database import get_db
 from dependencies import require_module_access, require_permission
+from routers import web_payments_mercadopago
 
 
 router = APIRouter(
@@ -42,6 +43,7 @@ def list_comercio_web_orders(
         payment_status=payment_status,
         search=search,
     )
+    orders = web_payments_mercadopago.refresh_backoffice_order_payment_statuses(db, orders)
     return [crud._serialize_web_order(order) for order in orders]
 
 
@@ -302,6 +304,7 @@ def get_comercio_web_order(
     order = crud.get_backoffice_web_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
+    order = web_payments_mercadopago.refresh_backoffice_order_payment_statuses(db, [order])[0]
     return crud._serialize_web_order(order)
 
 

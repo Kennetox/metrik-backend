@@ -5177,6 +5177,46 @@ def void_sale(
     sale.voided_by_user_id = user.id
     sale.void_reason = reason
 
+    sale_items = list(sale.items or [])
+    product_ids = [int(item.product_id) for item in sale_items if item.product_id is not None]
+    service_flags: dict[int, bool] = {}
+    if product_ids:
+        product_rows = (
+            db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(product_ids))
+            .all()
+        )
+        service_flags = {int(row.id): bool(row.service) for row in product_rows}
+
+    note_parts = ["Reposición automática por anulación de venta"]
+    if sale.document_number:
+        note_parts.append(f"({sale.document_number})")
+    if reason and reason.strip():
+        note_parts.append(f"- {reason.strip()}")
+    movement_note = " ".join(note_parts)
+
+    for item in sale_items:
+        if item.product_id is None:
+            continue
+        product_id = int(item.product_id)
+        if service_flags.get(product_id, False):
+            continue
+        qty = float(item.quantity or 0.0)
+        if qty <= 0:
+            continue
+        db.add(
+            models.InventoryMovement(
+                tenant_id=sale.tenant_id,
+                product_id=product_id,
+                qty_delta=abs(qty),
+                reason="adjustment",
+                notes=movement_note,
+                reference_type="sale",
+                reference_id=sale.id,
+                created_by_user_id=user.id,
+            )
+        )
+
     db.commit()
     db.refresh(sale)
     return sale

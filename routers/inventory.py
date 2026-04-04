@@ -1089,19 +1089,35 @@ def _apply_product_filters(
     return query
 
 
-def _apply_product_sort(query, qty_col, sort: str | None):
+def _apply_product_sort(query, qty_col, sort: str | None, search: str | None = None):
     sku_is_numeric = models.Product.sku.op("~")(r"^[0-9]+$")
     sku_numeric_value = cast(models.Product.sku, Integer)
     sku_numeric_rank = case((sku_is_numeric, 0), else_=1)
     cost_stock_value = qty_col * func.coalesce(models.Product.cost, 0)
     price_stock_value = qty_col * func.coalesce(models.Product.price, 0)
+    rank_criteria = []
+    normalized_search = (search or "").strip().lower()
+    if normalized_search:
+        exact_match_rank = case(
+            (
+                or_(
+                    func.lower(func.coalesce(models.Product.sku, "")) == normalized_search,
+                    func.lower(func.coalesce(models.Product.barcode, "")) == normalized_search,
+                    func.lower(func.coalesce(models.Product.name, "")) == normalized_search,
+                ),
+                0,
+            ),
+            else_=1,
+        )
+        rank_criteria.append(exact_match_rank.asc())
 
     if sort == "stock_asc":
-        return query.order_by(qty_col.asc(), models.Product.name.asc())
+        return query.order_by(*rank_criteria, qty_col.asc(), models.Product.name.asc())
     if sort == "stock_desc":
-        return query.order_by(qty_col.desc(), models.Product.name.asc())
+        return query.order_by(*rank_criteria, qty_col.desc(), models.Product.name.asc())
     if sort == "sku_asc":
         return query.order_by(
+            *rank_criteria,
             sku_numeric_rank.asc(),
             sku_numeric_value.asc(),
             models.Product.sku.asc(),
@@ -1109,20 +1125,21 @@ def _apply_product_sort(query, qty_col, sort: str | None):
         )
     if sort == "sku_desc":
         return query.order_by(
+            *rank_criteria,
             sku_numeric_rank.asc(),
             sku_numeric_value.desc(),
             models.Product.sku.desc(),
             models.Product.name.asc(),
         )
     if sort == "cost_stock_asc":
-        return query.order_by(cost_stock_value.asc(), models.Product.name.asc())
+        return query.order_by(*rank_criteria, cost_stock_value.asc(), models.Product.name.asc())
     if sort == "cost_stock_desc":
-        return query.order_by(cost_stock_value.desc(), models.Product.name.asc())
+        return query.order_by(*rank_criteria, cost_stock_value.desc(), models.Product.name.asc())
     if sort == "price_stock_asc":
-        return query.order_by(price_stock_value.asc(), models.Product.name.asc())
+        return query.order_by(*rank_criteria, price_stock_value.asc(), models.Product.name.asc())
     if sort == "price_stock_desc":
-        return query.order_by(price_stock_value.desc(), models.Product.name.asc())
-    return query.order_by(models.Product.name.asc())
+        return query.order_by(*rank_criteria, price_stock_value.desc(), models.Product.name.asc())
+    return query.order_by(*rank_criteria, models.Product.name.asc())
 
 
 @router.get("/products", response_model=schemas.InventoryProductPage)
@@ -1193,7 +1210,7 @@ def list_inventory_products(
     )
     status_value = None if status_filter in (None, "all") else status_filter
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock, group, status_value)
-    product_rows = _apply_product_sort(product_rows, qty_col, sort)
+    product_rows = _apply_product_sort(product_rows, qty_col, sort, search)
     product_rows = product_rows.offset(skip).limit(limit).all()
 
     count_query = (
@@ -1314,7 +1331,7 @@ def export_inventory_products(
     )
     status_value = None if status_filter in (None, "all") else status_filter
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock, group, status_value)
-    product_rows = _apply_product_sort(product_rows, qty_col, sort).all()
+    product_rows = _apply_product_sort(product_rows, qty_col, sort, search).all()
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1413,7 +1430,7 @@ def export_inventory_products_xlsx(
     )
     status_value = None if status_filter in (None, "all") else status_filter
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock, group, status_value)
-    product_rows = _apply_product_sort(product_rows, qty_col, sort).all()
+    product_rows = _apply_product_sort(product_rows, qty_col, sort, search).all()
 
     output = io.BytesIO()
     wb = Workbook()
@@ -1559,7 +1576,7 @@ def export_inventory_products_pdf(
     )
     status_value = None if status_filter in (None, "all") else status_filter
     product_rows = _apply_product_filters(product_rows, qty_col, search, stock, group, status_value)
-    product_rows = _apply_product_sort(product_rows, qty_col, sort).all()
+    product_rows = _apply_product_sort(product_rows, qty_col, sort, search).all()
 
     def _status_label(product: models.Product, qty: float) -> str:
         if qty < 0:
