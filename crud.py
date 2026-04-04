@@ -7239,8 +7239,24 @@ def list_pos_customers(
     include_inactive: bool = False,
     tenant_id: Optional[int] = None,
 ):
-    query = db.query(models.PosCustomer)
+    # Backward-compatibility repair: older guest checkout used a placeholder email
+    # with `.local`, which fails EmailStr validation in API responses.
+    legacy_guest_email = "__guest_checkout__@kensar.local"
+    canonical_guest_email = "__guest_checkout__@kensar.example.com"
+    repair_query = db.query(models.PosCustomer).filter(
+        func.lower(models.PosCustomer.email) == legacy_guest_email
+    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        repair_query = repair_query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
+    legacy_rows = repair_query.all()
+    if legacy_rows:
+        for row in legacy_rows:
+            row.email = canonical_guest_email
+            db.add(row)
+        db.commit()
+
+    query = db.query(models.PosCustomer)
     if effective_tenant_id is not None:
         query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
     if not include_inactive:
@@ -7473,9 +7489,20 @@ def get_or_create_guest_web_customer_account(
     tenant_id: Optional[int] = None,
 ) -> models.WebCustomerAccount:
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
-    guest_email = "__guest_checkout__@kensar.local"
+    guest_email = "__guest_checkout__@kensar.example.com"
+    legacy_guest_email = "__guest_checkout__@kensar.local"
+
     existing = get_web_customer_account_by_email(db, guest_email, tenant_id=effective_tenant_id)
+    if not existing:
+        existing = get_web_customer_account_by_email(db, legacy_guest_email, tenant_id=effective_tenant_id)
     if existing:
+        if (existing.email or "").strip().lower() != guest_email:
+            existing.email = guest_email
+            if existing.customer and (existing.customer.email or "").strip().lower() != guest_email:
+                existing.customer.email = guest_email
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
         return existing
 
     guest_customer = (
@@ -7484,7 +7511,10 @@ def get_or_create_guest_web_customer_account(
             models.PosCustomer.tenant_id == effective_tenant_id
             if effective_tenant_id is not None
             else true(),
-            func.lower(models.PosCustomer.email) == guest_email,
+            or_(
+                func.lower(models.PosCustomer.email) == guest_email,
+                func.lower(models.PosCustomer.email) == legacy_guest_email,
+            ),
         )
         .first()
     )
@@ -7498,6 +7528,10 @@ def get_or_create_guest_web_customer_account(
             address=None,
             is_active=True,
         )
+        db.add(guest_customer)
+        db.flush()
+    elif (guest_customer.email or "").strip().lower() != guest_email:
+        guest_customer.email = guest_email
         db.add(guest_customer)
         db.flush()
 
@@ -8292,11 +8326,14 @@ def record_web_order_payment(
     if order.status in {"cancelled", "refunded"}:
         raise ValueError("La orden no admite pagos en su estado actual")
 
-    amount = float(payload.amount or 0.0)
-    if amount <= 0:
-        raise ValueError("El monto del pago debe ser mayor que cero")
-
     payment_status = payload.status or "approved"
+    amount = float(payload.amount or 0.0)
+    if payment_status == "approved":
+        if amount <= 0:
+            raise ValueError("El monto del pago aprobado debe ser mayor que cero")
+    elif amount < 0:
+        raise ValueError("El monto del pago no puede ser negativo")
+
     provider = _clean_field(payload.provider)
     provider_reference = _clean_field(payload.provider_reference)
     method = _clean_field(payload.method)
