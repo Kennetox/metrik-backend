@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from html import escape as html_escape
+import os
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -532,8 +533,27 @@ def _company_profile(settings: Optional[models.PosSettings]):
             or settings.logo_url
             or FALLBACK_COMPANY["logo_url"]
         )
-        profile["logo_url"] = logo_url or ""
+        profile["logo_url"] = _resolve_asset_url(logo_url)
     return profile
+
+
+def _resolve_asset_url(raw_url: Optional[str]) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://", "data:")):
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+    base_candidates = [
+        os.getenv("POS_LOGO_BASE_URL"),
+        os.getenv("APP_BASE_URL"),
+        os.getenv("PUBLIC_APP_URL"),
+    ]
+    base_url = next((value.strip() for value in base_candidates if value and value.strip()), "")
+    if not base_url:
+        return url
+    return f"{base_url.rstrip('/')}/{url.lstrip('/')}"
 
 
 def _format_quantity(quantity: Optional[float]) -> str:

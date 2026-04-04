@@ -367,6 +367,68 @@ def _smtp_settings_dict(settings: models.PosSettings) -> dict[str, Any]:
     }
 
 
+def _resolve_email_asset_url(raw_url: Optional[str]) -> str:
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://", "data:")):
+        return url
+    if url.startswith("//"):
+        return f"https:{url}"
+
+    base_candidates = [
+        os.getenv("POS_LOGO_BASE_URL"),
+        os.getenv("APP_BASE_URL"),
+        os.getenv("PUBLIC_APP_URL"),
+    ]
+    base_url = next((value.strip() for value in base_candidates if value and value.strip()), "")
+    if not base_url:
+        return url
+    return f"{base_url.rstrip('/')}/{url.lstrip('/')}"
+
+
+def _build_email_logo_footer(settings: Optional[models.PosSettings]) -> str:
+    if not settings:
+        return ""
+    logo_url = _resolve_email_asset_url(settings.ticket_logo_url or settings.logo_url)
+    company_name = (settings.company_name or "Kensar Electronic").strip()
+    company_address = (settings.address or "").strip()
+    company_phone = (settings.contact_phone or "").strip()
+    company_tax_id = (settings.tax_id or "").strip()
+
+    info_lines: list[str] = [
+        f"<div style='font-weight:700; margin-bottom:4px;'>{escape(company_name)}</div>"
+    ]
+    if company_address:
+        info_lines.append(f"<div><strong>Dirección:</strong> {escape(company_address)}</div>")
+    if company_phone:
+        info_lines.append(f"<div><strong>Teléfono:</strong> {escape(company_phone)}</div>")
+    if company_tax_id:
+        info_lines.append(f"<div><strong>NIT:</strong> {escape(company_tax_id)}</div>")
+
+    logo_cell = (
+        f"<img src='{escape(logo_url)}' alt='Logo {escape(company_name)}' "
+        "style='display:block; max-width:250px; max-height:100px; width:auto; height:auto;'/>"
+        if logo_url
+        else ""
+    )
+    if not logo_cell and len(info_lines) <= 1:
+        return ""
+
+    return (
+        "<div style='margin-top:18px; padding-top:12px; border-top:1px solid #e5e7eb;'>"
+        "<table role='presentation' style='width:auto; border-collapse:collapse;'>"
+        "<tr>"
+        f"<td style='width:1%; white-space:nowrap; vertical-align:top; padding:0 2px 0 0;'>{logo_cell}</td>"
+        "<td style='vertical-align:top; font-size:13px; line-height:1.5; color:#374151;'>"
+        f"{''.join(info_lines)}"
+        "</td>"
+        "</tr>"
+        "</table>"
+        "</div>"
+    )
+
+
 def _payment_method_labels_by_slug(db: Session, tenant_id: Optional[int]) -> dict[str, str]:
     payment_methods = crud.list_payment_methods(db, tenant_id=tenant_id)
     return {
@@ -399,6 +461,7 @@ def _build_web_order_approved_customer_html(
     order: models.WebOrder,
     *,
     sale: Optional[models.Sale] = None,
+    settings: Optional[models.PosSettings] = None,
 ) -> str:
     customer_name = (order.customer_name or "Cliente").strip()
     order_number = order.document_number or f"OW-{order.id:06d}"
@@ -419,6 +482,7 @@ def _build_web_order_approved_customer_html(
             "<tr><td colspan='3' style='padding:8px; border:1px solid #e5e7eb; color:#6b7280;'>Sin items registrados</td></tr>"
         )
 
+    logo_footer = _build_email_logo_footer(settings)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         f"<p>Hola {escape(customer_name)},</p>"
@@ -441,6 +505,7 @@ def _build_web_order_approved_customer_html(
           "</tr></thead>"
         + f"<tbody>{''.join(lines)}</tbody></table>"
         + "<p>Gracias por comprar con Kensar Electronic.</p>"
+        + logo_footer
         + "</div>"
     )
 
@@ -450,6 +515,7 @@ def _build_web_order_approved_internal_html(
     *,
     sale: Optional[models.Sale],
     conversion_error: Optional[str],
+    settings: Optional[models.PosSettings] = None,
 ) -> str:
     order_number = order.document_number or f"OW-{order.id:06d}"
     provider_ref = ""
@@ -472,6 +538,7 @@ def _build_web_order_approved_internal_html(
         if sale
         else f"Pendiente de conversión: {escape(conversion_error or 'sin detalle')}"
     )
+    logo_footer = _build_email_logo_footer(settings)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         "<p>Se registró un pago aprobado en Comercio Web.</p>"
@@ -486,7 +553,8 @@ def _build_web_order_approved_internal_html(
         f"<strong>Conversión:</strong> {conversion_state}</p>"
         "<p><strong>Ítems</strong></p>"
         f"<ul>{''.join(items_html)}</ul>"
-        "</div>"
+        + logo_footer
+        + "</div>"
     )
 
 
@@ -528,7 +596,7 @@ def _send_web_order_customer_approval_email(
             logger.exception("No se pudo adjuntar factura PDF para la orden web %s", order.id)
 
     subject = f"Pago aprobado - Pedido {order.document_number or order.id}"
-    body_html = _build_web_order_approved_customer_html(order, sale=sale)
+    body_html = _build_web_order_approved_customer_html(order, sale=sale, settings=settings)
     email_service.send_email(
         recipients=[recipient],
         subject=subject,
@@ -557,6 +625,7 @@ def _send_web_order_internal_approval_email(
         order,
         sale=sale,
         conversion_error=conversion_error,
+        settings=settings,
     )
     email_service.send_email(
         recipients=recipients,
@@ -957,6 +1026,19 @@ def _process_payment_notification(db: Session, payment_id: str) -> schemas.WebOr
 
     tenant_id = _extract_tenant_id(payment_data)
     order = crud.get_backoffice_web_order(db, order_id, tenant_id=tenant_id)
+    if not order and tenant_id is not None:
+        # Fallback defensivo: algunos pagos viejos/no estándar pueden no traer
+        # metadata de tenant consistente aunque sí apunten a una orden válida.
+        order = db.query(models.WebOrder).filter(models.WebOrder.id == order_id).first()
+        if order:
+            logger.warning(
+                "Mercado Pago payment %s resolvió orden %s con tenant_id fallback "
+                "(metadata tenant_id=%s, order tenant_id=%s)",
+                payment_id,
+                order_id,
+                tenant_id,
+                order.tenant_id,
+            )
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada para notificación")
 
@@ -998,19 +1080,41 @@ def _refresh_order_payment_status_from_provider(
         token = _get_mercadopago_access_token()
         search = _mercadopago_request(
             "GET",
-            f"/v1/payments/search?external_reference={urllib_parse.quote(f'web-order:{order.id}')}&sort=date_created&criteria=desc&limit=1",
+            f"/v1/payments/search?external_reference={urllib_parse.quote(f'web-order:{order.id}')}&sort=date_created&criteria=desc&limit=20",
             access_token=token,
         )
         results = search.get("results") if isinstance(search, dict) else None
         if not isinstance(results, list) or not results:
             return order
-        payment_id = str((results[0] or {}).get("id") or "").strip()
-        if not payment_id:
+
+        selected_payment_id = ""
+        fallback_payment_id = ""
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            payment_id = str(row.get("id") or "").strip()
+            if not payment_id:
+                continue
+            if not fallback_payment_id:
+                fallback_payment_id = payment_id
+            normalized_status = _normalize_payment_status(row.get("status"))
+            if normalized_status in {"approved", "failed", "cancelled", "refunded"}:
+                selected_payment_id = payment_id
+                break
+
+        payment_id_to_process = selected_payment_id or fallback_payment_id
+        if not payment_id_to_process:
             return order
-        _process_payment_notification(db, payment_id)
+
+        _process_payment_notification(db, payment_id_to_process)
         refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
         return refreshed or order
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning(
+            "No se pudo sincronizar estado de pago para orden %s: %s",
+            getattr(order, "id", None),
+            getattr(exc, "detail", str(exc)),
+        )
         return order
     except Exception:
         logger.exception("No se pudo sincronizar estado de pago Mercado Pago para la orden %s", order.id)

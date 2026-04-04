@@ -45,7 +45,8 @@ def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 60
 
 
 def _web_order_pending_expiry_minutes() -> int:
-    return _env_int("WEB_ORDER_PENDING_EXPIRY_MINUTES", 180)
+    # Regla operativa: no permitir ventanas de espera > 30 min para órdenes web.
+    return _env_int("WEB_ORDER_PENDING_EXPIRY_MINUTES", 30, min_value=1, max_value=30)
 
 
 def _web_order_reuse_window_minutes() -> int:
