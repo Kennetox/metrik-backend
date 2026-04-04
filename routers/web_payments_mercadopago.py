@@ -76,6 +76,10 @@ def _is_guest_order_reuse_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _get_mercadopago_env_label() -> str:
+    return (os.getenv("MERCADOPAGO_ENV") or "unknown").strip().lower() or "unknown"
+
+
 def _mercadopago_request(
     method: str,
     path: str,
@@ -649,6 +653,26 @@ def _create_checkout_preference_for_order(
     if not preference_id:
         raise HTTPException(status_code=502, detail="Mercado Pago no devolvió preference id")
 
+    init_point = str(preference.get("init_point") or "").strip()
+    sandbox_init_point = str(preference.get("sandbox_init_point") or "").strip()
+    selected_init_point = init_point or sandbox_init_point
+    init_host = ""
+    if selected_init_point:
+        try:
+            init_host = (urllib_parse.urlparse(selected_init_point).hostname or "").strip().lower()
+        except Exception:
+            init_host = ""
+
+    logger.info(
+        "MercadoPago preference created | env=%s order_id=%s preference_id=%s init_host=%s has_init=%s has_sandbox_init=%s",
+        _get_mercadopago_env_label(),
+        order.id,
+        preference_id,
+        init_host or "-",
+        bool(init_point),
+        bool(sandbox_init_point),
+    )
+
     return schemas.WebMercadoPagoCheckoutCreateResponse(
         order_id=order.id,
         provider="mercadopago",
@@ -922,6 +946,23 @@ def _refresh_order_payment_status_from_provider(
     except Exception:
         logger.exception("No se pudo sincronizar estado de pago Mercado Pago para la orden %s", order.id)
         return order
+
+
+def refresh_backoffice_order_payment_statuses(
+    db: Session,
+    orders: list[models.WebOrder],
+) -> list[models.WebOrder]:
+    if not orders:
+        return []
+    refreshed_orders: list[models.WebOrder] = []
+    for order in orders:
+        if not order:
+            continue
+        if order.status in {"cancelled", "refunded"} or order.payment_status == "approved":
+            refreshed_orders.append(order)
+            continue
+        refreshed_orders.append(_refresh_order_payment_status_from_provider(db, order))
+    return refreshed_orders
 
 
 @router.post("/checkout", response_model=schemas.WebMercadoPagoCheckoutCreateResponse)
