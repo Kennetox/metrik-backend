@@ -7877,6 +7877,24 @@ def clear_web_cart(
     return get_web_cart(db, account)
 
 
+def clear_active_web_cart_if_exists(
+    db: Session,
+    *,
+    account_id: int,
+    tenant_id: Optional[int] = None,
+) -> None:
+    cart = get_active_web_cart(db, account_id, tenant_id=tenant_id)
+    if not cart:
+        return
+    for item in list(cart.items or []):
+        db.delete(item)
+    cart.coupon_code = None
+    cart.coupon_discount_percent = 0.0
+    cart.coupon_discount_code_id = None
+    cart.updated_at = datetime.utcnow()
+    db.commit()
+
+
 def apply_coupon_to_web_cart(
     db: Session,
     account: models.WebCustomerAccount,
@@ -8133,6 +8151,8 @@ def _serialize_web_order(
             provider_reference=payment.provider_reference,
             method=payment.method,
             status=payment.status,
+            provider_status=(payment.raw_payload or {}).get("status"),
+            status_detail=(payment.raw_payload or {}).get("status_detail"),
             amount=float(payment.amount or 0.0),
             currency=payment.currency,
             approved_at=payment.approved_at,
@@ -8398,6 +8418,7 @@ def record_web_order_payment(
                 actor_user_id=actor_user_id,
             )
     elif payment_status == "failed":
+        order.payment_status = "failed"
         _transition_web_order_status(
             db,
             order,

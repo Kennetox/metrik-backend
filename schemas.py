@@ -1869,7 +1869,8 @@ class WebOrderPaymentRead(BaseModel):
     failed_at: Optional[datetime] = None
     cancelled_at: Optional[datetime] = None
     created_at: datetime
-
+    provider_status: Optional[str] = None
+    status_detail: Optional[str] = None
 
 class WebOrderStatusLogRead(BaseModel):
     id: int
@@ -1956,6 +1957,7 @@ class MercadoPagoPayerInput(BaseModel):
 class WebMercadoPagoCheckoutCreateRequest(BaseModel):
     order_id: int
     payer: Optional[MercadoPagoPayerInput] = None
+    checkout_context: Optional[Dict[str, object]] = None
 
 
 class WebGuestCheckoutItemInput(BaseModel):
@@ -1972,6 +1974,7 @@ class WebGuestMercadoPagoCheckoutCreateRequest(BaseModel):
     customer_address: Optional[str] = None
     notes: Optional[str] = None
     payer: Optional[MercadoPagoPayerInput] = None
+    checkout_context: Optional[Dict[str, object]] = None
 
 
 class WebMercadoPagoCheckoutCreateResponse(BaseModel):

@@ -34,6 +34,7 @@ WEB_GUEST_ORDER_TOKEN_TTL_SECONDS = int(
     os.getenv("WEB_GUEST_ORDER_TOKEN_TTL", 60 * 60 * 24 * 7)
 )
 BOGOTA_TZ = ZoneInfo("America/Bogota")
+CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 
 
 def _get_mercadopago_access_token() -> str:
@@ -149,6 +150,104 @@ def _log_checkout_attempt(
     )
 
 
+def _localize_mercadopago_error_detail(detail: str) -> str:
+    text = (detail or "").strip()
+    if not text:
+        return "Error de Mercado Pago."
+    lowered = text.lower()
+    if "rejected" in lowered or "not_approved" in lowered or "cc_rejected" in lowered:
+        return "Pago rechazado por Mercado Pago."
+    if "invalid" in lowered:
+        return "Solicitud inválida enviada a Mercado Pago."
+    if "unauthorized" in lowered:
+        return "Credenciales inválidas de Mercado Pago."
+    if "forbidden" in lowered:
+        return "Mercado Pago rechazó la operación."
+    if "not found" in lowered:
+        return "Recurso no encontrado en Mercado Pago."
+    if "timeout" in lowered:
+        return "Mercado Pago tardó demasiado en responder."
+    return text
+
+
+def _split_order_notes_checkout_context(notes: Optional[str]) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    raw_notes = (notes or "").strip()
+    if not raw_notes:
+        return None, None
+    idx = raw_notes.find(CHECKOUT_CONTEXT_NOTE_MARKER)
+    if idx < 0:
+        return raw_notes, None
+    note_text = raw_notes[:idx].strip() or None
+    context_raw = raw_notes[idx + len(CHECKOUT_CONTEXT_NOTE_MARKER) :].strip()
+    if not context_raw:
+        return note_text, None
+    try:
+        parsed = json.loads(context_raw)
+        if isinstance(parsed, dict):
+            return note_text, parsed
+    except Exception:
+        pass
+    return note_text, None
+
+
+def _normalize_checkout_context_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return None
+    if value is None or isinstance(value, (bool, int, float, str)):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+    if isinstance(value, list):
+        normalized_list = [
+            _normalize_checkout_context_value(entry, depth=depth + 1)
+            for entry in value[:120]
+        ]
+        return [entry for entry in normalized_list if entry not in [None, "", [], {}]]
+    if isinstance(value, dict):
+        normalized_dict: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            normalized = _normalize_checkout_context_value(raw_value, depth=depth + 1)
+            if normalized in [None, "", [], {}]:
+                continue
+            normalized_dict[key] = normalized
+        return normalized_dict
+    return str(value)
+
+
+def _merge_order_notes_with_checkout_context(
+    notes: Optional[str],
+    checkout_context: Optional[dict[str, Any]],
+) -> Optional[str]:
+    note_text, _existing_context = _split_order_notes_checkout_context(notes)
+    normalized_ctx = _normalize_checkout_context_value(checkout_context or {}, depth=0)
+    if not isinstance(normalized_ctx, dict) or not normalized_ctx:
+        return note_text
+    context_json = json.dumps(normalized_ctx, ensure_ascii=False, separators=(",", ":"))
+    if note_text:
+        return f"{note_text}\n\n{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
+    return f"{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
+
+
+def _persist_checkout_context_on_order(
+    db: Session,
+    order: models.WebOrder,
+    *,
+    checkout_context: Optional[dict[str, Any]],
+) -> models.WebOrder:
+    next_notes = _merge_order_notes_with_checkout_context(order.notes, checkout_context)
+    if next_notes == order.notes:
+        return order
+    order.notes = next_notes
+    order.updated_at = datetime.utcnow()
+    db.add(order)
+    db.commit()
+    refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+    return refreshed or order
+
+
 def _mercadopago_request(
     method: str,
     path: str,
@@ -167,22 +266,35 @@ def _mercadopago_request(
         headers["Content-Type"] = "application/json"
         body_bytes = json.dumps(payload).encode("utf-8")
 
+    print("\n=== MP REQUEST START ===")
+    print("MP METHOD:", method.upper())
+    print("MP URL:", url)
+    print("MP PAYLOAD:", json.dumps(payload, ensure_ascii=False, indent=2) if payload else None)
+
     request = urllib_request.Request(url=url, data=body_bytes, headers=headers, method=method.upper())
     try:
         with urllib_request.urlopen(request, timeout=25) as response:
             raw = response.read().decode("utf-8")
+            print("MP RESPONSE STATUS:", getattr(response, "status", "unknown"))
+            print("MP RAW RESPONSE:", raw)
+            print("=== MP REQUEST END ===\n")
             return json.loads(raw) if raw else {}
     except urllib_error.HTTPError as exc:
         try:
             body = exc.read().decode("utf-8")
+            print("MP ERROR STATUS:", exc.code)
+            print("MP ERROR RESPONSE:", body)
             parsed = json.loads(body) if body else {}
         except Exception:
             parsed = {}
+        print("=== MP REQUEST END WITH ERROR ===\n")
         detail = parsed.get("message") or parsed.get("error") or f"Mercado Pago HTTP {exc.code}"
-        raise HTTPException(status_code=400, detail=f"Mercado Pago: {detail}") from exc
+        localized_detail = _localize_mercadopago_error_detail(str(detail))
+        raise HTTPException(status_code=400, detail=f"Mercado Pago: {localized_detail}") from exc
     except urllib_error.URLError as exc:
+        print("MP CONNECTION ERROR:", str(exc))
+        print("=== MP REQUEST END WITH CONNECTION ERROR ===\n")
         raise HTTPException(status_code=502, detail="No se pudo conectar con Mercado Pago") from exc
-
 
 def _extract_signature_parts(signature_header: str) -> dict[str, str]:
     result: dict[str, str] = {}
@@ -211,18 +323,28 @@ def _is_valid_webhook_signature(
     return hmac.compare_digest(digest, v1)
 
 
-def _normalize_payment_status(value: Optional[str]) -> schemas.WebOrderPaymentStatus:
-    normalized = (value or "").strip().lower()
-    if normalized == "approved":
-        return "approved"
-    if normalized in {"rejected"}:
-        return "failed"
-    if normalized in {"cancelled"}:
-        return "cancelled"
-    if normalized in {"refunded", "charged_back"}:
-        return "refunded"
-    return "pending"
+def _normalize_payment_status(status: str | None) -> str:
+    if not status:
+        return "pending"
 
+    status = status.lower()
+
+    if status in ["approved"]:
+        return "approved"
+
+    if status in ["rejected"]:
+        return "failed"   # 🔥 CLAVE
+
+    if status in ["cancelled"]:
+        return "cancelled"
+
+    if status in ["refunded"]:
+        return "refunded"
+
+    if status in ["in_process", "pending"]:
+        return "pending"
+
+    return "pending"
 
 def _extract_order_id(payment_payload: dict[str, Any]) -> Optional[int]:
     metadata = payment_payload.get("metadata")
@@ -659,6 +781,59 @@ def _run_web_order_post_approval_flow(db: Session, order: models.WebOrder) -> No
         conversion_error = str(exc)
         logger.exception("No se pudo convertir la orden web %s a venta automáticamente", order.id)
 
+    # Cierre defensivo del ciclo de negocio para pagos MP aprobados:
+    # si ya existe venta no debe quedar operativamente en estados intermedios.
+    approved_mp_payment = any(
+        (payment.status == "approved")
+        and ((payment.provider or "").strip().lower() == "mercadopago")
+        for payment in (order.payments or [])
+    )
+    if approved_mp_payment and order.sale_id is not None and order.status in {
+        "pending_payment",
+        "payment_failed",
+        "paid",
+        "processing",
+    }:
+        try:
+            crud._transition_web_order_status(
+                db,
+                order,
+                to_status="fulfilled",
+                note="Cierre automático tras pago Mercado Pago aprobado y venta consolidada",
+                actor_type="system",
+                actor_user_id=None,
+            )
+            db.commit()
+            refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+            if refreshed:
+                order = refreshed
+        except ValueError:
+            logger.warning(
+                "No se pudo cerrar automáticamente la orden web %s tras aprobación de MP (status=%s sale_id=%s)",
+                order.id,
+                order.status,
+                order.sale_id,
+            )
+
+    # Cierre operativo: al consolidar pago aprobado, el carrito activo del cliente
+    # no debe seguir con ítems pendientes.
+    if approved_mp_payment:
+        try:
+            crud.clear_active_web_cart_if_exists(
+                db,
+                account_id=order.account_id,
+                tenant_id=order.tenant_id,
+            )
+            refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+            if refreshed:
+                order = refreshed
+        except Exception:
+            logger.exception(
+                "No se pudo limpiar el carrito activo para la orden web %s (account_id=%s)",
+                order.id,
+                order.account_id,
+            )
+
     if order.sale_id is not None:
         sale = crud.get_sale(db, order.sale_id, tenant_id=order.tenant_id)
 
@@ -758,7 +933,7 @@ def _create_checkout_preference_for_order(
 
     preference_payload: dict[str, Any] = {
         "items": _build_checkout_items(order),
-        "payer": payer if payer else None,
+        #"payer": payer if payer else None,
         "notification_url": _get_webhook_url(),
         "external_reference": f"web-order:{order.id}",
         "metadata": {
@@ -923,7 +1098,11 @@ def _create_guest_order(
             reusable.customer_phone = customer_phone
             reusable.customer_tax_id = customer_tax_id
             reusable.customer_address = customer_address
-            reusable.notes = ((payload.notes or "").strip() or reusable.notes)
+            next_notes_source = ((payload.notes or "").strip() or reusable.notes)
+            reusable.notes = _merge_order_notes_with_checkout_context(
+                next_notes_source,
+                payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
+            )
             reusable.updated_at = datetime.utcnow()
             crud._create_web_order_status_log(
                 db,
@@ -960,7 +1139,10 @@ def _create_guest_order(
         shipping_amount=0.0,
         total=subtotal_amount,
         currency=currency,
-        notes=((payload.notes or "").strip() or None),
+        notes=_merge_order_notes_with_checkout_context(
+            ((payload.notes or "").strip() or None),
+            payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
+        ),
         submitted_at=datetime.utcnow(),
     )
     db.add(order)
@@ -1048,9 +1230,13 @@ def _process_payment_notification(db: Session, payment_id: str) -> schemas.WebOr
 
     status = _normalize_payment_status(payment_data.get("status"))
     if status in {"failed", "cancelled"} and order.payment_status == "approved":
-        return crud._serialize_web_order(order)
+        _run_web_order_post_approval_flow(db, order)
+        refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        return crud._serialize_web_order(refreshed or order)
     if status == "pending" and order.payment_status == "approved":
-        return crud._serialize_web_order(order)
+        _run_web_order_post_approval_flow(db, order)
+        refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        return crud._serialize_web_order(refreshed or order)
 
     payload = schemas.WebOrderPaymentRecordRequest(
         method=str(payment_data.get("payment_method_id") or payment_data.get("payment_type_id") or "mercadopago"),
@@ -1074,8 +1260,12 @@ def _refresh_order_payment_status_from_provider(
     db: Session,
     order: models.WebOrder,
 ) -> models.WebOrder:
-    if not order or order.payment_status == "approved":
+    if not order:
         return order
+    if order.payment_status == "approved":
+        _run_web_order_post_approval_flow(db, order)
+        refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        return refreshed or order
     try:
         token = _get_mercadopago_access_token()
         search = _mercadopago_request(
@@ -1108,6 +1298,9 @@ def _refresh_order_payment_status_from_provider(
 
         _process_payment_notification(db, payment_id_to_process)
         refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        if refreshed and refreshed.payment_status == "approved":
+            _run_web_order_post_approval_flow(db, refreshed)
+            refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or refreshed
         return refreshed or order
     except HTTPException as exc:
         logger.warning(
@@ -1191,7 +1384,7 @@ def refresh_backoffice_order_payment_statuses(
     for order in orders:
         if not order:
             continue
-        if order.status in {"cancelled", "refunded"} or order.payment_status == "approved":
+        if order.status in {"cancelled", "refunded"}:
             refreshed_orders.append(order)
             continue
         refreshed_orders.append(_refresh_order_payment_status_from_provider(db, order))
@@ -1207,6 +1400,12 @@ def create_mercadopago_checkout(
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
+    if isinstance(payload.checkout_context, dict):
+        order = _persist_checkout_context_on_order(
+            db,
+            order,
+            checkout_context=payload.checkout_context,
+        )
     _log_checkout_attempt(
         flow="authenticated",
         order_id=order.id,
@@ -1324,11 +1523,6 @@ def get_mercadopago_order_status(
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
     order = _refresh_order_payment_status_from_provider(db, order)
     order = _apply_checkout_result_hint(db, order, payment_hint=payment)
-    if order and order.payment_status == "approved" and (
-        order.customer_approval_email_sent_at is None or order.internal_approval_email_sent_at is None
-    ):
-        _run_web_order_post_approval_flow(db, order)
-        order = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or order
     return _build_status_response(order)
 
 
@@ -1346,9 +1540,4 @@ def get_guest_mercadopago_order_status(
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
     order = _refresh_order_payment_status_from_provider(db, order)
     order = _apply_checkout_result_hint(db, order, payment_hint=payment)
-    if order and order.payment_status == "approved" and (
-        order.customer_approval_email_sent_at is None or order.internal_approval_email_sent_at is None
-    ):
-        _run_web_order_post_approval_flow(db, order)
-        order = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or order
     return _build_status_response(order)
