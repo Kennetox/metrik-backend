@@ -284,8 +284,14 @@ def create_product(
     )
     return product
 
-def get_product(product_id: int, db: Session = Depends(get_db)):
-    db_product = crud.get_product(db, product_id)
+@router.get("/{product_id}", response_model=schemas.ProductRead)
+def get_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
     return db_product
