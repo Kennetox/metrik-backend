@@ -88,6 +88,31 @@ def _ensure_web_cart_coupon_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "coupon_discount_code_id", "INTEGER")
 
 
+def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
+    table = "web_catalog_categories"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        _ensure_column_postgres(
+            connection,
+            table,
+            "home_featured",
+            "BOOLEAN NOT NULL DEFAULT FALSE",
+        )
+        _ensure_column_postgres(
+            connection,
+            table,
+            "home_featured_order",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        return
+
+    if not _table_exists(connection, table):
+        return
+    _ensure_column(connection, table, "home_featured", "BOOLEAN NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "home_featured_order", "INTEGER NOT NULL DEFAULT 0")
+
+
 def _table_exists_postgres(connection, table: str) -> bool:
     row = connection.execute(
         text(
@@ -1147,6 +1172,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _backfill_company_name_from_tenant_postgres(connection)
                 _ensure_web_discount_code_schema(connection, backend="postgresql")
                 _ensure_web_cart_coupon_schema(connection, backend="postgresql")
+                _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -2233,6 +2259,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _backfill_legacy_users_to_default_tenant_sqlite(connection)
                 _ensure_web_discount_code_schema(connection, backend="sqlite")
                 _ensure_web_cart_coupon_schema(connection, backend="sqlite")
+                _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:

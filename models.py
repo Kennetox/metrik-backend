@@ -1000,6 +1000,8 @@ class WebCatalogCategory(Base):
     name = Column(String(120), nullable=False)
     image_url = Column(String(512), nullable=True)
     tile_color = Column(String(7), nullable=True)
+    home_featured = Column(Boolean, nullable=False, default=False)
+    home_featured_order = Column(Integer, nullable=False, default=0)
     sort_order = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

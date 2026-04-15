@@ -277,6 +277,8 @@ class ComercioWebCatalogCategoryBase(BaseModel):
         pattern=r"^#([0-9a-fA-F]{6})$",
         description="Hex color like #112233",
     )
+    home_featured: bool = False
+    home_featured_order: int = 0
     sort_order: int = 0
     is_active: bool = True
 
@@ -294,6 +296,8 @@ class ComercioWebCatalogCategoryUpdate(BaseModel):
         pattern=r"^#([0-9a-fA-F]{6})$",
         description="Hex color like #112233",
     )
+    home_featured: Optional[bool] = None
+    home_featured_order: Optional[int] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -340,6 +344,8 @@ class WebCatalogCategory(BaseModel):
     name: str
     image_url: Optional[str] = None
     tile_color: Optional[str] = None
+    home_featured: bool = False
+    home_featured_order: int = 0
     product_count: int
 
 

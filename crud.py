@@ -2199,6 +2199,8 @@ def list_comercio_web_catalog_categories(
             name=item.name,
             image_url=item.image_url,
             tile_color=item.tile_color,
+            home_featured=bool(item.home_featured),
+            home_featured_order=int(item.home_featured_order or 0),
             sort_order=int(item.sort_order or 0),
             is_active=bool(item.is_active),
             product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
@@ -2235,6 +2237,8 @@ def create_comercio_web_catalog_category(
         name=payload.name.strip(),
         image_url=(payload.image_url or None),
         tile_color=(payload.tile_color or None),
+        home_featured=bool(payload.home_featured),
+        home_featured_order=int(payload.home_featured_order or 0),
         sort_order=int(payload.sort_order or 0),
         is_active=bool(payload.is_active),
         created_at=now,
@@ -2249,6 +2253,8 @@ def create_comercio_web_catalog_category(
         name=row.name,
         image_url=row.image_url,
         tile_color=row.tile_color,
+        home_featured=bool(row.home_featured),
+        home_featured_order=int(row.home_featured_order or 0),
         sort_order=int(row.sort_order or 0),
         is_active=bool(row.is_active),
         product_count=0,
@@ -2298,6 +2304,10 @@ def update_comercio_web_catalog_category(
         row.image_url = data.get("image_url") or None
     if "tile_color" in data:
         row.tile_color = data.get("tile_color") or None
+    if "home_featured" in data:
+        row.home_featured = bool(data.get("home_featured"))
+    if "home_featured_order" in data:
+        row.home_featured_order = int(data.get("home_featured_order") or 0)
     if "sort_order" in data:
         row.sort_order = int(data.get("sort_order") or 0)
     if "is_active" in data:
@@ -2332,6 +2342,8 @@ def update_comercio_web_catalog_category(
         name=row.name,
         image_url=row.image_url,
         tile_color=row.tile_color,
+        home_featured=bool(row.home_featured),
+        home_featured_order=int(row.home_featured_order or 0),
         sort_order=int(row.sort_order or 0),
         is_active=bool(row.is_active),
         product_count=int(assigned_count or 0),
@@ -3368,6 +3380,8 @@ def get_web_catalog_categories(
             name=item.name,
             image_url=item.image_url,
             tile_color=item.tile_color,
+            home_featured=bool(item.home_featured),
+            home_featured_order=int(item.home_featured_order or 0),
             product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
         )
         for item in categories
