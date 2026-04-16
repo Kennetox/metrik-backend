@@ -52,6 +52,7 @@ FREE_SALE_REASON_REQUIRED = (
     os.getenv("FREE_SALE_REASON_REQUIRED", "true").strip().lower()
     not in {"0", "false", "no", "off"}
 )
+CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -59,6 +60,16 @@ def _normalize_text(value: Optional[str]) -> str:
         return ""
     normalized = unicodedata.normalize("NFD", value)
     return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
+
+
+def _sanitize_sale_notes_for_display(notes: Optional[str]) -> str:
+    raw_notes = (notes or "").strip()
+    if not raw_notes:
+        return ""
+    marker_index = raw_notes.find(CHECKOUT_CONTEXT_NOTE_MARKER)
+    if marker_index >= 0:
+        raw_notes = raw_notes[:marker_index].strip()
+    return raw_notes
 
 
 def _sale_contains_free_sale(sale_in: schemas.SaleCreate) -> bool:
@@ -342,7 +353,7 @@ def _build_sale_email_body(
         if customer_address
         else ""
     )
-    sale_notes = (sale.notes or "").strip()
+    sale_notes = _sanitize_sale_notes_for_display(sale.notes)
     sale_notes_block = (
         "<p style='margin: 0 0 14px;'>"
         "<strong>Notas de la venta</strong><br/>"

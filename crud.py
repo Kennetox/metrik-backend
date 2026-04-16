@@ -53,6 +53,20 @@ def _web_order_reuse_window_minutes() -> int:
     return _env_int("WEB_ORDER_REUSE_WINDOW_MINUTES", 24 * 60)
 
 
+CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
+
+
+def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
+    raw_notes = (notes or "").strip()
+    if not raw_notes:
+        return None
+    marker_index = raw_notes.find(CHECKOUT_CONTEXT_NOTE_MARKER)
+    if marker_index < 0:
+        return raw_notes
+    clean_notes = raw_notes[:marker_index].strip()
+    return clean_notes or None
+
+
 def _normalize_web_order_item_signature_value(value: Any, *, digits: int) -> float:
     return round(float(value or 0.0), digits)
 
@@ -8579,8 +8593,9 @@ def convert_web_order_to_sale(
         raise ValueError("Los pagos aprobados no cubren el total de la orden")
 
     sale_notes = [f"Generada desde Comercio Web: {order.document_number}"]
-    if order.notes:
-        sale_notes.append(order.notes)
+    clean_order_notes = _strip_checkout_context_note_segment(order.notes)
+    if clean_order_notes:
+        sale_notes.append(clean_order_notes)
     if payload.note:
         sale_notes.append(payload.note)
 

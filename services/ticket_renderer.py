@@ -11,6 +11,7 @@ TICKET_MODE = "ticket"
 THERMAL_TICKET_MODE = "thermal_ticket"
 INVOICE_MODE = "invoice"
 CLASSIC_INVOICE_MODE = "classic_invoice"  # backward compatibility
+CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 
 FALLBACK_COMPANY = {
     "name": "Kensar Electronic",
@@ -776,10 +777,16 @@ def _cart_discount_meta(sale: models.Sale) -> tuple[str, str]:
 
 
 def _note_lines(notes: Optional[str]) -> List[str]:
-    if not notes or not notes.strip():
+    clean_notes = (notes or "").strip()
+    if not clean_notes:
+        return []
+    marker_index = clean_notes.find(CHECKOUT_CONTEXT_NOTE_MARKER)
+    if marker_index >= 0:
+        clean_notes = clean_notes[:marker_index].strip()
+    if not clean_notes:
         return []
     lines = []
-    for raw in notes.splitlines():
+    for raw in clean_notes.splitlines():
         if raw and raw.strip():
             lines.append(raw.strip())
     return lines
