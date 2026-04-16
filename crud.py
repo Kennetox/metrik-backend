@@ -3750,6 +3750,12 @@ def create_sale(
             }
         )
 
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if tenant_id is None and created_by_user_id:
+        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
+        if creator:
+            effective_tenant_id = resolve_user_tenant_id(db, creator)
+
     customer_payload = {
         "customer_id": getattr(sale_in, "customer_id", None),
         "customer_name": getattr(sale_in, "customer_name", None),
@@ -3760,7 +3766,11 @@ def create_sale(
     }
 
     if customer_payload["customer_id"] is not None:
-        customer = get_pos_customer(db, customer_payload["customer_id"])
+        customer = get_pos_customer(
+            db,
+            customer_payload["customer_id"],
+            tenant_id=effective_tenant_id,
+        )
         if not customer or not customer.is_active:
             raise ValueError("El cliente seleccionado no existe o está inactivo")
         customer_payload.update(
@@ -3797,12 +3807,6 @@ def create_sale(
         main_method = payments_data[0].method
     else:
         main_method = "mixed"
-
-    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
-    if tenant_id is None and created_by_user_id:
-        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
-        if creator:
-            effective_tenant_id = resolve_user_tenant_id(db, creator)
 
     reservation_id = getattr(sale_in, "reservation_id", None)
     reservation: Optional[models.SaleNumberReservation] = None
@@ -7251,6 +7255,7 @@ def list_pos_customers(
     skip: int = 0,
     limit: int = 100,
     include_inactive: bool = False,
+    include_web_customers: bool = True,
     tenant_id: Optional[int] = None,
 ):
     # Backward-compatibility repair: older guest checkout used a placeholder email
@@ -7275,6 +7280,8 @@ def list_pos_customers(
         query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
     if not include_inactive:
         query = query.filter(models.PosCustomer.is_active.is_(True))
+    if not include_web_customers:
+        query = query.filter(~models.PosCustomer.web_accounts.any())
 
     if search:
         pattern = f"%{search.lower()}%"
@@ -7299,6 +7306,7 @@ def list_pos_frequent_customers(
     db: Session,
     min_sales: int = 5,
     limit: int = 10,
+    include_web_customers: bool = True,
     tenant_id: Optional[int] = None,
 ):
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
@@ -7307,6 +7315,11 @@ def list_pos_frequent_customers(
         db.query(models.PosCustomer, count_expr.label("sales_count"))
         .join(models.Sale, models.Sale.customer_id == models.PosCustomer.id)
         .filter(models.PosCustomer.is_active.is_(True))
+        .filter(
+            ~models.PosCustomer.web_accounts.any()
+            if not include_web_customers
+            else true()
+        )
         .filter(
             models.PosCustomer.tenant_id == effective_tenant_id
             if effective_tenant_id is not None

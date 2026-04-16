@@ -75,7 +75,13 @@ def create_separated_order(
             ),
         )
     try:
-        sale = crud.create_sale(db, separated_in, created_by_user_id=current_user.id)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        sale = crud.create_sale(
+            db,
+            separated_in,
+            created_by_user_id=current_user.id,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

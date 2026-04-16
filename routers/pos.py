@@ -844,7 +844,13 @@ def create_sale(
         )
 
     try:
-        sale = crud.create_sale(db, sale_in, created_by_user_id=current_user.id)
+        tenant_id = crud.resolve_user_tenant_id(db, current_user)
+        sale = crud.create_sale(
+            db,
+            sale_in,
+            created_by_user_id=current_user.id,
+            tenant_id=tenant_id,
+        )
     except ValueError as exc:
         message = str(exc)
         status_code = 409 if "ticket" in message.lower() and "existe" in message.lower() else 400
@@ -2203,6 +2209,7 @@ def list_pos_customers(
     skip: int = 0,
     limit: int = 100,
     include_inactive: bool = False,
+    include_web_customers: bool = True,
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
@@ -2213,6 +2220,7 @@ def list_pos_customers(
         skip=skip,
         limit=limit,
         include_inactive=include_inactive,
+        include_web_customers=include_web_customers,
         tenant_id=tenant_id,
     )
     return customers
@@ -2222,6 +2230,7 @@ def list_pos_customers(
 def list_pos_frequent_customers(
     min_sales: int = 5,
     limit: int = 12,
+    include_web_customers: bool = True,
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
@@ -2230,6 +2239,7 @@ def list_pos_frequent_customers(
         db,
         min_sales=min_sales,
         limit=limit,
+        include_web_customers=include_web_customers,
         tenant_id=tenant_id,
     )
 
