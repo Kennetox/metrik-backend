@@ -37,6 +37,16 @@ BOGOTA_TZ = ZoneInfo("America/Bogota")
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 
 
+def _get_mercadopago_provider():
+    # Lazy import avoids module cycle during app startup.
+    from services.payments.registry import get_provider
+
+    provider = get_provider("mercadopago")
+    if provider is None:
+        raise HTTPException(status_code=503, detail="Proveedor Mercado Pago no disponible")
+    return provider
+
+
 def _get_mercadopago_access_token() -> str:
     token = (os.getenv("MERCADOPAGO_ACCESS_TOKEN") or "").strip()
     if not token:
@@ -266,34 +276,41 @@ def _mercadopago_request(
         headers["Content-Type"] = "application/json"
         body_bytes = json.dumps(payload).encode("utf-8")
 
-    print("\n=== MP REQUEST START ===")
-    print("MP METHOD:", method.upper())
-    print("MP URL:", url)
-    print("MP PAYLOAD:", json.dumps(payload, ensure_ascii=False, indent=2) if payload else None)
+    logger.debug(
+        "MP request | method=%s url=%s has_payload=%s",
+        method.upper(),
+        url,
+        payload is not None,
+    )
 
     request = urllib_request.Request(url=url, data=body_bytes, headers=headers, method=method.upper())
     try:
         with urllib_request.urlopen(request, timeout=25) as response:
             raw = response.read().decode("utf-8")
-            print("MP RESPONSE STATUS:", getattr(response, "status", "unknown"))
-            print("MP RAW RESPONSE:", raw)
-            print("=== MP REQUEST END ===\n")
+            logger.debug(
+                "MP response | method=%s url=%s status=%s",
+                method.upper(),
+                url,
+                getattr(response, "status", "unknown"),
+            )
             return json.loads(raw) if raw else {}
     except urllib_error.HTTPError as exc:
         try:
             body = exc.read().decode("utf-8")
-            print("MP ERROR STATUS:", exc.code)
-            print("MP ERROR RESPONSE:", body)
             parsed = json.loads(body) if body else {}
         except Exception:
             parsed = {}
-        print("=== MP REQUEST END WITH ERROR ===\n")
+        logger.warning(
+            "MP error response | method=%s url=%s status=%s",
+            method.upper(),
+            url,
+            exc.code,
+        )
         detail = parsed.get("message") or parsed.get("error") or f"Mercado Pago HTTP {exc.code}"
         localized_detail = _localize_mercadopago_error_detail(str(detail))
         raise HTTPException(status_code=400, detail=f"Mercado Pago: {localized_detail}") from exc
     except urllib_error.URLError as exc:
-        print("MP CONNECTION ERROR:", str(exc))
-        print("=== MP REQUEST END WITH CONNECTION ERROR ===\n")
+        logger.warning("MP connection error | method=%s url=%s error=%s", method.upper(), url, str(exc))
         raise HTTPException(status_code=502, detail="No se pudo conectar con Mercado Pago") from exc
 
 def _extract_signature_parts(signature_header: str) -> dict[str, str]:
@@ -1387,7 +1404,8 @@ def refresh_backoffice_order_payment_statuses(
         if order.status in {"cancelled", "refunded"}:
             refreshed_orders.append(order)
             continue
-        refreshed_orders.append(_refresh_order_payment_status_from_provider(db, order))
+        provider = _get_mercadopago_provider()
+        refreshed_orders.append(provider.refresh_order_status(db, order))
     return refreshed_orders
 
 
@@ -1415,7 +1433,8 @@ def create_mercadopago_checkout(
         items_count=len(order.items or []),
         payer_input=payload.payer,
     )
-    return _create_checkout_preference_for_order(order, payer_input=payload.payer)
+    provider = _get_mercadopago_provider()
+    return provider.create_checkout(db, order, payer_input=payload.payer)
 
 
 @router.post("/guest-checkout", response_model=schemas.WebMercadoPagoCheckoutCreateResponse)
@@ -1434,7 +1453,9 @@ def create_guest_mercadopago_checkout(
     )
     order = _create_guest_order(db, payload)
     order_access_token = _build_guest_order_access_token(order)
-    return _create_checkout_preference_for_order(
+    provider = _get_mercadopago_provider()
+    return provider.create_checkout(
+        db,
         order,
         payer_input=payload.payer,
         order_access_token=order_access_token,
@@ -1458,16 +1479,17 @@ async def receive_mercadopago_webhook(
     params = request.query_params
     data_id = params.get("data.id") or str((body.get("data") or {}).get("id") or "")
     webhook_secret = (os.getenv("MERCADOPAGO_WEBHOOK_SECRET") or "").strip()
-    if webhook_secret:
-        if not data_id or not x_signature or not x_request_id:
-            raise HTTPException(status_code=401, detail="Webhook sin headers de firma")
-        if not _is_valid_webhook_signature(
-            secret=webhook_secret,
-            signature_header=x_signature,
-            request_id=x_request_id,
-            data_id=data_id,
-        ):
-            raise HTTPException(status_code=401, detail="Firma de webhook inválida")
+    if not webhook_secret:
+        raise HTTPException(status_code=503, detail="MERCADOPAGO_WEBHOOK_SECRET no configurado")
+    if not data_id or not x_signature or not x_request_id:
+        raise HTTPException(status_code=401, detail="Webhook sin headers de firma")
+    if not _is_valid_webhook_signature(
+        secret=webhook_secret,
+        signature_header=x_signature,
+        request_id=x_request_id,
+        data_id=data_id,
+    ):
+        raise HTTPException(status_code=401, detail="Firma de webhook inválida")
 
     event_type = (
         params.get("type")
@@ -1476,31 +1498,8 @@ async def receive_mercadopago_webhook(
     ).strip().lower()
 
     try:
-        if event_type in {"payment", "payments"}:
-            payment_id = data_id or str((body.get("data") or {}).get("id") or "")
-            if not payment_id:
-                raise HTTPException(status_code=400, detail="Notificación de pago sin data.id")
-            updated = _process_payment_notification(db, payment_id)
-            return {"ok": True, "order_id": updated.id, "status": updated.status}
-
-        if event_type in {"merchant_order", "order"}:
-            merchant_order_id = data_id or str((body.get("data") or {}).get("id") or "")
-            if not merchant_order_id:
-                return {"ok": True, "ignored": "merchant_order sin data.id"}
-            token = _get_mercadopago_access_token()
-            order_data = _mercadopago_request(
-                "GET",
-                f"/merchant_orders/{urllib_parse.quote(str(merchant_order_id))}",
-                access_token=token,
-            )
-            processed = 0
-            for payment in (order_data.get("payments") or []):
-                payment_id = str(payment.get("id") or "").strip()
-                if not payment_id:
-                    continue
-                _process_payment_notification(db, payment_id)
-                processed += 1
-            return {"ok": True, "processed_payments": processed}
+        provider = _get_mercadopago_provider()
+        return provider.process_webhook(db, event_type=event_type, data_id=data_id)
 
     except HTTPException:
         raise
@@ -1521,7 +1520,8 @@ def get_mercadopago_order_status(
     order = crud.get_web_order(db, order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
-    order = _refresh_order_payment_status_from_provider(db, order)
+    provider = _get_mercadopago_provider()
+    order = provider.refresh_order_status(db, order)
     order = _apply_checkout_result_hint(db, order, payment_hint=payment)
     return _build_status_response(order)
 
@@ -1538,6 +1538,7 @@ def get_guest_mercadopago_order_status(
     order = crud.get_backoffice_web_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
-    order = _refresh_order_payment_status_from_provider(db, order)
+    provider = _get_mercadopago_provider()
+    order = provider.refresh_order_status(db, order)
     order = _apply_checkout_result_hint(db, order, payment_hint=payment)
     return _build_status_response(order)

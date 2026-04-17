@@ -8400,16 +8400,21 @@ def record_web_order_payment(
     method = _clean_field(payload.method)
 
     if provider and provider_reference:
-        duplicate = (
-            db.query(models.WebOrderPayment)
-            .filter(
-                models.WebOrderPayment.web_order_id == order.id,
-                models.WebOrderPayment.provider == provider,
-                models.WebOrderPayment.provider_reference == provider_reference,
-            )
-            .first()
+        duplicate_query = db.query(models.WebOrderPayment).filter(
+            models.WebOrderPayment.provider == provider,
+            models.WebOrderPayment.provider_reference == provider_reference,
         )
+        if order.tenant_id is None:
+            duplicate_query = duplicate_query.filter(models.WebOrderPayment.tenant_id.is_(None))
+        else:
+            duplicate_query = duplicate_query.filter(models.WebOrderPayment.tenant_id == order.tenant_id)
+
+        duplicate = duplicate_query.first()
         if duplicate:
+            if duplicate.web_order_id != order.id:
+                raise ValueError(
+                    "La referencia del proveedor ya está asociada a otra orden web"
+                )
             stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
             if not stored:
                 raise ValueError("No se pudo recuperar la orden actualizada")

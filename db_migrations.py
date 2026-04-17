@@ -260,6 +260,50 @@ def _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend: st
     )
 
 
+def _has_duplicate_web_order_payment_provider_reference(connection, backend: str) -> bool:
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
+    row = connection.execute(
+        text(
+            f"""
+            SELECT EXISTS (
+              SELECT 1
+              FROM web_order_payments
+              WHERE provider IS NOT NULL
+                AND provider_reference IS NOT NULL
+                AND {trim_fn}(provider) <> ''
+                AND {trim_fn}(provider_reference) <> ''
+              GROUP BY tenant_id, {trim_fn}(provider), {trim_fn}(provider_reference)
+              HAVING COUNT(*) > 1
+            ) AS has_dup
+            """
+        )
+    ).mappings().first()
+    return bool(row and row.get("has_dup"))
+
+
+def _ensure_web_order_payments_provider_reference_unique_index(connection, backend: str) -> None:
+    if _has_duplicate_web_order_payment_provider_reference(connection, backend):
+        print(
+            "[schema-upgrade] No se creó índice único para web_order_payments "
+            "(tenant_id, provider, provider_reference): hay duplicados."
+        )
+        return
+
+    trim_fn = "btrim" if backend == "postgresql" else "trim"
+    connection.execute(
+        text(
+            f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS web_order_payments_provider_reference_unique_idx
+            ON web_order_payments (tenant_id, provider, provider_reference)
+            WHERE provider IS NOT NULL
+              AND provider_reference IS NOT NULL
+              AND {trim_fn}(provider) <> ''
+              AND {trim_fn}(provider_reference) <> ''
+            """
+        )
+    )
+
+
 def _has_duplicate_tenant_number(
     connection,
     table: str,
@@ -1168,6 +1212,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
+                _ensure_web_order_payments_provider_reference_unique_index(
+                    connection,
+                    backend="postgresql",
+                )
                 _backfill_legacy_users_to_default_tenant_postgres(connection)
                 _backfill_company_name_from_tenant_postgres(connection)
                 _ensure_web_discount_code_schema(connection, backend="postgresql")
@@ -2885,6 +2933,10 @@ def _ensure_table_document_adjustments(connection) -> None:
         _ensure_products_tenant_scoped_unique_indexes(connection, backend="sqlite")
         _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="sqlite")
         _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="sqlite")
+        _ensure_web_order_payments_provider_reference_unique_index(
+            connection,
+            backend="sqlite",
+        )
 
 
 def _ensure_table_product_audit_logs(connection) -> None:
