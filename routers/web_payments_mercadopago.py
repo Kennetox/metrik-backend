@@ -783,13 +783,33 @@ def _run_web_order_post_approval_flow(db: Session, order: models.WebOrder) -> No
     settings = crud.get_pos_settings(db, tenant_id=order.tenant_id)
     sale: Optional[models.Sale] = None
     conversion_error: Optional[str] = None
+    approved_payments = [
+        payment
+        for payment in (order.payments or [])
+        if (payment.status or "").strip().lower() == "approved"
+    ]
+    provider_label = "Proveedor online"
+    if approved_payments:
+        latest_approved = sorted(
+            approved_payments,
+            key=lambda row: row.approved_at or row.created_at or datetime.min,
+        )[-1]
+        provider_name = (latest_approved.provider or "").strip().lower()
+        if provider_name == "mercadopago":
+            provider_label = "Mercado Pago"
+        elif provider_name == "wompi":
+            provider_label = "Wompi"
+        elif provider_name:
+            provider_label = provider_name.replace("_", " ").title()
 
     try:
         if order.sale_id is None:
             crud.convert_web_order_to_sale(
                 db,
                 order,
-                schemas.WebOrderConvertToSaleRequest(note="Conversión automática al aprobar pago Mercado Pago"),
+                schemas.WebOrderConvertToSaleRequest(
+                    note=f"Conversión automática al aprobar pago {provider_label}"
+                ),
                 actor_user_id=None,
             )
         refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
