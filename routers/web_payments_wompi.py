@@ -164,6 +164,21 @@ def _build_status_response(order: models.WebOrder) -> schemas.WebWompiOrderPayme
     )
 
 
+@router.get(
+    "/pse/financial-institutions",
+    response_model=list[schemas.WebWompiPseFinancialInstitutionRead],
+)
+def list_wompi_pse_financial_institutions(
+    account: models.WebCustomerAccount = Depends(require_web_customer_auth),
+):
+    _ = account
+    provider = _get_wompi_provider()
+    try:
+        return provider.list_pse_financial_institutions()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/checkout", response_model=schemas.WebWompiCheckoutCreateResponse)
 def create_wompi_checkout(
     payload: schemas.WebWompiCheckoutCreateRequest,

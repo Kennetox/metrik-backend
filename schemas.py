@@ -2045,6 +2045,11 @@ class WebWompiCheckoutCreateResponse(BaseModel):
     personal_data_auth_permalink: Optional[str] = None
 
 
+class WebWompiPseFinancialInstitutionRead(BaseModel):
+    financial_institution_code: str
+    financial_institution_name: str
+
+
 class WebWompiOrderPaymentStatusResponse(BaseModel):
     order_id: int
     web_order_number: Optional[int] = None

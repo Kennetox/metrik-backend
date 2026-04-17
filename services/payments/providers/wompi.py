@@ -24,6 +24,27 @@ _ORDER_REF_PATTERN = re.compile(r"^web-order:(\d+)")
 class WompiPaymentProvider:
     name = "wompi"
 
+    def list_pse_financial_institutions(self) -> list[dict[str, str]]:
+        response = self._wompi_request("GET", "/v1/pse/financial_institutions")
+        rows = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(rows, list):
+            return []
+        result: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("financial_institution_code") or row.get("code") or "").strip()
+            name = str(row.get("financial_institution_name") or row.get("name") or "").strip()
+            if not code or not name:
+                continue
+            result.append(
+                {
+                    "financial_institution_code": code,
+                    "financial_institution_name": name,
+                }
+            )
+        return result
+
     def map_external_status(self, status: str | None) -> str:
         normalized = (status or "").strip().upper()
         if normalized == "APPROVED":
