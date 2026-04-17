@@ -36,6 +36,8 @@ def ensure_default_providers() -> None:
         return
     # Lazy import to avoid loading router modules at startup when unnecessary.
     from .providers.mercadopago import MercadoPagoPaymentProvider
+    from .providers.wompi import WompiPaymentProvider
 
     register_provider(MercadoPagoPaymentProvider())
+    register_provider(WompiPaymentProvider())
     _DEFAULTS_READY = True

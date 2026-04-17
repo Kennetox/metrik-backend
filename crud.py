@@ -8399,6 +8399,7 @@ def record_web_order_payment(
     provider_reference = _clean_field(payload.provider_reference)
     method = _clean_field(payload.method)
 
+    existing_payment: models.WebOrderPayment | None = None
     if provider and provider_reference:
         duplicate_query = db.query(models.WebOrderPayment).filter(
             models.WebOrderPayment.provider == provider,
@@ -8415,10 +8416,7 @@ def record_web_order_payment(
                 raise ValueError(
                     "La referencia del proveedor ya está asociada a otra orden web"
                 )
-            stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
-            if not stored:
-                raise ValueError("No se pudo recuperar la orden actualizada")
-            return _serialize_web_order(stored)
+            existing_payment = duplicate
 
     if payment_status == "approved":
         approved_total = (
@@ -8434,21 +8432,42 @@ def record_web_order_payment(
         if next_total - order_total > 0.01:
             raise ValueError("El pago supera el total de la orden")
 
-    payment = models.WebOrderPayment(
-        tenant_id=order.tenant_id,
-        web_order_id=order.id,
-        provider=provider,
-        provider_reference=provider_reference,
-        method=method,
-        status=payment_status,
-        amount=amount,
-        currency=order.currency,
-        raw_payload=payload.raw_payload or {},
-        approved_at=datetime.utcnow() if payment_status == "approved" else None,
-        failed_at=datetime.utcnow() if payment_status == "failed" else None,
-        cancelled_at=datetime.utcnow() if payment_status == "cancelled" else None,
-    )
-    db.add(payment)
+    if existing_payment is not None:
+        payment = existing_payment
+        payment.method = method or payment.method
+        payment.status = payment_status
+        payment.amount = amount
+        payment.currency = order.currency
+        payment.raw_payload = payload.raw_payload or payment.raw_payload or {}
+        if payment_status == "approved":
+            payment.approved_at = payment.approved_at or datetime.utcnow()
+            payment.failed_at = None
+            payment.cancelled_at = None
+        elif payment_status == "failed":
+            payment.failed_at = datetime.utcnow()
+            payment.approved_at = None
+            payment.cancelled_at = None
+        elif payment_status == "cancelled":
+            payment.cancelled_at = datetime.utcnow()
+            payment.approved_at = None
+            payment.failed_at = None
+        db.add(payment)
+    else:
+        payment = models.WebOrderPayment(
+            tenant_id=order.tenant_id,
+            web_order_id=order.id,
+            provider=provider,
+            provider_reference=provider_reference,
+            method=method,
+            status=payment_status,
+            amount=amount,
+            currency=order.currency,
+            raw_payload=payload.raw_payload or {},
+            approved_at=datetime.utcnow() if payment_status == "approved" else None,
+            failed_at=datetime.utcnow() if payment_status == "failed" else None,
+            cancelled_at=datetime.utcnow() if payment_status == "cancelled" else None,
+        )
+        db.add(payment)
 
     transition_note = payload.note
     if payment_status == "approved":

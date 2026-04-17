@@ -34,6 +34,7 @@ from routers import (
     web_cart as web_cart_router,
     web_orders as web_orders_router,
     web_payments_mercadopago as web_payments_mercadopago_router,
+    web_payments_wompi as web_payments_wompi_router,
     comercio_web as comercio_web_router,
     platform as platform_router,
     investment as investment_router,
@@ -192,6 +193,7 @@ app.include_router(web_customers_router.router)
 app.include_router(web_cart_router.router)
 app.include_router(web_orders_router.router)
 app.include_router(web_payments_mercadopago_router.router)
+app.include_router(web_payments_wompi_router.router)
 app.include_router(comercio_web_router.router)
 app.include_router(platform_router.router)
 app.include_router(investment_router.router)

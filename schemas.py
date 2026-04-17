@@ -2016,6 +2016,61 @@ class WebMercadoPagoOrderPaymentStatusResponse(BaseModel):
     updated_at: datetime
 
 
+WebWompiPaymentMethod = Literal["pse", "nequi"]
+
+
+class WebWompiCheckoutCreateRequest(BaseModel):
+    order_id: int
+    payment_method: WebWompiPaymentMethod
+    payment_method_data: Dict[str, object] = Field(default_factory=dict)
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = None
+    customer_full_name: Optional[str] = None
+    acceptance_token: Optional[str] = None
+    accept_personal_auth: Optional[str] = None
+    checkout_context: Optional[Dict[str, object]] = None
+
+
+class WebWompiCheckoutCreateResponse(BaseModel):
+    order_id: int
+    provider: str
+    payment_method: WebWompiPaymentMethod
+    transaction_id: str
+    status: WebOrderPaymentStatus
+    reference: str
+    redirect_url: Optional[str] = None
+    checkout_url: Optional[str] = None
+    async_payment_url: Optional[str] = None
+    acceptance_token_permalink: Optional[str] = None
+    personal_data_auth_permalink: Optional[str] = None
+
+
+class WebWompiOrderPaymentStatusResponse(BaseModel):
+    order_id: int
+    web_order_number: Optional[int] = None
+    document_number: Optional[str] = None
+    status: WebOrderStatus
+    payment_status: WebOrderPaymentStatus
+    subtotal: float = 0.0
+    discount_amount: float = 0.0
+    shipping_amount: float = 0.0
+    total: float = 0.0
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    sale_id: Optional[int] = None
+    sale_document_number: Optional[str] = None
+    provider: Optional[str] = None
+    provider_reference: Optional[str] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    payment_record_status: Optional[WebOrderPaymentStatus] = None
+    payment_method: Optional[WebWompiPaymentMethod] = None
+    checkout_url: Optional[str] = None
+    async_payment_url: Optional[str] = None
+    items: List[WebOrderItemRead] = Field(default_factory=list)
+    updated_at: datetime
+
+
 class ReturnPaymentBase(BaseModel):
     method: str
     amount: float
