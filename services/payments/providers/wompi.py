@@ -285,6 +285,9 @@ class WompiPaymentProvider:
             actor_user_id=None,
         )
         refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+        if refreshed and refreshed.payment_status == "approved":
+            self._run_post_approval_flow(db, refreshed)
+            refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or refreshed
         return refreshed or order
 
     def process_webhook(self, db, **kwargs: Any) -> dict[str, Any]:
@@ -343,6 +346,9 @@ class WompiPaymentProvider:
             same_status = (existing_payment.status or "").strip().lower() == internal_status
             same_amount = abs(float(existing_payment.amount or 0.0) - float(amount_value or 0.0)) <= 0.0001
             if same_status and same_amount:
+                refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or order
+                if refreshed.payment_status == "approved":
+                    self._run_post_approval_flow(db, refreshed)
                 return {
                     "ok": True,
                     "order_id": order.id,
@@ -364,7 +370,17 @@ class WompiPaymentProvider:
             ),
             actor_user_id=None,
         )
+        refreshed = crud.get_backoffice_web_order(db, updated.id, tenant_id=order.tenant_id)
+        if refreshed and refreshed.payment_status == "approved":
+            self._run_post_approval_flow(db, refreshed)
         return {"ok": True, "order_id": updated.id, "transaction_id": transaction_id}
+
+    def _run_post_approval_flow(self, db, order: models.WebOrder) -> None:
+        # Reuse the existing business flow already proven in Mercado Pago:
+        # convert approved web order to sale + send approval notifications.
+        from routers import web_payments_mercadopago as mp_router
+
+        mp_router._run_web_order_post_approval_flow(db, order)
 
     def _resolve_acceptance_tokens(
         self,
