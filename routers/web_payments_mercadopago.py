@@ -21,6 +21,7 @@ from database import get_db
 from routers.web_customers import require_web_customer_auth
 from services import email as email_service
 from services import ticket_renderer
+from services.payments.routing import resolve_provider_for_method
 from security import create_access_token, verify_access_token
 
 
@@ -349,13 +350,13 @@ def _normalize_payment_status(status: str | None) -> str:
     if status in ["approved"]:
         return "approved"
 
-    if status in ["rejected"]:
-        return "failed"   # 🔥 CLAVE
+    if status in ["rejected", "chargeback", "in_mediation"]:
+        return "failed"
 
     if status in ["cancelled"]:
         return "cancelled"
 
-    if status in ["refunded"]:
+    if status in ["refunded", "charged_back"]:
         return "refunded"
 
     if status in ["in_process", "pending"]:
@@ -1264,6 +1265,22 @@ def _process_payment_notification(db: Session, payment_id: str) -> schemas.WebOr
         note=f"Webhook Mercado Pago ({status})",
         raw_payload=payment_data,
     )
+    existing_payment = (
+        db.query(models.WebOrderPayment)
+        .filter(
+            models.WebOrderPayment.web_order_id == order.id,
+            models.WebOrderPayment.provider == "mercadopago",
+            models.WebOrderPayment.provider_reference == provider_reference,
+        )
+        .order_by(models.WebOrderPayment.id.desc())
+        .first()
+    )
+    if existing_payment is not None:
+        same_status = (existing_payment.status or "").strip().lower() == status
+        same_amount = abs(float(existing_payment.amount or 0.0) - float(payload.amount or 0.0)) <= 0.0001
+        if same_status and same_amount:
+            return crud._serialize_web_order(order)
+
     updated = crud.record_web_order_payment(db, order, payload, actor_user_id=None)
     refreshed = crud.get_backoffice_web_order(db, updated.id, tenant_id=order.tenant_id)
     if refreshed and refreshed.payment_status == "approved":
@@ -1415,6 +1432,12 @@ def create_mercadopago_checkout(
     db: Session = Depends(get_db),
     account: models.WebCustomerAccount = Depends(require_web_customer_auth),
 ):
+    resolved_provider = resolve_provider_for_method("card")
+    if resolved_provider != "mercadopago":
+        raise HTTPException(
+            status_code=409,
+            detail="El método card ya no está asignado a Mercado Pago",
+        )
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
@@ -1442,6 +1465,12 @@ def create_guest_mercadopago_checkout(
     payload: schemas.WebGuestMercadoPagoCheckoutCreateRequest,
     db: Session = Depends(get_db),
 ):
+    resolved_provider = resolve_provider_for_method("card")
+    if resolved_provider != "mercadopago":
+        raise HTTPException(
+            status_code=409,
+            detail="El método card ya no está asignado a Mercado Pago",
+        )
     _log_checkout_attempt(
         flow="guest",
         order_id=None,

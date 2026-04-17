@@ -1,34 +1,13 @@
 from __future__ import annotations
 
 import logging
-import os
-from datetime import datetime
-from typing import Optional
 
 import models
 from .registry import get_provider
+from .routing import resolve_provider_for_order
 
 
 logger = logging.getLogger("kensar.payments")
-
-
-def _clean_provider(value: Optional[str]) -> Optional[str]:
-    normalized = (value or "").strip().lower()
-    return normalized or None
-
-
-def _resolve_order_provider(order: models.WebOrder) -> Optional[str]:
-    payments = sorted(order.payments or [], key=lambda row: row.created_at or datetime.min)
-    if payments:
-        last_provider = _clean_provider(payments[-1].provider)
-        if last_provider:
-            return last_provider
-
-    default_provider = _clean_provider(os.getenv("WEB_DEFAULT_PAYMENT_PROVIDER"))
-    if default_provider:
-        return default_provider
-    return "mercadopago"
-
 
 def refresh_backoffice_order_payment_statuses(
     db,
@@ -45,7 +24,7 @@ def refresh_backoffice_order_payment_statuses(
             refreshed_orders.append(order)
             continue
 
-        provider_name = _resolve_order_provider(order)
+        provider_name = resolve_provider_for_order(order)
         provider = get_provider(provider_name)
         if provider is None:
             logger.warning(

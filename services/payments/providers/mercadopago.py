@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any, Optional
 from urllib import parse as urllib_parse
 
+import crud
 import models
+import schemas
 from routers import web_payments_mercadopago as mp_router
 
 
@@ -20,12 +22,34 @@ class MercadoPagoPaymentProvider:
         *,
         payer_input: Optional[Any] = None,
         order_access_token: Optional[str] = None,
+        payment_method: Optional[str] = None,
     ) -> Any:
-        return mp_router._create_checkout_preference_for_order(
+        checkout = mp_router._create_checkout_preference_for_order(
             order,
             payer_input=payer_input,
             order_access_token=order_access_token,
         )
+        method = (payment_method or "card").strip().lower() or "card"
+        provider_reference = (checkout.preference_id or "").strip()
+        crud.record_web_order_payment(
+            db,
+            order,
+            schemas.WebOrderPaymentRecordRequest(
+                method=method,
+                amount=float(order.total or 0.0),
+                provider="mercadopago",
+                provider_reference=provider_reference or None,
+                status="pending",
+                note="Checkout Mercado Pago creado",
+                raw_payload={
+                    "preference_id": provider_reference,
+                    "init_point": checkout.init_point,
+                    "sandbox_init_point": checkout.sandbox_init_point,
+                },
+            ),
+            actor_user_id=None,
+        )
+        return checkout
 
     def refresh_order_status(self, db, order: models.WebOrder) -> models.WebOrder:
         return mp_router._refresh_order_payment_status_from_provider(db, order)

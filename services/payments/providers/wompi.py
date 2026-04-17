@@ -11,6 +11,7 @@ from typing import Any, Optional
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+from uuid import uuid4
 
 import crud
 import models
@@ -49,10 +50,12 @@ class WompiPaymentProvider:
         normalized = (status or "").strip().upper()
         if normalized == "APPROVED":
             return "approved"
-        if normalized in {"DECLINED", "ERROR"}:
+        if normalized in {"DECLINED", "ERROR", "FAILED"}:
             return "failed"
-        if normalized == "VOIDED":
+        if normalized in {"VOIDED", "CANCELLED", "CANCELED"}:
             return "cancelled"
+        if normalized == "REFUNDED":
+            return "refunded"
         if normalized == "PENDING":
             return "pending"
         return "pending"
@@ -78,22 +81,15 @@ class WompiPaymentProvider:
             raise ValueError("La orden no tiene items para pagar")
 
         method = (payment_method or "").strip().lower()
-        if method not in {"pse", "nequi"}:
-            raise ValueError("Wompi solo admite 'pse' o 'nequi' en este flujo")
+        if method not in {"wompi", "pse", "nequi"}:
+            raise ValueError("Wompi solo admite 'wompi', 'pse' o 'nequi' en este flujo")
 
         public_key = self._get_required_env("WOMPI_PUBLIC_KEY")
-        private_key = self._get_required_env("WOMPI_PRIVATE_KEY")
         integrity_secret = self._get_required_env("WOMPI_INTEGRITY_SECRET")
-
-        acceptance = self._resolve_acceptance_tokens(
-            public_key=public_key,
-            acceptance_token=acceptance_token,
-            accept_personal_auth=accept_personal_auth,
-        )
 
         amount_in_cents = self._to_amount_in_cents(order.total)
         currency = (order.currency or "COP").strip().upper() or "COP"
-        reference = f"web-order:{order.id}:{int(time.time())}"
+        reference = f"web-order:{order.id}:{int(time.time())}:{uuid4().hex[:10]}"
         signature = self._build_integrity_signature(
             reference=reference,
             amount_in_cents=amount_in_cents,
@@ -108,6 +104,54 @@ class WompiPaymentProvider:
         )
         full_name = (customer_full_name or order.customer_name or "Cliente Kensar").strip()
         phone = (customer_phone or order.customer_phone or "").strip()
+
+        if method == "wompi":
+            checkout_url = self._build_hosted_checkout_url(
+                public_key=public_key,
+                currency=currency,
+                amount_in_cents=amount_in_cents,
+                reference=reference,
+                signature=signature,
+                redirect_url=self._build_redirect_url(order.id),
+            )
+            crud.record_web_order_payment(
+                db,
+                order,
+                schemas.WebOrderPaymentRecordRequest(
+                    method="wompi",
+                    amount=float(order.total or 0.0),
+                    provider="wompi",
+                    provider_reference=None,
+                    status="pending",
+                    note="Checkout Wompi hospedado creado",
+                    raw_payload={
+                        "reference": reference,
+                        "checkout_url": checkout_url,
+                    },
+                ),
+                actor_user_id=None,
+            )
+            refreshed = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id) or order
+            return schemas.WebWompiCheckoutCreateResponse(
+                order_id=order.id,
+                provider="wompi",
+                payment_method="wompi",
+                transaction_id=reference,
+                status=refreshed.payment_status,
+                reference=reference,
+                redirect_url=self._build_redirect_url(order.id),
+                checkout_url=checkout_url,
+                async_payment_url=None,
+                acceptance_token_permalink=None,
+                personal_data_auth_permalink=None,
+            )
+
+        private_key = self._get_required_env("WOMPI_PRIVATE_KEY")
+        acceptance = self._resolve_acceptance_tokens(
+            public_key=public_key,
+            acceptance_token=acceptance_token,
+            accept_personal_auth=accept_personal_auth,
+        )
 
         method_payload = self._build_payment_method_payload(
             method,
@@ -166,7 +210,14 @@ class WompiPaymentProvider:
                 provider_reference=transaction_id,
                 status=internal_status,
                 note=f"Checkout Wompi ({method}) - {provider_status or 'PENDING'}",
-                raw_payload=tx_data,
+                raw_payload={
+                    **tx_data,
+                    "_checkout_context": {
+                        "reference": reference,
+                        "acceptance_token_source": acceptance.get("acceptance_token_source"),
+                        "accept_personal_auth_source": acceptance.get("accept_personal_auth_source"),
+                    },
+                },
             ),
             actor_user_id=None,
         )
@@ -193,6 +244,9 @@ class WompiPaymentProvider:
 
         transaction_id = (target_payment.provider_reference or "").strip()
         if not transaction_id:
+            return order
+        if transaction_id.startswith("web-order:"):
+            # Hosted checkout reference; transaction id is unknown until webhook.
             return order
 
         private_key = self._get_required_env("WOMPI_PRIVATE_KEY")
@@ -275,6 +329,27 @@ class WompiPaymentProvider:
         if amount_value <= 0:
             amount_value = float(order.total or 0.0)
 
+        existing_payment = (
+            db.query(models.WebOrderPayment)
+            .filter(
+                models.WebOrderPayment.web_order_id == order.id,
+                models.WebOrderPayment.provider == "wompi",
+                models.WebOrderPayment.provider_reference == transaction_id,
+            )
+            .order_by(models.WebOrderPayment.id.desc())
+            .first()
+        )
+        if existing_payment is not None:
+            same_status = (existing_payment.status or "").strip().lower() == internal_status
+            same_amount = abs(float(existing_payment.amount or 0.0) - float(amount_value or 0.0)) <= 0.0001
+            if same_status and same_amount:
+                return {
+                    "ok": True,
+                    "order_id": order.id,
+                    "transaction_id": transaction_id,
+                    "duplicate": True,
+                }
+
         updated = crud.record_web_order_payment(
             db,
             order,
@@ -308,6 +383,8 @@ class WompiPaymentProvider:
                 "accept_personal_auth": apa,
                 "acceptance_permalink": None,
                 "personal_auth_permalink": None,
+                "acceptance_token_source": "request",
+                "accept_personal_auth_source": "request",
             }
 
         merchant = self._wompi_request("GET", f"/v1/merchants/{urllib_parse.quote(public_key)}")
@@ -330,6 +407,8 @@ class WompiPaymentProvider:
             "accept_personal_auth": apa,
             "acceptance_permalink": acceptance_permalink,
             "personal_auth_permalink": personal_auth_permalink,
+            "acceptance_token_source": "merchant",
+            "accept_personal_auth_source": "merchant",
         }
 
     def _build_payment_method_payload(
@@ -403,6 +482,27 @@ class WompiPaymentProvider:
     ) -> str:
         raw = f"{reference}{amount_in_cents}{currency}{integrity_secret}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _build_hosted_checkout_url(
+        self,
+        *,
+        public_key: str,
+        currency: str,
+        amount_in_cents: int,
+        reference: str,
+        signature: str,
+        redirect_url: Optional[str],
+    ) -> str:
+        query: list[tuple[str, str]] = [
+            ("public-key", public_key),
+            ("currency", currency),
+            ("amount-in-cents", str(amount_in_cents)),
+            ("reference", reference),
+            ("signature:integrity", signature),
+        ]
+        if redirect_url:
+            query.append(("redirect-url", redirect_url))
+        return f"https://checkout.wompi.co/p/?{urllib_parse.urlencode(query)}"
 
     def _to_amount_in_cents(self, amount: float | int | None) -> int:
         value = float(amount or 0.0)

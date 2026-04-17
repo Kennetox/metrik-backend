@@ -8418,6 +8418,19 @@ def record_web_order_payment(
                 )
             existing_payment = duplicate
 
+    # Idempotencia: si ya existe exactamente el mismo estado para la misma referencia
+    # del proveedor, evitamos reprocesar y generar cambios redundantes.
+    if existing_payment is not None:
+        existing_method = _clean_field(existing_payment.method)
+        same_method = (method or None) in {existing_method, None}
+        same_status = (existing_payment.status or "") == payment_status
+        same_amount = abs(float(existing_payment.amount or 0.0) - amount) <= 0.0001
+        if same_method and same_status and same_amount:
+            stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+            if not stored:
+                raise ValueError("No se pudo recuperar la orden actualizada")
+            return _serialize_web_order(stored)
+
     if payment_status == "approved":
         approved_total = (
             db.query(func.coalesce(func.sum(models.WebOrderPayment.amount), 0.0))
@@ -8507,7 +8520,31 @@ def record_web_order_payment(
     else:
         order.updated_at = datetime.utcnow()
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if provider and provider_reference:
+            duplicate_query = db.query(models.WebOrderPayment).filter(
+                models.WebOrderPayment.provider == provider,
+                models.WebOrderPayment.provider_reference == provider_reference,
+            )
+            if order.tenant_id is None:
+                duplicate_query = duplicate_query.filter(models.WebOrderPayment.tenant_id.is_(None))
+            else:
+                duplicate_query = duplicate_query.filter(models.WebOrderPayment.tenant_id == order.tenant_id)
+
+            duplicate = duplicate_query.first()
+            if duplicate:
+                if duplicate.web_order_id != order.id:
+                    raise ValueError(
+                        "La referencia del proveedor ya está asociada a otra orden web"
+                    ) from exc
+                stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+                if not stored:
+                    raise ValueError("No se pudo recuperar la orden actualizada") from exc
+                return _serialize_web_order(stored)
+        raise
     stored = get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
     if not stored:
         raise ValueError("No se pudo recuperar la orden actualizada")

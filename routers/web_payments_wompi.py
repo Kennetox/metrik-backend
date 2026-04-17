@@ -14,6 +14,7 @@ from database import get_db
 from routers import web_payments_mercadopago as mp_router
 from routers.web_customers import require_web_customer_auth
 from services.payments.registry import get_provider
+from services.payments.routing import resolve_provider_for_method
 
 
 router = APIRouter(
@@ -185,6 +186,12 @@ def create_wompi_checkout(
     db: Session = Depends(get_db),
     account: models.WebCustomerAccount = Depends(require_web_customer_auth),
 ):
+    resolved_provider = resolve_provider_for_method(payload.payment_method)
+    if resolved_provider != "wompi":
+        raise HTTPException(
+            status_code=409,
+            detail=f"El método {payload.payment_method} ya no está asignado a Wompi",
+        )
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")

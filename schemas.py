@@ -1960,6 +1960,22 @@ class MercadoPagoPayerInput(BaseModel):
     identification: Optional[MercadoPagoPayerIdentification] = None
 
 
+WebCheckoutPaymentMethod = Literal["card", "pse", "nequi", "wompi"]
+
+
+class WebCheckoutCreateRequest(BaseModel):
+    order_id: int
+    payment_method: WebCheckoutPaymentMethod
+    payer: Optional[MercadoPagoPayerInput] = None
+    payment_method_data: Dict[str, object] = Field(default_factory=dict)
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = None
+    customer_full_name: Optional[str] = None
+    acceptance_token: Optional[str] = None
+    accept_personal_auth: Optional[str] = None
+    checkout_context: Optional[Dict[str, object]] = None
+
+
 class WebMercadoPagoCheckoutCreateRequest(BaseModel):
     order_id: int
     payer: Optional[MercadoPagoPayerInput] = None
@@ -2016,7 +2032,7 @@ class WebMercadoPagoOrderPaymentStatusResponse(BaseModel):
     updated_at: datetime
 
 
-WebWompiPaymentMethod = Literal["pse", "nequi"]
+WebWompiPaymentMethod = Literal["pse", "nequi", "wompi"]
 
 
 class WebWompiCheckoutCreateRequest(BaseModel):
