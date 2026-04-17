@@ -8081,7 +8081,7 @@ def expire_stale_web_orders(
     query = (
         db.query(models.WebOrder)
         .filter(models.WebOrder.sale_id.is_(None))
-        .filter(models.WebOrder.status.in_(["pending_payment", "payment_failed"]))
+        .filter(models.WebOrder.status.in_(["pending_payment"]))
         .filter(models.WebOrder.payment_status.in_(["pending", "failed", "cancelled"]))
         .filter(func.coalesce(models.WebOrder.updated_at, models.WebOrder.created_at) <= cutoff)
     )
@@ -8098,8 +8098,8 @@ def expire_stale_web_orders(
             _transition_web_order_status(
                 db,
                 order,
-                to_status="cancelled",
-                note=f"Orden expirada por inactividad de pago (>{minutes} min).",
+                to_status="payment_failed",
+                note=f"Pago no confirmado en ventana esperada (>{minutes} min). Orden pendiente de reintento/sincronización.",
                 actor_type="system",
             )
             expired += 1

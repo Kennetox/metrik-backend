@@ -1,12 +1,14 @@
 import logging
 import os
 import asyncio
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.orm import joinedload
 from dotenv import load_dotenv
 from database import Base, engine, SessionLocal
 import models
@@ -14,6 +16,7 @@ import crud
 from db_migrations import run_schema_upgrades
 from services import storage
 from services import monthly_report_email
+from services.payments.sync import refresh_backoffice_order_payment_statuses
 from routers import (
     uploads as uploads_router,
     labels as labels_router,
@@ -99,6 +102,7 @@ if platform_owner_email and platform_owner_password:
 logger = logging.getLogger("kensar.validation")
 scheduler_logger = logging.getLogger("kensar.scheduler")
 _monthly_report_task: asyncio.Task | None = None
+_payment_reconciliation_task: asyncio.Task | None = None
 
 
 def _monthly_report_scheduler_enabled() -> bool:
@@ -123,27 +127,135 @@ async def _monthly_report_scheduler_loop():
         await asyncio.sleep(15 * 60)
 
 
+def _payment_reconciliation_enabled() -> bool:
+    raw = os.getenv("WEB_PAYMENT_RECONCILIATION_ENABLED", "true").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+def _payment_reconciliation_interval_seconds() -> int:
+    try:
+        value = int((os.getenv("WEB_PAYMENT_RECONCILIATION_INTERVAL_SECONDS") or "90").strip())
+    except Exception:
+        value = 90
+    return max(20, value)
+
+
+def _payment_reconciliation_batch_size() -> int:
+    try:
+        value = int((os.getenv("WEB_PAYMENT_RECONCILIATION_BATCH_SIZE") or "50").strip())
+    except Exception:
+        value = 50
+    return max(1, min(200, value))
+
+
+def _payment_reconciliation_lookback_hours() -> int:
+    try:
+        value = int((os.getenv("WEB_PAYMENT_RECONCILIATION_LOOKBACK_HOURS") or "48").strip())
+    except Exception:
+        value = 48
+    return max(1, min(24 * 14, value))
+
+
+def _run_payment_reconciliation_once() -> dict[str, int]:
+    from routers import web_payments_mercadopago as mp_router
+
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        cutoff = now - timedelta(hours=_payment_reconciliation_lookback_hours())
+        batch_size = _payment_reconciliation_batch_size()
+
+        candidates = (
+            db.query(models.WebOrder)
+            .options(
+                joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
+                joinedload(models.WebOrder.payments),
+                joinedload(models.WebOrder.status_logs),
+            )
+            .filter(models.WebOrder.sale_id.is_(None))
+            .filter(models.WebOrder.status.in_(["pending_payment", "payment_failed", "paid", "processing"]))
+            .filter(models.WebOrder.created_at >= cutoff)
+            .order_by(models.WebOrder.updated_at.desc(), models.WebOrder.id.desc())
+            .limit(batch_size)
+            .all()
+        )
+        if not candidates:
+            return {"checked": 0, "rescued": 0}
+
+        refreshed_orders = refresh_backoffice_order_payment_statuses(db, candidates)
+        rescued = 0
+        for order in refreshed_orders:
+            if not order:
+                continue
+            if order.payment_status == "approved" and order.sale_id is None:
+                try:
+                    mp_router._run_web_order_post_approval_flow(db, order)
+                    post = crud.get_backoffice_web_order(db, order.id, tenant_id=order.tenant_id)
+                    if post and post.sale_id is not None:
+                        rescued += 1
+                except Exception:
+                    scheduler_logger.exception(
+                        "Payment reconciliation post-approval failed | order_id=%s",
+                        getattr(order, "id", None),
+                    )
+        return {"checked": len(candidates), "rescued": rescued}
+    finally:
+        db.close()
+
+
+async def _payment_reconciliation_loop():
+    await asyncio.sleep(12)
+    while True:
+        try:
+            result = _run_payment_reconciliation_once()
+            if result.get("checked", 0) > 0:
+                scheduler_logger.info("Payment reconciliation: %s", result)
+        except Exception:
+            scheduler_logger.exception("Payment reconciliation scheduler failed")
+        await asyncio.sleep(_payment_reconciliation_interval_seconds())
+
+
 @app.on_event("startup")
 async def _start_monthly_report_scheduler():
-    global _monthly_report_task
+    global _monthly_report_task, _payment_reconciliation_task
     if not _monthly_report_scheduler_enabled():
-        return
-    if _monthly_report_task and not _monthly_report_task.done():
-        return
-    _monthly_report_task = asyncio.create_task(_monthly_report_scheduler_loop())
+        _monthly_report_task = None
+    else:
+        if not (_monthly_report_task and not _monthly_report_task.done()):
+            _monthly_report_task = asyncio.create_task(_monthly_report_scheduler_loop())
+
+    if not _payment_reconciliation_enabled():
+        _payment_reconciliation_task = None
+    else:
+        if not (_payment_reconciliation_task and not _payment_reconciliation_task.done()):
+            _payment_reconciliation_task = asyncio.create_task(_payment_reconciliation_loop())
 
 
 @app.on_event("shutdown")
 async def _stop_monthly_report_scheduler():
-    global _monthly_report_task
+    global _monthly_report_task, _payment_reconciliation_task
     if _monthly_report_task is None:
+        pass
+    else:
+        _monthly_report_task.cancel()
+        try:
+            await _monthly_report_task
+        except asyncio.CancelledError:
+            pass
+        _monthly_report_task = None
+
+    if _payment_reconciliation_task is None:
         return
-    _monthly_report_task.cancel()
+    _payment_reconciliation_task.cancel()
     try:
-        await _monthly_report_task
+        await _payment_reconciliation_task
     except asyncio.CancelledError:
         pass
-    _monthly_report_task = None
+    _payment_reconciliation_task = None
 
 app.include_router(uploads_router.router)
 app.include_router(labels_router.router)
