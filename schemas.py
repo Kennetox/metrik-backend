@@ -2059,6 +2059,7 @@ class WebWompiCheckoutCreateResponse(BaseModel):
     async_payment_url: Optional[str] = None
     acceptance_token_permalink: Optional[str] = None
     personal_data_auth_permalink: Optional[str] = None
+    order_access_token: Optional[str] = None
 
 
 class WebWompiPseFinancialInstitutionRead(BaseModel):

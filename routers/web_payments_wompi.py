@@ -112,7 +112,7 @@ def _build_status_response(order: models.WebOrder) -> schemas.WebWompiOrderPayme
             or None
         )
         method_raw = (last_payment.method or "").strip().lower()
-        if method_raw in {"pse", "nequi"}:
+        if method_raw in {"pse", "nequi", "wompi"}:
             payment_method = method_raw  # type: ignore[assignment]
 
     items = [
@@ -220,6 +220,36 @@ def create_wompi_checkout(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/guest-checkout", response_model=schemas.WebWompiCheckoutCreateResponse)
+def create_guest_wompi_checkout(
+    payload: schemas.WebGuestMercadoPagoCheckoutCreateRequest,
+    db: Session = Depends(get_db),
+):
+    resolved_provider = resolve_provider_for_method("wompi")
+    if resolved_provider != "wompi":
+        raise HTTPException(
+            status_code=409,
+            detail="El método wompi ya no está asignado a Wompi",
+        )
+
+    order = mp_router._create_guest_order(db, payload)
+    order_access_token = mp_router._build_guest_order_access_token(order)
+    provider = _get_wompi_provider()
+    try:
+        response = provider.create_checkout(
+            db,
+            order,
+            payment_method="wompi",
+            payment_method_data={},
+            customer_email=payload.customer_email,
+            customer_phone=payload.customer_phone,
+            customer_full_name=payload.customer_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return response.model_copy(update={"order_access_token": order_access_token})
+
+
 @router.get("/orders/{order_id}/status", response_model=schemas.WebWompiOrderPaymentStatusResponse)
 def get_wompi_order_status(
     order_id: int,
@@ -227,6 +257,26 @@ def get_wompi_order_status(
     account: models.WebCustomerAccount = Depends(require_web_customer_auth),
 ):
     order = crud.get_web_order(db, order_id, account.id, tenant_id=account.tenant_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Orden web no encontrada")
+
+    provider = _get_wompi_provider()
+    try:
+        order = provider.refresh_order_status(db, order)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _build_status_response(order)
+
+
+@router.get("/guest/orders/{order_id}/status", response_model=schemas.WebWompiOrderPaymentStatusResponse)
+def get_guest_wompi_order_status(
+    order_id: int,
+    access_token: str,
+    db: Session = Depends(get_db),
+):
+    mp_router._require_guest_order_access_token(order_id, access_token)
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    order = crud.get_backoffice_web_order(db, order_id, tenant_id=tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
 
