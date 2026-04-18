@@ -237,7 +237,9 @@ def resolve_web_compare_price(
 
 
 def _build_web_sale_price_sql_expression():
-    source_col = func.coalesce(models.Product.web_price_source, WEB_PRICE_SOURCE_DEFAULT)
+    source_col = func.lower(
+        func.trim(func.coalesce(models.Product.web_price_source, WEB_PRICE_SOURCE_DEFAULT))
+    )
     value_col = func.coalesce(models.Product.web_price_value, 0.0)
     base_col = func.coalesce(models.Product.price, 0.0)
     return case(
@@ -3778,9 +3780,14 @@ def get_web_catalog_products(
             filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
             if filter_keys:
                 query = query.filter(models.Product.web_category_key.in_(filter_keys))
-    normalized_brands = [item.strip() for item in (brands or []) if isinstance(item, str) and item.strip()]
+    normalized_brands = [
+        item.strip().lower() for item in (brands or []) if isinstance(item, str) and item.strip()
+    ]
     if normalized_brands:
-        query = query.filter(models.Product.brand.in_(normalized_brands))
+        query = query.filter(
+            models.Product.brand.isnot(None),
+            func.lower(func.trim(models.Product.brand)).in_(normalized_brands),
+        )
     if featured is not None:
         query = query.filter(models.Product.web_featured.is_(featured))
 
