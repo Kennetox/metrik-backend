@@ -2048,6 +2048,8 @@ def list_comercio_web_publications_page(
     status_filter: str = "all",
     featured_filter: str = "all",
     badge_filter: str = "all",
+    order: str = "newest",
+    active_only: bool = True,
     skip: int = 0,
     limit: int = 50,
 ):
@@ -2117,14 +2119,23 @@ def list_comercio_web_publications_page(
     elif badge_filter == "without_badge":
         query = query.filter(not_(has_badge_expr))
 
+    if active_only:
+        query = query.filter(models.Product.web_published.is_(True))
+
+    normalized_order = (order or "newest").strip().lower()
+    if normalized_order == "oldest":
+        order_by = [models.Product.id.asc()]
+    elif normalized_order == "alphabetical":
+        order_by = [
+            func.lower(func.coalesce(models.Product.web_name, models.Product.name, "")).asc(),
+            models.Product.id.asc(),
+        ]
+    else:
+        order_by = [models.Product.id.desc()]
+
     total = query.count()
     items = (
-        query.order_by(
-            models.Product.web_published.desc(),
-            models.Product.web_featured.desc(),
-            models.Product.updated_at.desc(),
-            models.Product.id.desc(),
-        )
+        query.order_by(*order_by)
         .offset(skip)
         .limit(limit)
         .all()

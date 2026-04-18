@@ -90,6 +90,8 @@ def list_comercio_web_publications(
     status_filter: str = Query(default="all"),
     featured_filter: str = Query(default="all"),
     badge_filter: str = Query(default="all"),
+    order: str = Query(default="newest"),
+    active_only: bool = Query(default=True),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
     _: models.PosUser = Depends(require_module_access("commerce_web")),
@@ -103,6 +105,8 @@ def list_comercio_web_publications(
         status_filter=status_filter,
         featured_filter=featured_filter,
         badge_filter=badge_filter,
+        order=order,
+        active_only=active_only,
         skip=skip,
         limit=limit,
     )
