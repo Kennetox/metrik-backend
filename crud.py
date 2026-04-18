@@ -2123,10 +2123,8 @@ def list_comercio_web_publications_page(
         query = query.filter(models.Product.web_published.is_(True))
 
     normalized_order = (order or "newest").strip().lower()
-    created_order_expr = func.coalesce(models.Product.created_at, models.Product.updated_at)
     if normalized_order == "oldest":
         order_by = [
-            created_order_expr.asc(),
             models.Product.id.asc(),
         ]
     elif normalized_order == "alphabetical":
@@ -2136,7 +2134,6 @@ def list_comercio_web_publications_page(
         ]
     else:
         order_by = [
-            created_order_expr.desc(),
             models.Product.id.desc(),
         ]
 
