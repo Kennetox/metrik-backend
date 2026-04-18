@@ -3479,7 +3479,10 @@ def _build_web_catalog_filters(
     db: Session,
     tenant_id: Optional[int],
     q: Optional[str] = None,
+    category: Optional[str] = None,
     featured: Optional[bool] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
 ):
     query = db.query(models.Product).filter(
         models.Product.active.is_(True),
@@ -3503,6 +3506,31 @@ def _build_web_catalog_filters(
         )
     if featured is not None:
         query = query.filter(models.Product.web_featured.is_(featured))
+    category_map = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=False,
+        ensure_seeded=True,
+    )
+    children_map = _build_web_catalog_category_children_map(list(category_map.values()))
+    if category:
+        normalized_category = _normalize_web_catalog_category_key(category)
+        if normalized_category:
+            filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
+            if filter_keys:
+                query = query.filter(models.Product.web_category_key.in_(filter_keys))
+
+    sale_price_col = _build_web_sale_price_sql_expression()
+    if min_price is not None:
+        query = query.filter(
+            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+            sale_price_col >= float(min_price),
+        )
+    if max_price is not None:
+        query = query.filter(
+            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+            sale_price_col <= float(max_price),
+        )
 
     category_rows = (
         query.with_entities(
@@ -3519,18 +3547,7 @@ def _build_web_catalog_filters(
         for path, count in category_rows
         if path
     }
-    category_defs = _get_tenant_web_catalog_categories(
-        db,
-        tenant_id=tenant_id,
-        include_inactive=False,
-        ensure_seeded=True,
-    )
-    category_map = {
-        _normalize_web_catalog_category_key(item.key): item
-        for item in category_defs
-        if _normalize_web_catalog_category_key(item.key)
-    }
-    children_map = _build_web_catalog_category_children_map(category_defs)
+    category_defs = list(category_map.values())
     categories = [
         schemas.WebCatalogFilterOption(
             value=item.key,
@@ -3570,7 +3587,14 @@ def _build_web_catalog_filters(
         for brand, count in brand_rows
         if brand
     ]
-    return schemas.WebCatalogFilters(categories=categories, brands=brands)
+    min_value = query.with_entities(func.min(sale_price_col)).scalar()
+    max_value = query.with_entities(func.max(sale_price_col)).scalar()
+    return schemas.WebCatalogFilters(
+        categories=categories,
+        brands=brands,
+        price_min=float(min_value) if min_value is not None else 0.0,
+        price_max=float(max_value) if max_value is not None else 0.0,
+    )
 
 
 def get_web_catalog_version(
@@ -3681,9 +3705,11 @@ def get_web_catalog_products(
     tenant_id: Optional[int] = None,
     q: Optional[str] = None,
     category: Optional[str] = None,
-    brand: Optional[str] = None,
+    brands: Optional[List[str]] = None,
     featured: Optional[bool] = None,
     sort: str = "recommended",
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
     page: int = 1,
     page_size: int = 24,
 ) -> schemas.WebCatalogProductList:
@@ -3748,13 +3774,24 @@ def get_web_catalog_products(
             filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
             if filter_keys:
                 query = query.filter(models.Product.web_category_key.in_(filter_keys))
-    if brand:
-        query = query.filter(models.Product.brand == brand)
+    normalized_brands = [item.strip() for item in (brands or []) if isinstance(item, str) and item.strip()]
+    if normalized_brands:
+        query = query.filter(models.Product.brand.in_(normalized_brands))
     if featured is not None:
         query = query.filter(models.Product.web_featured.is_(featured))
 
     qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
     web_sale_price_col = _build_web_sale_price_sql_expression()
+    if min_price is not None:
+        query = query.filter(
+            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+            web_sale_price_col >= float(min_price),
+        )
+    if max_price is not None:
+        query = query.filter(
+            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+            web_sale_price_col <= float(max_price),
+        )
     query = query.filter(
         or_(
             models.Product.web_visible_when_out_of_stock.is_(True),
@@ -3767,6 +3804,8 @@ def get_web_catalog_products(
         query = query.order_by(web_sale_price_col.asc(), models.Product.name.asc())
     elif sort == "price_desc":
         query = query.order_by(web_sale_price_col.desc(), models.Product.name.asc())
+    elif sort == "name_desc":
+        query = query.order_by(models.Product.name.desc())
     elif sort == "name_asc":
         query = query.order_by(models.Product.name.asc())
     else:
@@ -3816,7 +3855,10 @@ def get_web_catalog_products(
         db,
         tenant_id=effective_tenant_id,
         q=q,
+        category=category,
         featured=featured,
+        min_price=min_price,
+        max_price=max_price,
     )
     return schemas.WebCatalogProductList(
         items=items,

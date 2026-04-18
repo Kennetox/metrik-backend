@@ -394,6 +394,8 @@ class WebCatalogFilterOption(BaseModel):
 class WebCatalogFilters(BaseModel):
     categories: List[WebCatalogFilterOption]
     brands: List[WebCatalogFilterOption]
+    price_min: Optional[float] = None
+    price_max: Optional[float] = None
 
 
 class WebCatalogProductList(BaseModel):
