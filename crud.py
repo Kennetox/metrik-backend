@@ -2859,13 +2859,10 @@ def create_product(
             for item in category_rows
             if _normalize_web_catalog_category_key(item.key)
         }
-        children_map = _build_web_catalog_category_children_map(category_rows)
         if normalized_web_category_key not in category_map:
             raise ValueError("Categoría web inválida")
         if not bool(category_map[normalized_web_category_key].is_active):
             raise ValueError("La categoría web seleccionada está inactiva")
-        if product_in.web_published and not _is_leaf_web_catalog_category(normalized_web_category_key, children_map):
-            raise ValueError("Debes seleccionar una subcategoría específica para publicar")
     if product_in.web_published and not normalized_web_category_key:
         raise ValueError("Debes asignar una categoría web antes de publicar")
 
@@ -3036,14 +3033,11 @@ def update_product(
             for item in category_rows
             if _normalize_web_catalog_category_key(item.key)
         }
-        children_map = _build_web_catalog_category_children_map(category_rows)
         category_def = category_map.get(_normalize_web_catalog_category_key(next_web_category))
         if category_def is None:
             raise ValueError("Categoría web inválida")
         if not bool(category_def.is_active):
             raise ValueError("La categoría web seleccionada está inactiva")
-        if not _is_leaf_web_catalog_category(_normalize_web_catalog_category_key(next_web_category), children_map):
-            raise ValueError("Debes seleccionar una subcategoría específica para publicar")
     now = datetime.utcnow()
     if (
         next_web_published
