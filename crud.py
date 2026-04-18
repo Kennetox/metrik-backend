@@ -3521,6 +3521,12 @@ def _build_web_catalog_filters(
                 query = query.filter(models.Product.web_category_key.in_(filter_keys))
 
     sale_price_col = _build_web_sale_price_sql_expression()
+    price_bounds_query = query.filter(
+        func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible"
+    )
+    min_value = price_bounds_query.with_entities(func.min(sale_price_col)).scalar()
+    max_value = price_bounds_query.with_entities(func.max(sale_price_col)).scalar()
+
     if min_price is not None:
         query = query.filter(
             func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
@@ -3587,8 +3593,6 @@ def _build_web_catalog_filters(
         for brand, count in brand_rows
         if brand
     ]
-    min_value = query.with_entities(func.min(sale_price_col)).scalar()
-    max_value = query.with_entities(func.max(sale_price_col)).scalar()
     return schemas.WebCatalogFilters(
         categories=categories,
         brands=brands,
