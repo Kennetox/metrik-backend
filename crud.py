@@ -278,6 +278,7 @@ def _seed_default_web_catalog_categories(
             models.WebCatalogCategory(
                 tenant_id=tenant_id,
                 key=item["key"],
+                parent_key=None,
                 name=item["name"],
                 sort_order=int(item["sort_order"]),
                 is_active=True,
@@ -318,6 +319,7 @@ def _seed_default_web_catalog_categories(
             models.WebCatalogCategory(
                 tenant_id=tenant_id,
                 key=normalized_key,
+                parent_key=None,
                 name=_humanize_web_catalog_category_key(normalized_key),
                 sort_order=next_order_base + index,
                 is_active=True,
@@ -345,6 +347,8 @@ def _get_tenant_web_catalog_categories(
         query = query.filter(models.WebCatalogCategory.is_active.is_(True))
     return (
         query.order_by(
+            case((models.WebCatalogCategory.parent_key.is_(None), 0), else_=1).asc(),
+            models.WebCatalogCategory.parent_key.asc(),
             models.WebCatalogCategory.sort_order.asc(),
             models.WebCatalogCategory.name.asc(),
             models.WebCatalogCategory.id.asc(),
@@ -372,6 +376,63 @@ def _get_tenant_web_catalog_category_map(
         if normalized:
             mapping[normalized] = item
     return mapping
+
+
+def _build_web_catalog_category_children_map(
+    rows: Sequence[models.WebCatalogCategory],
+) -> dict[Optional[str], list[str]]:
+    children: dict[Optional[str], list[str]] = defaultdict(list)
+    for item in rows:
+        key = _normalize_web_catalog_category_key(item.key)
+        if not key:
+            continue
+        parent_key = _normalize_web_catalog_category_key(item.parent_key)
+        parent_ref = parent_key or None
+        children[parent_ref].append(key)
+    return children
+
+
+def _get_web_catalog_category_level(
+    key: str,
+    category_map: dict[str, models.WebCatalogCategory],
+) -> int:
+    level = 1
+    current_key = key
+    visited: set[str] = set()
+    while True:
+        row = category_map.get(current_key)
+        if row is None:
+            return level
+        parent_key = _normalize_web_catalog_category_key(row.parent_key)
+        if not parent_key:
+            return level
+        if parent_key in visited:
+            return level
+        visited.add(parent_key)
+        level += 1
+        current_key = parent_key
+
+
+def _get_web_catalog_descendant_keys(
+    root_key: str,
+    children_map: dict[Optional[str], list[str]],
+) -> set[str]:
+    descendants: set[str] = set()
+    queue: list[str] = [root_key]
+    while queue:
+        current = queue.pop(0)
+        if current in descendants:
+            continue
+        descendants.add(current)
+        queue.extend(children_map.get(current, []))
+    return descendants
+
+
+def _is_leaf_web_catalog_category(
+    key: str,
+    children_map: dict[Optional[str], list[str]],
+) -> bool:
+    return len(children_map.get(key, [])) == 0
 
 
 def resolve_web_catalog_category_label(
@@ -2211,6 +2272,12 @@ def list_comercio_web_catalog_categories(
         include_inactive=include_inactive,
         ensure_seeded=True,
     )
+    category_map = {
+        _normalize_web_catalog_category_key(item.key): item
+        for item in rows
+        if _normalize_web_catalog_category_key(item.key)
+    }
+    children_map = _build_web_catalog_category_children_map(rows)
     count_rows = (
         db.query(
             models.Product.web_category_key,
@@ -2229,23 +2296,34 @@ def list_comercio_web_catalog_categories(
         for path, total in count_rows
         if path
     }
-    return [
-        schemas.ComercioWebCatalogCategoryRead(
-            id=item.id,
-            key=item.key,
-            name=item.name,
-            image_url=item.image_url,
-            tile_color=item.tile_color,
-            home_featured=bool(item.home_featured),
-            home_featured_order=int(item.home_featured_order or 0),
-            sort_order=int(item.sort_order or 0),
-            is_active=bool(item.is_active),
-            product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
-            created_at=item.created_at,
-            updated_at=item.updated_at,
+    serialized: list[schemas.ComercioWebCatalogCategoryRead] = []
+    for item in rows:
+        key = _normalize_web_catalog_category_key(item.key)
+        parent_key = _normalize_web_catalog_category_key(item.parent_key) or None
+        descendant_keys = _get_web_catalog_descendant_keys(key, children_map) if key else set()
+        product_count = sum(counts.get(descendant_key, 0) for descendant_key in descendant_keys)
+        parent_name = category_map[parent_key].name if parent_key and parent_key in category_map else None
+        serialized.append(
+            schemas.ComercioWebCatalogCategoryRead(
+                id=item.id,
+                key=item.key,
+                parent_key=parent_key,
+                name=item.name,
+                image_url=item.image_url,
+                tile_color=item.tile_color,
+                home_featured=bool(item.home_featured),
+                home_featured_order=int(item.home_featured_order or 0),
+                sort_order=int(item.sort_order or 0),
+                is_active=bool(item.is_active),
+                level=_get_web_catalog_category_level(key, category_map) if key else 1,
+                has_children=not _is_leaf_web_catalog_category(key, children_map) if key else False,
+                parent_name=parent_name,
+                product_count=product_count,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
         )
-        for item in rows
-    ]
+    return serialized
 
 
 def create_comercio_web_catalog_category(
@@ -2257,6 +2335,21 @@ def create_comercio_web_catalog_category(
     key = _normalize_web_catalog_category_key(payload.key)
     if not key:
         raise ValueError("Clave de categoría inválida")
+    parent_key = _normalize_web_catalog_category_key(payload.parent_key) or None
+    if parent_key and parent_key == key:
+        raise ValueError("La categoría no puede ser su propio padre")
+    parent_row = None
+    if parent_key:
+        parent_row = (
+            db.query(models.WebCatalogCategory)
+            .filter(
+                models.WebCatalogCategory.tenant_id == tenant_id,
+                models.WebCatalogCategory.key == parent_key,
+            )
+            .first()
+        )
+        if not parent_row:
+            raise ValueError("La categoría padre no existe")
     existing = (
         db.query(models.WebCatalogCategory)
         .filter(
@@ -2271,6 +2364,7 @@ def create_comercio_web_catalog_category(
     row = models.WebCatalogCategory(
         tenant_id=tenant_id,
         key=key,
+        parent_key=parent_key,
         name=payload.name.strip(),
         image_url=(payload.image_url or None),
         tile_color=(payload.tile_color or None),
@@ -2284,9 +2378,23 @@ def create_comercio_web_catalog_category(
     db.add(row)
     db.commit()
     db.refresh(row)
+    category_rows = (
+        db.query(models.WebCatalogCategory)
+        .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+        .all()
+    )
+    category_map = {
+        _normalize_web_catalog_category_key(item.key): item
+        for item in category_rows
+        if _normalize_web_catalog_category_key(item.key)
+    }
+    children_map = _build_web_catalog_category_children_map(category_rows)
+    normalized_key = _normalize_web_catalog_category_key(row.key)
+    normalized_parent_key = _normalize_web_catalog_category_key(row.parent_key) or None
     return schemas.ComercioWebCatalogCategoryRead(
         id=row.id,
         key=row.key,
+        parent_key=row.parent_key,
         name=row.name,
         image_url=row.image_url,
         tile_color=row.tile_color,
@@ -2294,6 +2402,9 @@ def create_comercio_web_catalog_category(
         home_featured_order=int(row.home_featured_order or 0),
         sort_order=int(row.sort_order or 0),
         is_active=bool(row.is_active),
+        level=_get_web_catalog_category_level(normalized_key, category_map) if normalized_key else 1,
+        has_children=not _is_leaf_web_catalog_category(normalized_key, children_map) if normalized_key else False,
+        parent_name=parent_row.name if parent_row else None,
         product_count=0,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -2319,6 +2430,8 @@ def update_comercio_web_catalog_category(
         raise ValueError("Categoría no encontrada")
     data = payload.model_dump(exclude_unset=True)
     old_key = _normalize_web_catalog_category_key(row.key)
+    current_parent_key = _normalize_web_catalog_category_key(row.parent_key) or None
+    next_key = old_key
     if "key" in data:
         next_key = _normalize_web_catalog_category_key(data.get("key"))
         if not next_key:
@@ -2335,6 +2448,45 @@ def update_comercio_web_catalog_category(
         if duplicate:
             raise ValueError("Ya existe una categoría con esa clave")
         row.key = next_key
+    next_parent_key = current_parent_key
+    if "parent_key" in data:
+        next_parent_key = _normalize_web_catalog_category_key(data.get("parent_key")) or None
+        if next_parent_key and next_parent_key == next_key:
+            raise ValueError("La categoría no puede ser su propio padre")
+        if next_parent_key:
+            parent_row = (
+                db.query(models.WebCatalogCategory)
+                .filter(
+                    models.WebCatalogCategory.tenant_id == tenant_id,
+                    models.WebCatalogCategory.key == next_parent_key,
+                    models.WebCatalogCategory.id != row.id,
+                )
+                .first()
+            )
+            if not parent_row:
+                raise ValueError("La categoría padre no existe")
+            # Prevent circular parent chains.
+            category_rows = (
+                db.query(models.WebCatalogCategory)
+                .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+                .all()
+            )
+            parent_map = {
+                _normalize_web_catalog_category_key(item.key): _normalize_web_catalog_category_key(item.parent_key) or None
+                for item in category_rows
+                if _normalize_web_catalog_category_key(item.key)
+            }
+            parent_map[next_key] = next_parent_key
+            visited: set[str] = set()
+            cursor = next_parent_key
+            while cursor:
+                if cursor in visited:
+                    break
+                if cursor == next_key:
+                    raise ValueError("No se puede asignar una categoría hija como padre")
+                visited.add(cursor)
+                cursor = parent_map.get(cursor)
+        row.parent_key = next_parent_key
     if "name" in data:
         row.name = (data.get("name") or "").strip()
     if "image_url" in data:
@@ -2363,8 +2515,27 @@ def update_comercio_web_catalog_category(
             )
             .update({models.Product.web_category_key: next_key}, synchronize_session=False)
         )
+        (
+            db.query(models.WebCatalogCategory)
+            .filter(
+                models.WebCatalogCategory.tenant_id == tenant_id if tenant_id is not None else true(),
+                models.WebCatalogCategory.parent_key == old_key,
+            )
+            .update({models.WebCatalogCategory.parent_key: next_key}, synchronize_session=False)
+        )
     db.commit()
     db.refresh(row)
+    category_rows = (
+        db.query(models.WebCatalogCategory)
+        .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+        .all()
+    )
+    category_map = {
+        _normalize_web_catalog_category_key(item.key): item
+        for item in category_rows
+        if _normalize_web_catalog_category_key(item.key)
+    }
+    children_map = _build_web_catalog_category_children_map(category_rows)
     assigned_count = (
         db.query(func.count(models.Product.id))
         .filter(
@@ -2373,9 +2544,17 @@ def update_comercio_web_catalog_category(
         )
         .scalar()
     )
+    normalized_key = _normalize_web_catalog_category_key(row.key)
+    normalized_parent_key = _normalize_web_catalog_category_key(row.parent_key) or None
+    parent_name = (
+        category_map[normalized_parent_key].name
+        if normalized_parent_key and normalized_parent_key in category_map
+        else None
+    )
     return schemas.ComercioWebCatalogCategoryRead(
         id=row.id,
         key=row.key,
+        parent_key=row.parent_key,
         name=row.name,
         image_url=row.image_url,
         tile_color=row.tile_color,
@@ -2383,6 +2562,9 @@ def update_comercio_web_catalog_category(
         home_featured_order=int(row.home_featured_order or 0),
         sort_order=int(row.sort_order or 0),
         is_active=bool(row.is_active),
+        level=_get_web_catalog_category_level(normalized_key, category_map) if normalized_key else 1,
+        has_children=not _is_leaf_web_catalog_category(normalized_key, children_map) if normalized_key else False,
+        parent_name=parent_name,
         product_count=int(assigned_count or 0),
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -2405,6 +2587,16 @@ def delete_comercio_web_catalog_category(
     )
     if not row:
         raise ValueError("Categoría no encontrada")
+    child_count = (
+        db.query(func.count(models.WebCatalogCategory.id))
+        .filter(
+            models.WebCatalogCategory.tenant_id == tenant_id if tenant_id is not None else true(),
+            models.WebCatalogCategory.parent_key == row.key,
+        )
+        .scalar()
+    )
+    if int(child_count or 0) > 0:
+        raise ValueError("No puedes eliminar una categoría que tiene subcategorías")
     assigned_count = (
         db.query(func.count(models.Product.id))
         .filter(
@@ -2656,16 +2848,24 @@ def create_product(
     )
     normalized_web_category_key = _normalize_web_catalog_category_key(product_in.web_category_key)
     if normalized_web_category_key:
-        category_map = _get_tenant_web_catalog_category_map(
+        category_rows = _get_tenant_web_catalog_categories(
             db,
             tenant_id=effective_tenant_id,
             include_inactive=True,
             ensure_seeded=True,
         )
+        category_map = {
+            _normalize_web_catalog_category_key(item.key): item
+            for item in category_rows
+            if _normalize_web_catalog_category_key(item.key)
+        }
+        children_map = _build_web_catalog_category_children_map(category_rows)
         if normalized_web_category_key not in category_map:
             raise ValueError("Categoría web inválida")
         if not bool(category_map[normalized_web_category_key].is_active):
             raise ValueError("La categoría web seleccionada está inactiva")
+        if product_in.web_published and not _is_leaf_web_catalog_category(normalized_web_category_key, children_map):
+            raise ValueError("Debes seleccionar una subcategoría específica para publicar")
     if product_in.web_published and not normalized_web_category_key:
         raise ValueError("Debes asignar una categoría web antes de publicar")
 
@@ -2756,12 +2956,17 @@ def update_product(
         next_category = _normalize_web_catalog_category_key(data.get("web_category_key"))
         data["web_category_key"] = next_category or None
         if next_category:
-            category_map = _get_tenant_web_catalog_category_map(
+            category_rows = _get_tenant_web_catalog_categories(
                 db,
                 tenant_id=db_product.tenant_id,
                 include_inactive=True,
                 ensure_seeded=True,
             )
+            category_map = {
+                _normalize_web_catalog_category_key(item.key): item
+                for item in category_rows
+                if _normalize_web_catalog_category_key(item.key)
+            }
             if next_category not in category_map:
                 raise ValueError("Categoría web inválida")
             if not bool(category_map[next_category].is_active):
@@ -2820,17 +3025,25 @@ def update_product(
     if next_web_published and not next_web_category:
         raise ValueError("Debes asignar una categoría web antes de publicar")
     if next_web_published and next_web_category:
-        category_map = _get_tenant_web_catalog_category_map(
+        category_rows = _get_tenant_web_catalog_categories(
             db,
             tenant_id=db_product.tenant_id,
             include_inactive=True,
             ensure_seeded=True,
         )
+        category_map = {
+            _normalize_web_catalog_category_key(item.key): item
+            for item in category_rows
+            if _normalize_web_catalog_category_key(item.key)
+        }
+        children_map = _build_web_catalog_category_children_map(category_rows)
         category_def = category_map.get(_normalize_web_catalog_category_key(next_web_category))
         if category_def is None:
             raise ValueError("Categoría web inválida")
         if not bool(category_def.is_active):
             raise ValueError("La categoría web seleccionada está inactiva")
+        if not _is_leaf_web_catalog_category(_normalize_web_catalog_category_key(next_web_category), children_map):
+            raise ValueError("Debes seleccionar una subcategoría específica para publicar")
     now = datetime.utcnow()
     if (
         next_web_published
@@ -3307,7 +3520,7 @@ def _build_web_catalog_filters(
         .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
         .all()
     )
-    category_counts = {
+    direct_category_counts = {
         _normalize_web_catalog_category_key(path): int(count or 0)
         for path, count in category_rows
         if path
@@ -3318,11 +3531,28 @@ def _build_web_catalog_filters(
         include_inactive=False,
         ensure_seeded=True,
     )
+    category_map = {
+        _normalize_web_catalog_category_key(item.key): item
+        for item in category_defs
+        if _normalize_web_catalog_category_key(item.key)
+    }
+    children_map = _build_web_catalog_category_children_map(category_defs)
     categories = [
         schemas.WebCatalogFilterOption(
             value=item.key,
             label=item.name,
-            count=category_counts.get(_normalize_web_catalog_category_key(item.key), 0),
+            count=sum(
+                direct_category_counts.get(descendant_key, 0)
+                for descendant_key in _get_web_catalog_descendant_keys(
+                    _normalize_web_catalog_category_key(item.key),
+                    children_map,
+                )
+            ),
+            level=_get_web_catalog_category_level(
+                _normalize_web_catalog_category_key(item.key),
+                category_map,
+            ),
+            parent_value=_normalize_web_catalog_category_key(item.parent_key) or None,
         )
         for item in category_defs
     ]
@@ -3406,7 +3636,7 @@ def get_web_catalog_categories(
         .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
         .all()
     )
-    counts = {
+    direct_counts = {
         _normalize_web_catalog_category_key(row.web_category_key): int(row.product_count or 0)
         for row in rows
         if row.web_category_key
@@ -3417,18 +3647,37 @@ def get_web_catalog_categories(
         include_inactive=False,
         ensure_seeded=True,
     )
+    category_map = {
+        _normalize_web_catalog_category_key(item.key): item
+        for item in categories
+        if _normalize_web_catalog_category_key(item.key)
+    }
+    children_map = _build_web_catalog_category_children_map(categories)
     return [
         schemas.WebCatalogCategory(
             id=item.key,
             path=item.key,
+            parent_path=_normalize_web_catalog_category_key(item.parent_key) or None,
+            level=_get_web_catalog_category_level(_normalize_web_catalog_category_key(item.key), category_map),
+            has_children=not _is_leaf_web_catalog_category(
+                _normalize_web_catalog_category_key(item.key),
+                children_map,
+            ),
             name=item.name,
             image_url=item.image_url,
             tile_color=item.tile_color,
             home_featured=bool(item.home_featured),
             home_featured_order=int(item.home_featured_order or 0),
-            product_count=counts.get(_normalize_web_catalog_category_key(item.key), 0),
+            product_count=sum(
+                direct_counts.get(descendant_key, 0)
+                for descendant_key in _get_web_catalog_descendant_keys(
+                    _normalize_web_catalog_category_key(item.key),
+                    children_map,
+                )
+            ),
         )
         for item in categories
+        if not _normalize_web_catalog_category_key(item.parent_key)
     ]
 
 
@@ -3451,6 +3700,7 @@ def get_web_catalog_products(
         include_inactive=True,
         ensure_seeded=True,
     )
+    children_map = _build_web_catalog_category_children_map(list(category_map.values()))
     inactive_category_keys = {
         _normalize_web_catalog_category_key(item.key)
         for item in category_map.values()
@@ -3499,7 +3749,11 @@ def get_web_catalog_products(
             )
         )
     if category:
-        query = query.filter(models.Product.web_category_key == _normalize_web_catalog_category_key(category))
+        normalized_category = _normalize_web_catalog_category_key(category)
+        if normalized_category:
+            filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
+            if filter_keys:
+                query = query.filter(models.Product.web_category_key.in_(filter_keys))
     if brand:
         query = query.filter(models.Product.brand == brand)
     if featured is not None:

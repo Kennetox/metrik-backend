@@ -181,6 +181,7 @@ class ProductGroupRead(ProductGroupBase):
 
 class ProductRead(ProductBase):
     id: int
+    web_published_at: Optional[datetime] = None
     group_meta: Optional[ProductGroupRead] = None
 
     @field_validator("web_gallery_urls", mode="before")
@@ -271,6 +272,7 @@ class ComercioWebDiscountCodePage(BaseModel):
 class ComercioWebCatalogCategoryBase(BaseModel):
     key: SlugStr
     name: NonEmptyStr
+    parent_key: Optional[SlugStr] = None
     image_url: Optional[str] = None
     tile_color: Optional[str] = Field(
         default=None,
@@ -290,6 +292,7 @@ class ComercioWebCatalogCategoryCreate(ComercioWebCatalogCategoryBase):
 class ComercioWebCatalogCategoryUpdate(BaseModel):
     key: Optional[SlugStr] = None
     name: Optional[NonEmptyStr] = None
+    parent_key: Optional[SlugStr] = None
     image_url: Optional[str] = None
     tile_color: Optional[str] = Field(
         default=None,
@@ -304,6 +307,9 @@ class ComercioWebCatalogCategoryUpdate(BaseModel):
 
 class ComercioWebCatalogCategoryRead(ComercioWebCatalogCategoryBase):
     id: int
+    level: int = 1
+    has_children: bool = False
+    parent_name: Optional[str] = None
     product_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -342,6 +348,9 @@ class WebCatalogCategory(BaseModel):
     id: str
     path: str
     name: str
+    parent_path: Optional[str] = None
+    level: int = 1
+    has_children: bool = False
     image_url: Optional[str] = None
     tile_color: Optional[str] = None
     home_featured: bool = False
@@ -378,6 +387,8 @@ class WebCatalogFilterOption(BaseModel):
     value: str
     label: str
     count: int
+    level: int = 1
+    parent_value: Optional[str] = None
 
 
 class WebCatalogFilters(BaseModel):

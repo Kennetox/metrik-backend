@@ -998,6 +998,7 @@ class WebCatalogCategory(Base):
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     key = Column(String(64), nullable=False, index=True)
+    parent_key = Column(String(64), nullable=True, index=True)
     name = Column(String(120), nullable=False)
     image_url = Column(String(512), nullable=True)
     tile_color = Column(String(7), nullable=True)

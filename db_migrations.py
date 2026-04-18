@@ -93,6 +93,7 @@ def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
     if backend == "postgresql":
         if not _table_exists_postgres(connection, table):
             return
+        _ensure_column_postgres(connection, table, "parent_key", "VARCHAR(64)")
         _ensure_column_postgres(
             connection,
             table,
@@ -109,6 +110,7 @@ def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
 
     if not _table_exists(connection, table):
         return
+    _ensure_column(connection, table, "parent_key", "TEXT")
     _ensure_column(connection, table, "home_featured", "BOOLEAN NOT NULL DEFAULT 0")
     _ensure_column(connection, table, "home_featured_order", "INTEGER NOT NULL DEFAULT 0")
 
