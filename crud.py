@@ -2124,14 +2124,20 @@ def list_comercio_web_publications_page(
 
     normalized_order = (order or "newest").strip().lower()
     if normalized_order == "oldest":
-        order_by = [models.Product.id.asc()]
+        order_by = [
+            models.Product.updated_at.asc(),
+            models.Product.id.asc(),
+        ]
     elif normalized_order == "alphabetical":
         order_by = [
             func.lower(func.coalesce(models.Product.web_name, models.Product.name, "")).asc(),
             models.Product.id.asc(),
         ]
     else:
-        order_by = [models.Product.id.desc()]
+        order_by = [
+            models.Product.updated_at.desc(),
+            models.Product.id.desc(),
+        ]
 
     total = query.count()
     items = (
