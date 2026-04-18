@@ -2123,8 +2123,14 @@ def list_comercio_web_publications_page(
         query = query.filter(models.Product.web_published.is_(True))
 
     normalized_order = (order or "newest").strip().lower()
+    publication_created_null_order = case(
+        (models.Product.web_published_at.is_(None), 1),
+        else_=0,
+    )
     if normalized_order == "oldest":
         order_by = [
+            publication_created_null_order.asc(),
+            models.Product.web_published_at.asc(),
             models.Product.id.asc(),
         ]
     elif normalized_order == "alphabetical":
@@ -2134,6 +2140,8 @@ def list_comercio_web_publications_page(
         ]
     else:
         order_by = [
+            publication_created_null_order.asc(),
+            models.Product.web_published_at.desc(),
             models.Product.id.desc(),
         ]
 
@@ -2697,6 +2705,7 @@ def create_product(
             product_in.sku,
         ),
         web_published=product_in.web_published,
+        web_published_at=(datetime.utcnow() if product_in.web_published else None),
         web_featured=product_in.web_featured,
         web_short_description=product_in.web_short_description,
         web_long_description=product_in.web_long_description,
@@ -2823,6 +2832,12 @@ def update_product(
         if not bool(category_def.is_active):
             raise ValueError("La categoría web seleccionada está inactiva")
     now = datetime.utcnow()
+    if (
+        next_web_published
+        and not bool(db_product.web_published)
+        and db_product.web_published_at is None
+    ):
+        data["web_published_at"] = now
     if "is_investment" in data:
         next_is_investment = bool(data.get("is_investment"))
         if next_is_investment:

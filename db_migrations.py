@@ -609,6 +609,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(
                     connection,
                     "products",
+                    "web_published_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
                     "web_featured",
                     "BOOLEAN DEFAULT FALSE",
                 )
@@ -696,6 +702,16 @@ def run_schema_upgrades(engine: Engine) -> None:
                         UPDATE products
                         SET web_published = FALSE
                         WHERE web_published IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE products
+                        SET web_published_at = updated_at
+                        WHERE web_published = TRUE
+                          AND web_published_at IS NULL
                         """
                     )
                 )
@@ -1466,6 +1482,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_column(connection, "products", "web_slug", "TEXT")
                     _ensure_column(connection, "products", "web_name", "TEXT")
                     _ensure_column(connection, "products", "web_published", "BOOLEAN DEFAULT 0")
+                    _ensure_column(connection, "products", "web_published_at", "TIMESTAMP")
                     _ensure_column(connection, "products", "web_featured", "BOOLEAN DEFAULT 0")
                     _ensure_column(connection, "products", "web_short_description", "TEXT")
                     _ensure_column(connection, "products", "web_long_description", "TEXT")
@@ -1491,6 +1508,16 @@ def run_schema_upgrades(engine: Engine) -> None:
                             UPDATE products
                             SET web_published = 0
                             WHERE web_published IS NULL
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE products
+                            SET web_published_at = updated_at
+                            WHERE web_published = 1
+                              AND web_published_at IS NULL
                             """
                         )
                     )

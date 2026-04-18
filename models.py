@@ -123,6 +123,7 @@ class Product(Base):
     web_name = Column(String(255), nullable=True)
     web_slug = Column(String(160), nullable=True, index=True)
     web_published = Column(Boolean, nullable=False, default=False)
+    web_published_at = Column(DateTime, nullable=True)
     web_featured = Column(Boolean, nullable=False, default=False)
     web_short_description = Column(String(280), nullable=True)
     web_long_description = Column(Text, nullable=True)
