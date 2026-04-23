@@ -597,6 +597,69 @@ def _collect_internal_notification_recipients(settings: models.PosSettings) -> l
     return deduped
 
 
+def _extract_personalization_preview_images_from_order(
+    order: models.WebOrder,
+) -> dict[str, str]:
+    _note_text, checkout_context = _split_order_notes_checkout_context(order.notes)
+    if not isinstance(checkout_context, dict):
+        return {}
+    personalization = checkout_context.get("personalization")
+    if not isinstance(personalization, dict):
+        return {}
+    image_map = personalization.get("preview_images")
+    if not isinstance(image_map, dict):
+        return {}
+
+    sanitized: dict[str, str] = {}
+    for key in ("front", "left", "right"):
+        value = image_map.get(key)
+        if not isinstance(value, str):
+            continue
+        raw = value.strip()
+        if not raw.startswith("data:image/"):
+            continue
+        # Evita inyectar blobs gigantes en el correo.
+        if len(raw) > 500_000:
+            continue
+        sanitized[key] = raw
+    return sanitized
+
+
+def _build_personalization_preview_images_html(order: models.WebOrder) -> str:
+    previews = _extract_personalization_preview_images_from_order(order)
+    if not previews:
+        return ""
+
+    labels = {
+        "front": "Frente",
+        "left": "Lateral izquierda",
+        "right": "Lateral derecha",
+    }
+    cards: list[str] = []
+    for key in ("front", "left", "right"):
+        src = previews.get(key)
+        if not src:
+            continue
+        cards.append(
+            "<td style='vertical-align:top; width:33.33%; padding:0 6px 8px 0;'>"
+            f"<div style='font-size:12px; font-weight:700; color:#334155; margin:0 0 6px 0;'>{escape(labels[key])}</div>"
+            f"<img src='{escape(src)}' alt='Vista {escape(labels[key])}' "
+            "style='display:block; width:100%; max-width:240px; border:1px solid #cbd5e1; border-radius:8px;'/>"
+            "</td>"
+        )
+    if not cards:
+        return ""
+
+    return (
+        "<div style='margin:14px 0 10px 0;'>"
+        "<p style='margin:0 0 8px 0; font-weight:700;'>Referencia visual de personalización</p>"
+        "<table role='presentation' style='width:100%; border-collapse:collapse;'><tr>"
+        + "".join(cards)
+        + "</tr></table>"
+        "</div>"
+    )
+
+
 def _build_web_order_approved_customer_html(
     order: models.WebOrder,
     *,
@@ -623,6 +686,7 @@ def _build_web_order_approved_customer_html(
         )
 
     logo_footer = _build_email_logo_footer(settings)
+    personalization_previews_html = _build_personalization_preview_images_html(order)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         f"<p>Hola {escape(customer_name)},</p>"
@@ -644,6 +708,7 @@ def _build_web_order_approved_customer_html(
           "<th style='padding:6px 8px; border:1px solid #e5e7eb; text-align:right;'>Total</th>"
           "</tr></thead>"
         + f"<tbody>{''.join(lines)}</tbody></table>"
+        + personalization_previews_html
         + "<p>Gracias por comprar con Kensar Electronic.</p>"
         + logo_footer
         + "</div>"
@@ -679,6 +744,7 @@ def _build_web_order_approved_internal_html(
         else f"Pendiente de conversión: {escape(conversion_error or 'sin detalle')}"
     )
     logo_footer = _build_email_logo_footer(settings)
+    personalization_previews_html = _build_personalization_preview_images_html(order)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         "<p>Se registró un pago aprobado en Comercio Web.</p>"
@@ -693,6 +759,7 @@ def _build_web_order_approved_internal_html(
         f"<strong>Conversión:</strong> {conversion_state}</p>"
         "<p><strong>Ítems</strong></p>"
         f"<ul>{''.join(items_html)}</ul>"
+        + personalization_previews_html
         + logo_footer
         + "</div>"
     )

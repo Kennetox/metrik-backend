@@ -7,6 +7,8 @@ from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
 import io
 import csv
+import re
+import unicodedata
 import pandas as pd
 from pydantic import BaseModel
 
@@ -45,6 +47,65 @@ def _parse_price(value: Optional[str]) -> Optional[float]:
         return float(normalized)
     except ValueError:
         return None
+
+
+def _normalize_header(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _row_to_normalized_map(row: Any) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in row.items():
+        normalized[_normalize_header(key)] = value
+    return normalized
+
+
+def _coalesce_row_value(row_map: Dict[str, Any], *aliases: str) -> Any:
+    for alias in aliases:
+        normalized_alias = _normalize_header(alias)
+        if normalized_alias in row_map:
+            return row_map[normalized_alias]
+    return None
+
+
+def _parse_floatish(value: Any, default: float = 0.0) -> float:
+    if value is None or pd.isna(value):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return default
+    text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def _parse_intish(value: Any, default: int = 0) -> int:
+    return int(round(_parse_floatish(value, float(default))))
+
+
+def _parse_boolish(value: Any, default: bool = False) -> bool:
+    if value is None or pd.isna(value):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    if text in {"1", "true", "t", "si", "yes", "y", "x"}:
+        return True
+    if text in {"0", "false", "f", "no", "n"}:
+        return False
+    return bool(text)
 
 
 def _filter_products(products: List[models.Product], payload: ExportProductsRequest):
@@ -586,87 +647,105 @@ async def import_products_xlsx(
 
     created = 0
     updated = 0
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
 
     for _, row in df.iterrows():
-        sku_val = row.get("sku")
-        if pd.isna(sku_val):
-            continue
-        sku = str(sku_val).strip()
-        if sku == "":
+        row_map = _row_to_normalized_map(row)
+
+        sku_val = _coalesce_row_value(row_map, "sku")
+        sku = str(sku_val).strip() if sku_val is not None and not pd.isna(sku_val) else ""
+
+        codigo_val = _coalesce_row_value(row_map, "codigo_barras", "barcode")
+        barcode = (
+            str(codigo_val).strip()
+            if codigo_val is not None and not pd.isna(codigo_val)
+            else None
+        )
+        if barcode == "":
+            barcode = None
+
+        if not sku and not barcode:
             continue
 
-        nombre_val = row.get("nombre")
-        if pd.isna(nombre_val) or str(nombre_val).strip() == "":
+        nombre_val = _coalesce_row_value(row_map, "nombre", "name")
+        if nombre_val is None or pd.isna(nombre_val) or str(nombre_val).strip() == "":
             continue
         name = str(nombre_val).strip()
 
-        precio = float(row.get("precio") or 0)
-        costo = float(row.get("costo") or 0)
+        precio = _parse_floatish(_coalesce_row_value(row_map, "precio", "price"), 0.0)
+        costo = _parse_floatish(_coalesce_row_value(row_map, "costo", "cost"), 0.0)
 
         # mapeos directos
-        grupo_val = row.get("grupo")
+        grupo_val = _coalesce_row_value(row_map, "grupo", "group_name", "group")
         group_name = str(grupo_val).strip() if not pd.isna(grupo_val) else None
+        if group_name == "":
+            group_name = None
 
-        marca_val = row.get("marca")
+        marca_val = _coalesce_row_value(row_map, "marca", "brand")
         brand = str(marca_val).strip() if not pd.isna(marca_val) else None
+        if brand == "":
+            brand = None
 
-        prov_val = row.get("proveedor")
+        prov_val = _coalesce_row_value(row_map, "proveedor", "supplier")
         supplier = str(prov_val).strip() if not pd.isna(prov_val) else None
+        if supplier == "":
+            supplier = None
 
-        codigo_val = row.get("codigo_barras")
-        barcode = str(codigo_val).strip() if not pd.isna(codigo_val) else None
-
-        unidad_val = row.get("unidad_medida")
+        unidad_val = _coalesce_row_value(row_map, "unidad_medida", "unidad", "unit")
         unit = str(unidad_val).strip() if not pd.isna(unidad_val) else None
+        if unit == "":
+            unit = None
 
-        stock_min_val = row.get("cantidad_stock_bajo")
-        stock_min = int(stock_min_val) if not pd.isna(stock_min_val) else 0
-
-        preferred_val = row.get("cantidad_preferida")
-        preferred_qty = int(preferred_val) if not pd.isna(preferred_val) else 0
-
-        reorder_val = row.get("punto_pedido")
-        reorder_point = int(reorder_val) if not pd.isna(reorder_val) else 0
-
-        low_stock_val = row.get("advertencia_stock_bajo")
-        low_stock_alert = False
-        if not pd.isna(low_stock_val):
-            try:
-                low_stock_alert = bool(int(low_stock_val))
-            except Exception:
-                low_stock_alert = bool(low_stock_val)
-
-        change_val = row.get("cambio_precio_permitido")
-        allow_price_change = False
-        if not pd.isna(change_val):
-            try:
-                allow_price_change = bool(int(change_val))
-            except Exception:
-                allow_price_change = bool(change_val)
-
-        incluye_iva_val = row.get("precio_incluye_impuestos")
-        includes_tax = (
-            bool(int(incluye_iva_val))
-            if not pd.isna(incluye_iva_val)
-            else False
+        stock_min_val = _coalesce_row_value(
+            row_map,
+            "cantidad_stock_bajo",
+            "stock_min",
+            "stock_minimo",
         )
+        stock_min = _parse_intish(stock_min_val, 0)
 
-        servicio_val = row.get("servicio_no_stock")
-        service = (
-            bool(int(servicio_val))
-            if not pd.isna(servicio_val)
-            else False
+        preferred_val = _coalesce_row_value(
+            row_map,
+            "cantidad_preferida",
+            "cant_preferida",
+            "preferred_qty",
         )
+        preferred_qty = _parse_intish(preferred_val, 0)
 
-        activo_val = row.get("producto_activo")
-        active = (
-            bool(int(activo_val))
-            if not pd.isna(activo_val)
-            else True
+        reorder_val = _coalesce_row_value(row_map, "punto_pedido", "reorder_point")
+        reorder_point = _parse_intish(reorder_val, 0)
+
+        low_stock_val = _coalesce_row_value(
+            row_map,
+            "advertencia_stock_bajo",
+            "alerta_stock",
+            "low_stock_alert",
         )
+        low_stock_alert = _parse_boolish(low_stock_val, False)
+
+        change_val = _coalesce_row_value(
+            row_map,
+            "cambio_precio_permitido",
+            "cambio_permitido",
+            "allow_price_change",
+        )
+        allow_price_change = _parse_boolish(change_val, False)
+
+        incluye_iva_val = _coalesce_row_value(
+            row_map,
+            "precio_incluye_impuestos",
+            "includes_tax",
+        )
+        includes_tax = _parse_boolish(incluye_iva_val, False)
+
+        servicio_val = _coalesce_row_value(row_map, "servicio_no_stock", "service")
+        service = _parse_boolish(servicio_val, False)
+
+        activo_val = _coalesce_row_value(row_map, "producto_activo", "activo", "active")
+        active = _parse_boolish(activo_val, True)
 
         product_data = schemas.ProductCreate(
-            sku=sku,
+            sku=sku or None,
             name=name,
             price=precio,
             cost=costo,
@@ -685,8 +764,11 @@ async def import_products_xlsx(
             supplier=supplier,
         )
 
-        tenant_id = crud.resolve_user_tenant_id(db, current_user)
-        existing = crud.get_product_by_sku(db, sku, tenant_id=tenant_id)
+        existing = None
+        if sku:
+            existing = crud.get_product_by_sku(db, sku, tenant_id=tenant_id)
+        if not existing and barcode:
+            existing = crud.get_product_by_barcode(db, barcode, tenant_id=tenant_id)
         if existing:
             crud.update_product(db, existing, product_data)
             updated += 1
