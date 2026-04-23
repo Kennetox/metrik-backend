@@ -10,6 +10,7 @@ class EmailDeliveryError(Exception):
 
 
 Attachment = Tuple[str, bytes, str]
+InlineAttachment = Tuple[str, bytes, str, str]
 
 
 def _env_bool(var_name: str, default: bool) -> bool:
@@ -35,6 +36,7 @@ def send_email(
     cc: Optional[Iterable[str]] = None,
     text_body: Optional[str] = None,
     attachments: Optional[List[Attachment]] = None,
+    inline_attachments: Optional[List[InlineAttachment]] = None,
     smtp_config: Optional[Any] = None,
 ) -> None:
     """
@@ -88,6 +90,23 @@ def send_email(
         text_body = "Este correo contiene información del POS en formato HTML."
     message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
+    html_part = message.get_body(preferencelist=("html",))
+
+    if html_part:
+        for inline_attachment in inline_attachments or []:
+            filename, content, mimetype, content_id = inline_attachment
+            maintype, subtype = mimetype.split("/", 1)
+            safe_content_id = content_id.strip().strip("<>")
+            if not safe_content_id:
+                continue
+            html_part.add_related(
+                content,
+                maintype=maintype,
+                subtype=subtype,
+                cid=f"<{safe_content_id}>",
+                filename=filename,
+                disposition="inline",
+            )
 
     for attachment in attachments or []:
         filename, content, mimetype = attachment

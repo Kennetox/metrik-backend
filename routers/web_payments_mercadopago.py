@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+import base64
 from datetime import datetime, timezone
 from html import escape
 from typing import Any, Optional
@@ -653,10 +654,38 @@ def _extract_personalization_preview_images_from_order(
     return sanitized
 
 
-def _build_personalization_preview_images_html(order: models.WebOrder) -> str:
+def _decode_personalization_data_image(data_url: str) -> tuple[bytes, str, str] | None:
+    raw = (data_url or "").strip()
+    if not raw.startswith("data:image/"):
+        return None
+    if ";base64," not in raw:
+        return None
+    header, encoded = raw.split(",", 1)
+    mime = header[5:].split(";", 1)[0].strip().lower()
+    if not mime.startswith("image/"):
+        return None
+    ext = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }.get(mime, "png")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+    if not content:
+        return None
+    return content, mime, ext
+
+
+def _build_personalization_preview_email_assets(
+    order: models.WebOrder,
+) -> tuple[str, list[email_service.InlineAttachment]]:
     previews = _extract_personalization_preview_images_from_order(order)
     if not previews:
-        return ""
+        return "", []
 
     labels = {
         "front": "Frente",
@@ -664,19 +693,33 @@ def _build_personalization_preview_images_html(order: models.WebOrder) -> str:
         "right": "Lateral derecha",
     }
     cards: list[str] = []
+    inline_attachments: list[email_service.InlineAttachment] = []
     for key in ("front", "left", "right"):
         src = previews.get(key)
         if not src:
             continue
+        decoded = _decode_personalization_data_image(src)
+        if not decoded:
+            continue
+        image_bytes, mime, ext = decoded
+        content_id = f"personaliza-{order.id}-{key}"
+        inline_attachments.append(
+            (
+                f"personalizacion-{order.id}-{key}.{ext}",
+                image_bytes,
+                mime,
+                content_id,
+            )
+        )
         cards.append(
             "<td style='vertical-align:top; width:33.33%; padding:0 6px 8px 0;'>"
             f"<div style='font-size:12px; font-weight:700; color:#334155; margin:0 0 6px 0;'>{escape(labels[key])}</div>"
-            f"<img src='{escape(src)}' alt='Vista {escape(labels[key])}' "
+            f"<img src='cid:{escape(content_id)}' alt='Vista {escape(labels[key])}' "
             "style='display:block; width:100%; max-width:240px; border:1px solid #cbd5e1; border-radius:8px;'/>"
             "</td>"
         )
     if not cards:
-        return ""
+        return "", []
 
     return (
         "<div style='margin:14px 0 10px 0;'>"
@@ -684,7 +727,8 @@ def _build_personalization_preview_images_html(order: models.WebOrder) -> str:
         "<table role='presentation' style='width:100%; border-collapse:collapse;'><tr>"
         + "".join(cards)
         + "</tr></table>"
-        "</div>"
+        "</div>",
+        inline_attachments,
     )
 
 
@@ -693,6 +737,7 @@ def _build_web_order_approved_customer_html(
     *,
     sale: Optional[models.Sale] = None,
     settings: Optional[models.PosSettings] = None,
+    personalization_previews_html: str = "",
 ) -> str:
     customer_name = (order.customer_name or "Cliente").strip()
     order_number = order.document_number or f"OW-{order.id:06d}"
@@ -714,7 +759,6 @@ def _build_web_order_approved_customer_html(
         )
 
     logo_footer = _build_email_logo_footer(settings)
-    personalization_previews_html = _build_personalization_preview_images_html(order)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         f"<p>Hola {escape(customer_name)},</p>"
@@ -749,6 +793,7 @@ def _build_web_order_approved_internal_html(
     sale: Optional[models.Sale],
     conversion_error: Optional[str],
     settings: Optional[models.PosSettings] = None,
+    personalization_previews_html: str = "",
 ) -> str:
     order_number = order.document_number or f"OW-{order.id:06d}"
     provider_ref = ""
@@ -772,7 +817,6 @@ def _build_web_order_approved_internal_html(
         else f"Pendiente de conversión: {escape(conversion_error or 'sin detalle')}"
     )
     logo_footer = _build_email_logo_footer(settings)
-    personalization_previews_html = _build_personalization_preview_images_html(order)
     return (
         "<div style='font-family:Arial,sans-serif; color:#0f172a; line-height:1.5;'>"
         "<p>Se registró un pago aprobado en Comercio Web.</p>"
@@ -831,12 +875,19 @@ def _send_web_order_customer_approval_email(
             logger.exception("No se pudo adjuntar factura PDF para la orden web %s", order.id)
 
     subject = f"Pago aprobado - Pedido {order.document_number or order.id}"
-    body_html = _build_web_order_approved_customer_html(order, sale=sale, settings=settings)
+    personalization_previews_html, inline_preview_attachments = _build_personalization_preview_email_assets(order)
+    body_html = _build_web_order_approved_customer_html(
+        order,
+        sale=sale,
+        settings=settings,
+        personalization_previews_html=personalization_previews_html,
+    )
     email_service.send_email(
         recipients=[recipient],
         subject=subject,
         html_body=body_html,
         attachments=attachments,
+        inline_attachments=inline_preview_attachments,
         smtp_config=_smtp_settings_dict(settings),
     )
     order.customer_approval_email_sent_at = datetime.utcnow()
@@ -856,16 +907,19 @@ def _send_web_order_internal_approval_email(
     if not recipients:
         return False, "No hay destinatarios internos configurados."
     subject = f"Nueva venta web aprobada - {order.document_number or order.id}"
+    personalization_previews_html, inline_preview_attachments = _build_personalization_preview_email_assets(order)
     body_html = _build_web_order_approved_internal_html(
         order,
         sale=sale,
         conversion_error=conversion_error,
         settings=settings,
+        personalization_previews_html=personalization_previews_html,
     )
     email_service.send_email(
         recipients=recipients,
         subject=subject,
         html_body=body_html,
+        inline_attachments=inline_preview_attachments,
         smtp_config=_smtp_settings_dict(settings),
     )
     return True, None
