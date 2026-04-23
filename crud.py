@@ -67,6 +67,39 @@ def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
     return clean_notes or None
 
 
+def _sanitize_checkout_context_in_notes_for_backoffice(notes: Optional[str]) -> Optional[str]:
+    raw_notes = (notes or "").strip()
+    if not raw_notes:
+        return None
+    marker_index = raw_notes.find(CHECKOUT_CONTEXT_NOTE_MARKER)
+    if marker_index < 0:
+        return raw_notes
+    note_text = raw_notes[:marker_index].strip()
+    context_raw = raw_notes[marker_index + len(CHECKOUT_CONTEXT_NOTE_MARKER) :].strip()
+    if not context_raw:
+        return raw_notes
+    try:
+        parsed = json.loads(context_raw)
+    except Exception:
+        return raw_notes
+    if not isinstance(parsed, dict):
+        return raw_notes
+    personalization = parsed.get("personalization")
+    if not isinstance(personalization, dict):
+        return raw_notes
+    if "preview_images" not in personalization:
+        return raw_notes
+
+    sanitized_personalization = dict(personalization)
+    sanitized_personalization.pop("preview_images", None)
+    sanitized_context = dict(parsed)
+    sanitized_context["personalization"] = sanitized_personalization
+    context_json = json.dumps(sanitized_context, ensure_ascii=False, separators=(",", ":"))
+    if note_text:
+        return f"{note_text}\n\n{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
+    return f"{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
+
+
 def _normalize_web_order_item_signature_value(value: Any, *, digits: int) -> float:
     return round(float(value or 0.0), digits)
 
@@ -8565,7 +8598,7 @@ def _serialize_web_order(
         shipping_amount=float(order.shipping_amount or 0.0),
         total=float(order.total or 0.0),
         currency=order.currency,
-        notes=order.notes,
+        notes=_sanitize_checkout_context_in_notes_for_backoffice(order.notes),
         submitted_at=order.submitted_at,
         paid_at=order.paid_at,
         cancelled_at=order.cancelled_at,
