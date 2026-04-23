@@ -37,6 +37,7 @@ WEB_GUEST_ORDER_TOKEN_TTL_SECONDS = int(
 )
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
+PERSONALIZATION_TRACE_NOTE_MARKER = "PERSONALIZACION_WEB:"
 
 
 def _get_mercadopago_provider():
@@ -265,6 +266,52 @@ def _merge_order_notes_with_checkout_context(
     normalized_ctx = _normalize_checkout_context_value(checkout_context or {}, depth=0)
     if not isinstance(normalized_ctx, dict) or not normalized_ctx:
         return note_text
+
+    def _extract_personalization_trace_block(context: dict[str, Any]) -> Optional[str]:
+        personalization = context.get("personalization")
+        if not isinstance(personalization, dict):
+            return None
+
+        def _split_trace_lines(value: str) -> list[str]:
+            lines: list[str] = []
+            for raw_line in value.splitlines():
+                clean = str(raw_line or "").strip().lstrip("-• ").strip()
+                if clean:
+                    lines.append(clean)
+            return lines
+
+        trace_lines: list[str] = []
+        entries_raw = personalization.get("entries")
+        if isinstance(entries_raw, list):
+            index = 0
+            for raw_entry in entries_raw:
+                if not isinstance(raw_entry, dict):
+                    continue
+                trace_text = str(raw_entry.get("design_trace_text") or raw_entry.get("summary") or "").strip()
+                if not trace_text:
+                    continue
+                index += 1
+                trace_lines.append(f"Configuración {index}:")
+                trace_lines.extend([f"- {line}" for line in _split_trace_lines(trace_text)])
+        else:
+            trace_text = str(personalization.get("design_trace_text") or personalization.get("summary") or "").strip()
+            if trace_text:
+                trace_lines.extend([f"- {line}" for line in _split_trace_lines(trace_text)])
+
+        if not trace_lines:
+            return None
+        return PERSONALIZATION_TRACE_NOTE_MARKER + "\n" + "\n".join(trace_lines)
+
+    trace_block = _extract_personalization_trace_block(normalized_ctx)
+    if trace_block:
+        if note_text and PERSONALIZATION_TRACE_NOTE_MARKER in note_text:
+            base_note_text = note_text.split(PERSONALIZATION_TRACE_NOTE_MARKER, 1)[0].strip()
+            note_text = f"{base_note_text}\n\n{trace_block}" if base_note_text else trace_block
+        elif note_text:
+            note_text = f"{note_text}\n\n{trace_block}"
+        else:
+            note_text = trace_block
+
     context_json = json.dumps(normalized_ctx, ensure_ascii=False, separators=(",", ":"))
     if note_text:
         return f"{note_text}\n\n{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
@@ -626,19 +673,9 @@ def _collect_internal_notification_recipients(settings: models.PosSettings) -> l
     return deduped
 
 
-def _extract_personalization_preview_images_from_order(
-    order: models.WebOrder,
-) -> dict[str, str]:
-    _note_text, checkout_context = _split_order_notes_checkout_context(order.notes)
-    if not isinstance(checkout_context, dict):
-        return {}
-    personalization = checkout_context.get("personalization")
-    if not isinstance(personalization, dict):
-        return {}
-    image_map = personalization.get("preview_images")
+def _sanitize_personalization_preview_images(image_map: Any) -> dict[str, str]:
     if not isinstance(image_map, dict):
         return {}
-
     sanitized: dict[str, str] = {}
     for key in ("front", "left", "right"):
         value = image_map.get(key)
@@ -652,6 +689,69 @@ def _extract_personalization_preview_images_from_order(
             continue
         sanitized[key] = raw
     return sanitized
+
+
+def _resolve_personalization_entry_label(entry: dict[str, Any], index: int) -> str:
+    product_raw = entry.get("product")
+    product_name = ""
+    product_size_label = ""
+    if isinstance(product_raw, dict):
+        product_name = str(product_raw.get("name") or "").strip()
+        product_size_label = str(product_raw.get("size_label") or "").strip()
+
+    if product_name and product_size_label:
+        return f"{product_name} · {product_size_label}"
+    if product_name:
+        return product_name
+    if product_size_label:
+        return product_size_label
+
+    summary = str(entry.get("summary") or "").strip()
+    if summary:
+        return summary[:90]
+    return f"Personalización #{index}"
+
+
+def _extract_personalization_preview_entries_from_order(
+    order: models.WebOrder,
+) -> list[dict[str, Any]]:
+    _note_text, checkout_context = _split_order_notes_checkout_context(order.notes)
+    if not isinstance(checkout_context, dict):
+        return []
+    personalization = checkout_context.get("personalization")
+    if not isinstance(personalization, dict):
+        return []
+
+    extracted_entries: list[dict[str, Any]] = []
+    entries_raw = personalization.get("entries")
+    if isinstance(entries_raw, list):
+        for index, raw_entry in enumerate(entries_raw, start=1):
+            if not isinstance(raw_entry, dict):
+                continue
+            previews = _sanitize_personalization_preview_images(raw_entry.get("preview_images"))
+            if not previews:
+                continue
+            extracted_entries.append(
+                {
+                    "label": _resolve_personalization_entry_label(raw_entry, index),
+                    "previews": previews,
+                }
+            )
+
+    if extracted_entries:
+        return extracted_entries
+
+    fallback_previews = _sanitize_personalization_preview_images(
+        personalization.get("preview_images")
+    )
+    if not fallback_previews:
+        return []
+    return [
+        {
+            "label": _resolve_personalization_entry_label(personalization, 1),
+            "previews": fallback_previews,
+        }
+    ]
 
 
 def _decode_personalization_data_image(data_url: str) -> tuple[bytes, str, str] | None:
@@ -683,8 +783,8 @@ def _decode_personalization_data_image(data_url: str) -> tuple[bytes, str, str] 
 def _build_personalization_preview_email_assets(
     order: models.WebOrder,
 ) -> tuple[str, list[email_service.InlineAttachment]]:
-    previews = _extract_personalization_preview_images_from_order(order)
-    if not previews:
+    preview_entries = _extract_personalization_preview_entries_from_order(order)
+    if not preview_entries:
         return "", []
 
     labels = {
@@ -692,42 +792,59 @@ def _build_personalization_preview_email_assets(
         "left": "Lateral izquierda",
         "right": "Lateral derecha",
     }
-    cards: list[str] = []
+    sections: list[str] = []
     inline_attachments: list[email_service.InlineAttachment] = []
-    for key in ("front", "left", "right"):
-        src = previews.get(key)
-        if not src:
+
+    for entry_index, entry in enumerate(preview_entries, start=1):
+        previews = entry.get("previews")
+        if not isinstance(previews, dict):
             continue
-        decoded = _decode_personalization_data_image(src)
-        if not decoded:
-            continue
-        image_bytes, mime, ext = decoded
-        content_id = f"personaliza-{order.id}-{key}"
-        inline_attachments.append(
-            (
-                f"personalizacion-{order.id}-{key}.{ext}",
-                image_bytes,
-                mime,
-                content_id,
+        cards: list[str] = []
+        for key in ("front", "left", "right"):
+            src = previews.get(key)
+            if not src:
+                continue
+            decoded = _decode_personalization_data_image(src)
+            if not decoded:
+                continue
+            image_bytes, mime, ext = decoded
+            content_id = f"personaliza-{order.id}-{entry_index}-{key}"
+            inline_attachments.append(
+                (
+                    f"personalizacion-{order.id}-{entry_index}-{key}.{ext}",
+                    image_bytes,
+                    mime,
+                    content_id,
+                )
             )
+            cards.append(
+                "<td style='vertical-align:top; width:33.33%; padding:0 6px 8px 0;'>"
+                f"<div style='font-size:12px; font-weight:700; color:#334155; margin:0 0 6px 0;'>{escape(labels[key])}</div>"
+                f"<img src='cid:{escape(content_id)}' alt='Vista {escape(labels[key])}' "
+                "style='display:block; width:100%; max-width:240px; border:1px solid #cbd5e1; border-radius:8px;'/>"
+                "</td>"
+            )
+        if not cards:
+            continue
+
+        entry_label = str(entry.get("label") or "").strip() or f"Personalización #{entry_index}"
+        sections.append(
+            "<div style='margin:0 0 12px 0;'>"
+            f"<p style='margin:0 0 8px 0; font-size:13px; font-weight:700; color:#0f172a;'>{escape(entry_label)}</p>"
+            "<table role='presentation' style='width:100%; border-collapse:collapse;'><tr>"
+            + "".join(cards)
+            + "</tr></table>"
+            + "</div>"
         )
-        cards.append(
-            "<td style='vertical-align:top; width:33.33%; padding:0 6px 8px 0;'>"
-            f"<div style='font-size:12px; font-weight:700; color:#334155; margin:0 0 6px 0;'>{escape(labels[key])}</div>"
-            f"<img src='cid:{escape(content_id)}' alt='Vista {escape(labels[key])}' "
-            "style='display:block; width:100%; max-width:240px; border:1px solid #cbd5e1; border-radius:8px;'/>"
-            "</td>"
-        )
-    if not cards:
+
+    if not sections:
         return "", []
 
     return (
         "<div style='margin:14px 0 10px 0;'>"
         "<p style='margin:0 0 8px 0; font-weight:700;'>Referencia visual de personalización</p>"
-        "<table role='presentation' style='width:100%; border-collapse:collapse;'><tr>"
-        + "".join(cards)
-        + "</tr></table>"
-        "</div>",
+        + "".join(sections)
+        + "</div>",
         inline_attachments,
     )
 
