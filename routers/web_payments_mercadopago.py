@@ -88,6 +88,34 @@ def _is_guest_order_reuse_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _get_hidden_personalization_service_skus() -> set[str]:
+    raw = (os.getenv("WEB_HIDDEN_PERSONALIZATION_SERVICE_SKUS") or "").strip()
+    if not raw:
+        return {"3740", "3741"}
+    return {token.strip() for token in raw.split(",") if token.strip()}
+
+
+def _is_hidden_personalization_service_allowed_for_checkout(
+    product: Optional[models.Product],
+    checkout_context: Optional[dict[str, Any]],
+) -> bool:
+    if not product:
+        return False
+    if product.web_published:
+        return False
+    if not bool(product.service):
+        return False
+    if not isinstance(checkout_context, dict):
+        return False
+    personalization = checkout_context.get("personalization")
+    if not isinstance(personalization, dict):
+        return False
+    sku = (product.sku or "").strip()
+    if not sku:
+        return False
+    return sku in _get_hidden_personalization_service_skus()
+
+
 def _get_mercadopago_env_label() -> str:
     return (os.getenv("MERCADOPAGO_ENV") or "unknown").strip().lower() or "unknown"
 
@@ -1131,7 +1159,15 @@ def _create_guest_order(
     line_items_payload: list[dict[str, Any]] = []
     for item_input in item_inputs:
         product = crud.get_product(db, int(item_input.product_id), tenant_id=tenant_id)
-        if not product or not product.active or not product.web_published:
+        if not product or not product.active:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Producto {item_input.product_id} no disponible para checkout web.",
+            )
+        if not product.web_published and not _is_hidden_personalization_service_allowed_for_checkout(
+            product,
+            payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"Producto {item_input.product_id} no disponible para checkout web.",
