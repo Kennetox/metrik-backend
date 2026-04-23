@@ -8474,6 +8474,37 @@ def expire_stale_web_orders(
     return expired
 
 
+def expire_stale_web_orders_all_tenants(
+    db: Session,
+    *,
+    now: Optional[datetime] = None,
+) -> int:
+    """Expire stale web orders across every tenant with pending web payments."""
+    tenant_rows = (
+        db.query(models.WebOrder.tenant_id)
+        .filter(models.WebOrder.sale_id.is_(None))
+        .filter(models.WebOrder.status.in_(["pending_payment"]))
+        .filter(models.WebOrder.payment_status.in_(["pending", "failed", "cancelled"]))
+        .distinct()
+        .all()
+    )
+    if not tenant_rows:
+        return 0
+
+    expired_total = 0
+    processed_tenants: set[Optional[int]] = set()
+    for (row_tenant_id,) in tenant_rows:
+        if row_tenant_id in processed_tenants:
+            continue
+        processed_tenants.add(row_tenant_id)
+        expired_total += expire_stale_web_orders(
+            db,
+            tenant_id=row_tenant_id,
+            now=now,
+        )
+    return expired_total
+
+
 def find_reusable_pending_web_order(
     db: Session,
     *,

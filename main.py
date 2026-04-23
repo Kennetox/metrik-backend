@@ -168,6 +168,7 @@ def _run_payment_reconciliation_once() -> dict[str, int]:
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=_payment_reconciliation_lookback_hours())
         batch_size = _payment_reconciliation_batch_size()
+        expired = crud.expire_stale_web_orders_all_tenants(db, now=now)
 
         candidates = (
             db.query(models.WebOrder)
@@ -184,7 +185,7 @@ def _run_payment_reconciliation_once() -> dict[str, int]:
             .all()
         )
         if not candidates:
-            return {"checked": 0, "rescued": 0}
+            return {"checked": 0, "rescued": 0, "expired": expired}
 
         refreshed_orders = refresh_backoffice_order_payment_statuses(db, candidates)
         rescued = 0
@@ -202,7 +203,7 @@ def _run_payment_reconciliation_once() -> dict[str, int]:
                         "Payment reconciliation post-approval failed | order_id=%s",
                         getattr(order, "id", None),
                     )
-        return {"checked": len(candidates), "rescued": rescued}
+        return {"checked": len(candidates), "rescued": rescued, "expired": expired}
     finally:
         db.close()
 
@@ -212,7 +213,7 @@ async def _payment_reconciliation_loop():
     while True:
         try:
             result = _run_payment_reconciliation_once()
-            if result.get("checked", 0) > 0:
+            if result.get("checked", 0) > 0 or result.get("expired", 0) > 0:
                 scheduler_logger.info("Payment reconciliation: %s", result)
         except Exception:
             scheduler_logger.exception("Payment reconciliation scheduler failed")
