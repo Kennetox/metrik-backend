@@ -1079,6 +1079,34 @@ def _build_web_order_approved_internal_html(
     )
 
 
+def _build_sale_invoice_attachments(
+    order: models.WebOrder,
+    *,
+    sale: Optional[models.Sale],
+    settings: models.PosSettings,
+    payment_labels: dict[str, str],
+) -> list[tuple[str, bytes, str]]:
+    if not sale:
+        return []
+    try:
+        invoice_pdf = ticket_renderer.render_sale_ticket_pdf(
+            sale,
+            settings=settings,
+            mode=ticket_renderer.INVOICE_MODE,
+            payment_method_labels=payment_labels,
+        )
+    except Exception:
+        logger.exception("No se pudo adjuntar factura PDF para la orden web %s", order.id)
+        return []
+    return [
+        (
+            f"factura_{sale.sale_number or sale.id}.pdf",
+            invoice_pdf,
+            "application/pdf",
+        )
+    ]
+
+
 def _send_web_order_customer_approval_email(
     db: Session,
     order: models.WebOrder,
@@ -1097,24 +1125,12 @@ def _send_web_order_customer_approval_email(
         return
 
     payment_labels = _payment_method_labels_by_slug(db, order.tenant_id)
-    attachments: list[tuple[str, bytes, str]] = []
-    if sale:
-        try:
-            invoice_pdf = ticket_renderer.render_sale_ticket_pdf(
-                sale,
-                settings=settings,
-                mode=ticket_renderer.INVOICE_MODE,
-                payment_method_labels=payment_labels,
-            )
-            attachments.append(
-                (
-                    f"factura_{sale.sale_number or sale.id}.pdf",
-                    invoice_pdf,
-                    "application/pdf",
-                )
-            )
-        except Exception:
-            logger.exception("No se pudo adjuntar factura PDF para la orden web %s", order.id)
+    attachments: list[tuple[str, bytes, str]] = _build_sale_invoice_attachments(
+        order,
+        sale=sale,
+        settings=settings,
+        payment_labels=payment_labels,
+    )
 
     subject = f"Pago aprobado - Pedido {order.document_number or order.id}"
     personalization_previews_html, inline_preview_attachments = _build_personalization_preview_email_assets(order)
@@ -1139,6 +1155,7 @@ def _send_web_order_customer_approval_email(
 
 
 def _send_web_order_internal_approval_email(
+    db: Session,
     order: models.WebOrder,
     settings: models.PosSettings,
     *,
@@ -1157,10 +1174,18 @@ def _send_web_order_internal_approval_email(
         settings=settings,
         personalization_previews_html=personalization_previews_html,
     )
+    payment_labels = _payment_method_labels_by_slug(db, order.tenant_id)
+    attachments = _build_sale_invoice_attachments(
+        order,
+        sale=sale,
+        settings=settings,
+        payment_labels=payment_labels,
+    )
     email_service.send_email(
         recipients=recipients,
         subject=subject,
         html_body=body_html,
+        attachments=attachments,
         inline_attachments=inline_preview_attachments,
         smtp_config=_smtp_settings_dict(settings),
     )
@@ -1277,6 +1302,7 @@ def _run_web_order_post_approval_flow(db: Session, order: models.WebOrder) -> No
     if order.internal_approval_email_sent_at is None:
         try:
             _sent, note = _send_web_order_internal_approval_email(
+                db,
                 order,
                 settings,
                 sale=sale,
