@@ -14,7 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 
 from database import Base
 
@@ -1042,6 +1042,7 @@ class WebOrder(Base):
     total = Column(Float, nullable=False, default=0)
     currency = Column(String(8), nullable=False, default="COP")
     notes = Column(Text, nullable=True)
+    checkout_context_json = deferred(Column(JSON, nullable=True))
     submitted_at = Column(DateTime, nullable=True)
     paid_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)

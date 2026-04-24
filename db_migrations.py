@@ -1227,6 +1227,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "web_orders", "customer_approval_email_last_error", "TEXT")
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_sent_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_last_error", "TEXT")
+                _ensure_column_postgres(connection, "web_orders", "checkout_context_json", "JSON")
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
@@ -2958,6 +2959,12 @@ def _ensure_table_document_adjustments(connection) -> None:
             "web_orders",
             "internal_approval_email_last_error",
             "TEXT",
+        )
+        _ensure_column(
+            connection,
+            "web_orders",
+            "checkout_context_json",
+            "JSON",
         )
         _ensure_products_tenant_scoped_unique_indexes(connection, backend="sqlite")
         _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="sqlite")

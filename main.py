@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from sqlalchemy.orm import joinedload
 from dotenv import load_dotenv
 from database import Base, engine, SessionLocal
 import models
@@ -172,11 +171,6 @@ def _run_payment_reconciliation_once() -> dict[str, int]:
 
         candidates = (
             db.query(models.WebOrder)
-            .options(
-                joinedload(models.WebOrder.items).joinedload(models.WebOrderItem.product),
-                joinedload(models.WebOrder.payments),
-                joinedload(models.WebOrder.status_logs),
-            )
             .filter(models.WebOrder.sale_id.is_(None))
             .filter(models.WebOrder.status.in_(["pending_payment", "payment_failed", "paid", "processing"]))
             .filter(models.WebOrder.created_at >= cutoff)
