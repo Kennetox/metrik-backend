@@ -258,13 +258,50 @@ def _normalize_checkout_context_value(value: Any, *, depth: int = 0) -> Any:
     return str(value)
 
 
+def _normalize_checkout_context_dict(
+    checkout_context: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    normalized_ctx = _normalize_checkout_context_value(checkout_context or {}, depth=0)
+    if not isinstance(normalized_ctx, dict) or not normalized_ctx:
+        return None
+    return normalized_ctx
+
+
+def _strip_preview_images_from_checkout_context(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return None
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        cleaned = [
+            _strip_preview_images_from_checkout_context(entry, depth=depth + 1)
+            for entry in value
+        ]
+        return [entry for entry in cleaned if entry not in [None, "", [], {}]]
+    if isinstance(value, dict):
+        cleaned_dict: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key).strip()
+            if not key or key == "preview_images":
+                continue
+            normalized = _strip_preview_images_from_checkout_context(raw_value, depth=depth + 1)
+            if normalized in [None, "", [], {}]:
+                continue
+            cleaned_dict[key] = normalized
+        return cleaned_dict
+    return str(value)
+
+
 def _merge_order_notes_with_checkout_context(
     notes: Optional[str],
     checkout_context: Optional[dict[str, Any]],
 ) -> Optional[str]:
     note_text, _existing_context = _split_order_notes_checkout_context(notes)
-    normalized_ctx = _normalize_checkout_context_value(checkout_context or {}, depth=0)
-    if not isinstance(normalized_ctx, dict) or not normalized_ctx:
+    normalized_ctx = _normalize_checkout_context_dict(checkout_context)
+    if not normalized_ctx:
+        return note_text
+    notes_context = _strip_preview_images_from_checkout_context(normalized_ctx, depth=0)
+    if not isinstance(notes_context, dict) or not notes_context:
         return note_text
 
     def _extract_personalization_trace_block(context: dict[str, Any]) -> Optional[str]:
@@ -302,7 +339,7 @@ def _merge_order_notes_with_checkout_context(
             return None
         return PERSONALIZATION_TRACE_NOTE_MARKER + "\n" + "\n".join(trace_lines)
 
-    trace_block = _extract_personalization_trace_block(normalized_ctx)
+    trace_block = _extract_personalization_trace_block(notes_context)
     if trace_block:
         if note_text and PERSONALIZATION_TRACE_NOTE_MARKER in note_text:
             base_note_text = note_text.split(PERSONALIZATION_TRACE_NOTE_MARKER, 1)[0].strip()
@@ -312,7 +349,7 @@ def _merge_order_notes_with_checkout_context(
         else:
             note_text = trace_block
 
-    context_json = json.dumps(normalized_ctx, ensure_ascii=False, separators=(",", ":"))
+    context_json = json.dumps(notes_context, ensure_ascii=False, separators=(",", ":"))
     if note_text:
         return f"{note_text}\n\n{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
     return f"{CHECKOUT_CONTEXT_NOTE_MARKER}{context_json}"
@@ -324,10 +361,12 @@ def _persist_checkout_context_on_order(
     *,
     checkout_context: Optional[dict[str, Any]],
 ) -> models.WebOrder:
-    next_notes = _merge_order_notes_with_checkout_context(order.notes, checkout_context)
-    if next_notes == order.notes:
+    normalized_ctx = _normalize_checkout_context_dict(checkout_context)
+    next_notes = _merge_order_notes_with_checkout_context(order.notes, normalized_ctx)
+    if next_notes == order.notes and order.checkout_context_json == normalized_ctx:
         return order
     order.notes = next_notes
+    order.checkout_context_json = normalized_ctx
     order.updated_at = datetime.utcnow()
     db.add(order)
     db.commit()
@@ -712,10 +751,58 @@ def _resolve_personalization_entry_label(entry: dict[str, Any], index: int) -> s
     return f"Personalización #{index}"
 
 
+def _normalize_sku_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+
+
+def _normalize_line_quantity(value: Any) -> int:
+    try:
+        quantity = int(round(float(value or 0.0)))
+    except Exception:
+        return 0
+    return max(0, quantity)
+
+
+def _build_order_sku_capacity(order: models.WebOrder) -> dict[str, int]:
+    capacity: dict[str, int] = {}
+    for item in order.items or []:
+        sku = _normalize_sku_key(getattr(item, "product_sku_snapshot", None))
+        if not sku:
+            continue
+        quantity = _normalize_line_quantity(getattr(item, "quantity", 0))
+        if quantity <= 0:
+            continue
+        capacity[sku] = capacity.get(sku, 0) + quantity
+    return capacity
+
+
+def _resolve_order_personalization_entries_limit(order: models.WebOrder) -> int:
+    hidden_service_skus = _get_hidden_personalization_service_skus()
+    total = 0
+    for item in order.items or []:
+        quantity = _normalize_line_quantity(getattr(item, "quantity", 0))
+        if quantity <= 0:
+            continue
+        sku = _normalize_sku_key(getattr(item, "product_sku_snapshot", None))
+        name = str(getattr(item, "product_name_snapshot", "") or "").strip().lower()
+        if sku and sku in hidden_service_skus:
+            total += quantity
+            continue
+        if "personaliz" in name:
+            total += quantity
+    return max(0, total)
+
+
 def _extract_personalization_preview_entries_from_order(
     order: models.WebOrder,
 ) -> list[dict[str, Any]]:
-    _note_text, checkout_context = _split_order_notes_checkout_context(order.notes)
+    checkout_context = (
+        order.checkout_context_json if isinstance(order.checkout_context_json, dict) else None
+    )
+    if not isinstance(checkout_context, dict):
+        _note_text, checkout_context = _split_order_notes_checkout_context(order.notes)
     if not isinstance(checkout_context, dict):
         return []
     personalization = checkout_context.get("personalization")
@@ -723,11 +810,35 @@ def _extract_personalization_preview_entries_from_order(
         return []
 
     extracted_entries: list[dict[str, Any]] = []
+    remaining_capacity_by_sku = _build_order_sku_capacity(order)
+    entries_limit = _resolve_order_personalization_entries_limit(order)
     entries_raw = personalization.get("entries")
     if isinstance(entries_raw, list):
-        for index, raw_entry in enumerate(entries_raw, start=1):
+        indexed_entries = [
+            (index, raw_entry)
+            for index, raw_entry in enumerate(entries_raw, start=1)
+            if isinstance(raw_entry, dict)
+        ]
+        for index, raw_entry in reversed(indexed_entries):
             if not isinstance(raw_entry, dict):
                 continue
+            binding = raw_entry.get("checkout_binding")
+            if isinstance(binding, dict):
+                product_sku = _normalize_sku_key(binding.get("product_sku"))
+                personalization_sku = _normalize_sku_key(binding.get("personalization_sku"))
+            else:
+                product_sku = ""
+                personalization_sku = ""
+
+            if personalization_sku:
+                available_service_qty = remaining_capacity_by_sku.get(personalization_sku, 0)
+                if available_service_qty <= 0:
+                    continue
+                if product_sku and remaining_capacity_by_sku.get(product_sku, 0) <= 0:
+                    continue
+            elif entries_limit > 0 and len(extracted_entries) >= entries_limit:
+                continue
+
             previews = _sanitize_personalization_preview_images(raw_entry.get("preview_images"))
             if not previews:
                 continue
@@ -737,9 +848,23 @@ def _extract_personalization_preview_entries_from_order(
                     "previews": previews,
                 }
             )
+            if personalization_sku:
+                remaining_capacity_by_sku[personalization_sku] = max(
+                    0, remaining_capacity_by_sku.get(personalization_sku, 0) - 1
+                )
+                if product_sku:
+                    remaining_capacity_by_sku[product_sku] = max(
+                        0, remaining_capacity_by_sku.get(product_sku, 0) - 1
+                    )
+            if entries_limit > 0 and len(extracted_entries) >= entries_limit:
+                break
 
     if extracted_entries:
+        extracted_entries.reverse()
         return extracted_entries
+
+    if entries_limit <= 0:
+        return []
 
     fallback_previews = _sanitize_personalization_preview_images(
         personalization.get("preview_images")
@@ -1410,11 +1535,15 @@ def _create_guest_order(
             reusable.customer_phone = customer_phone
             reusable.customer_tax_id = customer_tax_id
             reusable.customer_address = customer_address
+            checkout_context = _normalize_checkout_context_dict(
+                payload.checkout_context if isinstance(payload.checkout_context, dict) else None
+            )
             next_notes_source = ((payload.notes or "").strip() or reusable.notes)
             reusable.notes = _merge_order_notes_with_checkout_context(
                 next_notes_source,
-                payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
+                checkout_context,
             )
+            reusable.checkout_context_json = checkout_context
             reusable.updated_at = datetime.utcnow()
             crud._create_web_order_status_log(
                 db,
@@ -1432,6 +1561,9 @@ def _create_guest_order(
 
     number = crud.get_next_web_order_number(db, tenant_id=tenant_id)
     document_number = f"OW-{number:06d}"
+    checkout_context = _normalize_checkout_context_dict(
+        payload.checkout_context if isinstance(payload.checkout_context, dict) else None
+    )
     order = models.WebOrder(
         tenant_id=tenant_id,
         web_order_number=number,
@@ -1453,8 +1585,9 @@ def _create_guest_order(
         currency=currency,
         notes=_merge_order_notes_with_checkout_context(
             ((payload.notes or "").strip() or None),
-            payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
+            checkout_context,
         ),
+        checkout_context_json=checkout_context,
         submitted_at=datetime.utcnow(),
     )
     db.add(order)
