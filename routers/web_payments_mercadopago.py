@@ -38,6 +38,7 @@ WEB_GUEST_ORDER_TOKEN_TTL_SECONDS = int(
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 PERSONALIZATION_TRACE_NOTE_MARKER = "PERSONALIZACION_WEB:"
+CHECKOUT_CONTEXT_MAX_DEPTH = 12
 
 
 def _get_mercadopago_provider():
@@ -232,7 +233,7 @@ def _split_order_notes_checkout_context(notes: Optional[str]) -> tuple[Optional[
 
 
 def _normalize_checkout_context_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 6:
+    if depth > CHECKOUT_CONTEXT_MAX_DEPTH:
         return None
     if value is None or isinstance(value, (bool, int, float, str)):
         if isinstance(value, str):
@@ -268,7 +269,7 @@ def _normalize_checkout_context_dict(
 
 
 def _strip_preview_images_from_checkout_context(value: Any, *, depth: int = 0) -> Any:
-    if depth > 6:
+    if depth > CHECKOUT_CONTEXT_MAX_DEPTH:
         return None
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
