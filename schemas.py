@@ -369,6 +369,7 @@ class WebCatalogProductCard(BaseModel):
     name: str
     badge_text: Optional[str] = None
     short_description: Optional[str] = None
+    long_description: Optional[str] = None
     brand: Optional[str] = None
     group_name: Optional[str] = None
     category_path: Optional[str] = None

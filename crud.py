@@ -3880,6 +3880,7 @@ def get_web_catalog_products(
                 name=resolve_product_web_name(product),
                 badge_text=(product.web_badge_text or None),
                 short_description=product.web_short_description,
+                long_description=product.web_long_description,
                 brand=product.brand,
                 group_name=category_name or product.group_name,
                 category_path=product.web_category_key,
