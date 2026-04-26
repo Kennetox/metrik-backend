@@ -2144,6 +2144,8 @@ def list_comercio_web_publications_page(
     status_filter: str = "all",
     featured_filter: str = "all",
     badge_filter: str = "all",
+    category_key: Optional[str] = None,
+    subcategory_key: Optional[str] = None,
     order: str = "newest",
     active_only: bool = True,
     skip: int = 0,
@@ -2199,6 +2201,15 @@ def list_comercio_web_publications_page(
         query = query.filter(
             func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "consultar"
         )
+    elif status_filter == "published":
+        query = query.filter(models.Product.web_published.is_(True))
+    elif status_filter == "paused":
+        query = query.filter(
+            or_(
+                models.Product.web_published.is_(False),
+                models.Product.web_published.is_(None),
+            )
+        )
 
     if featured_filter == "featured":
         query = query.filter(models.Product.web_featured.is_(True))
@@ -2215,8 +2226,48 @@ def list_comercio_web_publications_page(
     elif badge_filter == "without_badge":
         query = query.filter(not_(has_badge_expr))
 
-    if active_only:
+    if active_only and status_filter != "paused":
         query = query.filter(models.Product.web_published.is_(True))
+
+    category_map = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    )
+    children_map = _build_web_catalog_category_children_map(list(category_map.values()))
+    category_keys_filter: Optional[set[str]] = None
+    subcategory_keys_filter: Optional[set[str]] = None
+
+    normalized_category_key = _normalize_web_catalog_category_key(category_key)
+    if normalized_category_key:
+        if normalized_category_key in category_map:
+            category_keys_filter = _get_web_catalog_descendant_keys(normalized_category_key, children_map)
+        else:
+            category_keys_filter = set()
+
+    normalized_subcategory_key = _normalize_web_catalog_category_key(subcategory_key)
+    if normalized_subcategory_key:
+        if normalized_subcategory_key in category_map:
+            subcategory_keys_filter = _get_web_catalog_descendant_keys(
+                normalized_subcategory_key,
+                children_map,
+            )
+        else:
+            subcategory_keys_filter = set()
+
+    if category_keys_filter is not None and subcategory_keys_filter is not None:
+        filter_keys = category_keys_filter.intersection(subcategory_keys_filter)
+    elif subcategory_keys_filter is not None:
+        filter_keys = subcategory_keys_filter
+    else:
+        filter_keys = category_keys_filter
+
+    if filter_keys is not None:
+        if filter_keys:
+            query = query.filter(models.Product.web_category_key.in_(filter_keys))
+        else:
+            query = query.filter(models.Product.id == -1)
 
     normalized_order = (order or "newest").strip().lower()
     publication_created_null_order = case(
