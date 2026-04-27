@@ -1015,6 +1015,41 @@ class WebCatalogCategory(Base):
     )
 
 
+class WebCatalogDescriptionTemplate(Base):
+    __tablename__ = "web_catalog_description_templates"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "template_key",
+            name="web_catalog_description_templates_tenant_key",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    template_key = Column(String(64), nullable=False, index=True)
+    label = Column(String(120), nullable=False)
+    assigned_category_key = Column(String(64), nullable=True, index=True)
+    keywords_json = Column(Text, nullable=False, default="[]")
+    paragraph1 = Column(Text, nullable=False, default="")
+    paragraph2 = Column(Text, nullable=False, default="")
+    paragraph3 = Column(Text, nullable=False, default="")
+    closing = Column(Text, nullable=False, default="")
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True, index=True)
+    updated_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    creator = relationship("PosUser", foreign_keys=[created_by_user_id])
+    updater = relationship("PosUser", foreign_keys=[updated_by_user_id])
+
+
 class WebOrder(Base):
     __tablename__ = "web_orders"
     __table_args__ = (

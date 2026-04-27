@@ -115,6 +115,140 @@ def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "home_featured_order", "INTEGER NOT NULL DEFAULT 0")
 
 
+def _ensure_web_description_template_schema(connection, backend: str) -> None:
+    table = "web_catalog_description_templates"
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS web_catalog_description_templates (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER REFERENCES tenants(id),
+                    template_key VARCHAR(64) NOT NULL,
+                    label VARCHAR(120) NOT NULL,
+                    assigned_category_key VARCHAR(64),
+                    keywords_json TEXT NOT NULL DEFAULT '[]',
+                    paragraph1 TEXT NOT NULL DEFAULT '',
+                    paragraph2 TEXT NOT NULL DEFAULT '',
+                    paragraph3 TEXT NOT NULL DEFAULT '',
+                    closing TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_by_user_id INTEGER REFERENCES pos_users(id),
+                    updated_by_user_id INTEGER REFERENCES pos_users(id),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "template_key", "VARCHAR(64)")
+        _ensure_column_postgres(connection, table, "label", "VARCHAR(120)")
+        _ensure_column_postgres(connection, table, "assigned_category_key", "VARCHAR(64)")
+        _ensure_column_postgres(connection, table, "keywords_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column_postgres(connection, table, "paragraph1", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column_postgres(connection, table, "paragraph2", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column_postgres(connection, table, "paragraph3", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column_postgres(connection, table, "closing", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column_postgres(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "created_by_user_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "updated_by_user_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "created_at", "TIMESTAMP")
+        _ensure_column_postgres(connection, table, "updated_at", "TIMESTAMP")
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_description_templates_tenant_key
+                ON web_catalog_description_templates (tenant_id, template_key)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_tenant_id "
+                "ON web_catalog_description_templates (tenant_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_template_key "
+                "ON web_catalog_description_templates (template_key)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_assigned_category_key "
+                "ON web_catalog_description_templates (assigned_category_key)"
+            )
+        )
+        return
+
+    if not _table_exists(connection, table):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE web_catalog_description_templates (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
+                    template_key TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    assigned_category_key TEXT,
+                    keywords_json TEXT NOT NULL DEFAULT '[]',
+                    paragraph1 TEXT NOT NULL DEFAULT '',
+                    paragraph2 TEXT NOT NULL DEFAULT '',
+                    paragraph3 TEXT NOT NULL DEFAULT '',
+                    closing TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_by_user_id INTEGER,
+                    updated_by_user_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    _ensure_column(connection, table, "tenant_id", "INTEGER")
+    _ensure_column(connection, table, "template_key", "TEXT")
+    _ensure_column(connection, table, "label", "TEXT")
+    _ensure_column(connection, table, "assigned_category_key", "TEXT")
+    _ensure_column(connection, table, "keywords_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, table, "paragraph1", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "paragraph2", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "paragraph3", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "closing", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "created_by_user_id", "INTEGER")
+    _ensure_column(connection, table, "updated_by_user_id", "INTEGER")
+    _ensure_column(connection, table, "created_at", "DATETIME")
+    _ensure_column(connection, table, "updated_at", "DATETIME")
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_description_templates_tenant_key
+            ON web_catalog_description_templates (tenant_id, template_key)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_tenant_id "
+            "ON web_catalog_description_templates (tenant_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_template_key "
+            "ON web_catalog_description_templates (template_key)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_catalog_description_templates_assigned_category_key "
+            "ON web_catalog_description_templates (assigned_category_key)"
+        )
+    )
+
+
 def _table_exists_postgres(connection, table: str) -> bool:
     row = connection.execute(
         text(
@@ -1240,6 +1374,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_discount_code_schema(connection, backend="postgresql")
                 _ensure_web_cart_coupon_schema(connection, backend="postgresql")
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
+                _ensure_web_description_template_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -2338,6 +2473,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_discount_code_schema(connection, backend="sqlite")
                 _ensure_web_cart_coupon_schema(connection, backend="sqlite")
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
+                _ensure_web_description_template_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:

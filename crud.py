@@ -223,6 +223,114 @@ DEFAULT_WEB_CATALOG_CATEGORIES = [
     {"key": "accesorios", "name": "Accesorios", "sort_order": 40},
     {"key": "camaras", "name": "Camaras", "sort_order": 50},
 ]
+DEFAULT_WEB_DESCRIPTION_TEMPLATE_CLOSING = (
+    "En Kensar te asesoramos para elegir el producto adecuado segun tu necesidad. "
+    "Contactanos por WhatsApp para mas informacion."
+)
+DEFAULT_WEB_DESCRIPTION_TEMPLATES = [
+    {
+        "template_key": "sonido",
+        "label": "Sonido",
+        "assigned_category_key": None,
+        "keywords": [
+            "sonido",
+            "amplificador",
+            "cabina",
+            "car audio",
+            "consola",
+            "megafono",
+            "microfono",
+            "parlante",
+        ],
+        "paragraph1": "El [NOMBRE] es una excelente opcion para sistemas de sonido que requieren un uso practico y funcional.",
+        "paragraph2": "Ideal para eventos, DJs, instalaciones o uso profesional y domestico, ofrece un rendimiento estable y confiable en diferentes entornos.",
+        "paragraph3": "Su diseno permite una integracion practica dentro de configuraciones de audio, facilitando un sonido claro y equilibrado segun la necesidad.",
+        "closing": "En Kensar te asesoramos para elegir el equipo adecuado segun tu uso. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 10,
+    },
+    {
+        "template_key": "studio",
+        "label": "Studio",
+        "assigned_category_key": None,
+        "keywords": ["studio", "estudio", "monitoreo", "grabacion", "mezcla"],
+        "paragraph1": "El [NOMBRE] es una excelente opcion para entornos de grabacion, monitoreo o produccion de audio.",
+        "paragraph2": "Ideal para estudios, creadores de contenido y musicos, permite trabajar con mayor control y precision en el sonido.",
+        "paragraph3": "Su diseno esta orientado a ofrecer un rendimiento confiable en procesos de monitoreo, grabacion o mezcla.",
+        "closing": "En Kensar te asesoramos para elegir el equipo adecuado segun tu proyecto. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 20,
+    },
+    {
+        "template_key": "cables_accesorios",
+        "label": "Cables y Accesorios",
+        "assigned_category_key": None,
+        "keywords": [
+            "cable",
+            "accesorio",
+            "audio profesional",
+            "cables de red",
+            "hdmi",
+            "rca",
+            "tripode",
+            "conector",
+        ],
+        "paragraph1": "El [NOMBRE] es una solucion practica para conexiones y configuraciones de audio, video o red.",
+        "paragraph2": "Ideal para instalaciones profesionales o uso domestico, permite una conexion estable y funcional entre dispositivos.",
+        "paragraph3": "Su diseno facilita el correcto funcionamiento de tus equipos en diferentes entornos.",
+        "closing": "En Kensar te asesoramos para elegir el accesorio adecuado segun tu necesidad. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 30,
+    },
+    {
+        "template_key": "hogar_entretenimiento",
+        "label": "Hogar y Entretenimiento",
+        "assigned_category_key": None,
+        "keywords": [
+            "hogar",
+            "entretenimiento",
+            "televisor",
+            "camara de seguridad",
+            "seguridad",
+            "luz solar",
+        ],
+        "paragraph1": "El [NOMBRE] es una excelente opcion para mejorar la experiencia en el hogar o espacios personales.",
+        "paragraph2": "Ideal para entretenimiento, seguridad o uso diario, ofrece un funcionamiento practico y adaptable a diferentes necesidades.",
+        "paragraph3": "Su diseno esta pensado para integrarse facilmente en distintos entornos, brindando comodidad y funcionalidad.",
+        "closing": "En Kensar te asesoramos para elegir la mejor opcion segun tu espacio. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 40,
+    },
+    {
+        "template_key": "instrumentos",
+        "label": "Instrumentos Musicales",
+        "assigned_category_key": None,
+        "keywords": ["instrumento", "cuerda", "viento", "salsero", "salsa", "percusion", "teclado"],
+        "paragraph1": "El [NOMBRE] es una excelente opcion para quienes buscan un instrumento versatil y funcional.",
+        "paragraph2": "Ideal para aprendizaje, practica o presentaciones, ofrece una experiencia comoda y un sonido adecuado segun su uso.",
+        "paragraph3": "Su diseno permite un manejo practico, adaptandose a distintos niveles de experiencia.",
+        "closing": "En Kensar te asesoramos para elegir el instrumento adecuado segun tu necesidad. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 50,
+    },
+    {
+        "template_key": "instrumentos_latinos",
+        "label": "Instrumentos Latinos/Percusion",
+        "assigned_category_key": None,
+        "keywords": ["salsero", "salsa", "percusion", "conga", "bongo", "timbal"],
+        "paragraph1": "El [NOMBRE] es una excelente opcion para ritmos latinos y acompanamientos percusivos.",
+        "paragraph2": "Ideal para ensayos, presentaciones y uso musical, ofrece una respuesta sonora clara y facil ejecucion.",
+        "paragraph3": "Fabricado para un uso practico, permite integrarse en diferentes estilos y configuraciones musicales.",
+        "closing": "En Kensar te asesoramos para elegir el instrumento adecuado segun tu necesidad. Contactanos por WhatsApp para mas informacion.",
+        "sort_order": 60,
+    },
+    {
+        "template_key": "default",
+        "label": "General",
+        "assigned_category_key": None,
+        "keywords": [],
+        "paragraph1": "El [NOMBRE] es una opcion funcional para quienes buscan un producto confiable segun su necesidad.",
+        "paragraph2": "Ideal para uso diario, profesional o tecnico segun su aplicacion, permite una implementacion practica en distintos entornos.",
+        "paragraph3": "Su configuracion ofrece una solucion estable para tareas de conexion, operacion o soporte de equipos.",
+        "closing": DEFAULT_WEB_DESCRIPTION_TEMPLATE_CLOSING,
+        "sort_order": 999,
+    },
+]
 WEB_PRICE_SOURCE_DEFAULT = "base"
 WEB_PRICE_SOURCE_FIXED = "fixed"
 WEB_PRICE_SOURCE_DISCOUNT_PERCENT = "discount_percent"
@@ -2695,6 +2803,283 @@ def delete_comercio_web_catalog_category(
         raise ValueError("No puedes eliminar una categoría con productos asignados")
     db.delete(row)
     db.commit()
+
+
+def _normalize_web_description_template_key(value: Optional[str]) -> str:
+    return _normalize_web_catalog_category_key(value)
+
+
+def _parse_web_description_template_keywords(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    clean: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(normalized)
+    return clean
+
+
+def _serialize_web_description_template_keywords(keywords: Sequence[str]) -> str:
+    clean: list[str] = []
+    seen: set[str] = set()
+    for item in keywords:
+        normalized = (item or "").strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(normalized)
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _serialize_web_description_template(
+    row: models.WebCatalogDescriptionTemplate,
+) -> schemas.ComercioWebDescriptionTemplateRead:
+    return schemas.ComercioWebDescriptionTemplateRead(
+        id=row.id,
+        template_key=(row.template_key or "").strip(),
+        label=(row.label or "").strip() or "Plantilla",
+        assigned_category_key=_normalize_web_catalog_category_key(row.assigned_category_key) or None,
+        keywords=_parse_web_description_template_keywords(row.keywords_json),
+        paragraph1=row.paragraph1 or "",
+        paragraph2=row.paragraph2 or "",
+        paragraph3=row.paragraph3 or "",
+        closing=row.closing or "",
+        sort_order=int(row.sort_order or 0),
+        created_by_user_id=row.created_by_user_id,
+        updated_by_user_id=row.updated_by_user_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _seed_default_web_description_templates(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+) -> None:
+    existing_count = (
+        db.query(func.count(models.WebCatalogDescriptionTemplate.id))
+        .filter(models.WebCatalogDescriptionTemplate.tenant_id == tenant_id)
+        .scalar()
+    )
+    if int(existing_count or 0) > 0:
+        return
+    now = datetime.utcnow()
+    rows = [
+        models.WebCatalogDescriptionTemplate(
+            tenant_id=tenant_id,
+            template_key=item["template_key"],
+            label=item["label"],
+            assigned_category_key=_normalize_web_catalog_category_key(item.get("assigned_category_key")) or None,
+            keywords_json=_serialize_web_description_template_keywords(item.get("keywords", [])),
+            paragraph1=item.get("paragraph1") or "",
+            paragraph2=item.get("paragraph2") or "",
+            paragraph3=item.get("paragraph3") or "",
+            closing=item.get("closing") or DEFAULT_WEB_DESCRIPTION_TEMPLATE_CLOSING,
+            sort_order=int(item.get("sort_order") or 0),
+            created_at=now,
+            updated_at=now,
+        )
+        for item in DEFAULT_WEB_DESCRIPTION_TEMPLATES
+    ]
+    db.add_all(rows)
+    db.commit()
+
+
+def list_comercio_web_description_templates(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> list[schemas.ComercioWebDescriptionTemplateRead]:
+    _seed_default_web_description_templates(db, tenant_id=tenant_id)
+    rows = (
+        db.query(models.WebCatalogDescriptionTemplate)
+        .filter(models.WebCatalogDescriptionTemplate.tenant_id == tenant_id)
+        .order_by(
+            models.WebCatalogDescriptionTemplate.sort_order.asc(),
+            models.WebCatalogDescriptionTemplate.label.asc(),
+            models.WebCatalogDescriptionTemplate.id.asc(),
+        )
+        .all()
+    )
+    return [_serialize_web_description_template(row) for row in rows]
+
+
+def create_comercio_web_description_template(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    payload: schemas.ComercioWebDescriptionTemplateCreate,
+    actor_user_id: Optional[int] = None,
+) -> schemas.ComercioWebDescriptionTemplateRead:
+    template_key = _normalize_web_description_template_key(payload.template_key)
+    if not template_key:
+        raise ValueError("La clave interna de la plantilla es inválida")
+    duplicate = (
+        db.query(models.WebCatalogDescriptionTemplate.id)
+        .filter(
+            models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
+            models.WebCatalogDescriptionTemplate.template_key == template_key,
+        )
+        .first()
+    )
+    if duplicate:
+        raise ValueError("Ya existe una plantilla con esa clave")
+    now = datetime.utcnow()
+    row = models.WebCatalogDescriptionTemplate(
+        tenant_id=tenant_id,
+        template_key=template_key,
+        label=(payload.label or "").strip(),
+        assigned_category_key=_normalize_web_catalog_category_key(payload.assigned_category_key) or None,
+        keywords_json=_serialize_web_description_template_keywords(payload.keywords),
+        paragraph1=payload.paragraph1 or "",
+        paragraph2=payload.paragraph2 or "",
+        paragraph3=payload.paragraph3 or "",
+        closing=payload.closing or "",
+        sort_order=int(payload.sort_order or 0),
+        created_by_user_id=actor_user_id,
+        updated_by_user_id=actor_user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _serialize_web_description_template(row)
+
+
+def update_comercio_web_description_template(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    template_key: str,
+    payload: schemas.ComercioWebDescriptionTemplateUpdate,
+    actor_user_id: Optional[int] = None,
+) -> schemas.ComercioWebDescriptionTemplateRead:
+    normalized_template_key = _normalize_web_description_template_key(template_key)
+    row = (
+        db.query(models.WebCatalogDescriptionTemplate)
+        .filter(
+            models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
+            models.WebCatalogDescriptionTemplate.template_key == normalized_template_key,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Plantilla no encontrada")
+    data = payload.model_dump(exclude_unset=True)
+    if "template_key" in data:
+        next_template_key = _normalize_web_description_template_key(data.get("template_key"))
+        if not next_template_key:
+            raise ValueError("La clave interna de la plantilla es inválida")
+        duplicate = (
+            db.query(models.WebCatalogDescriptionTemplate.id)
+            .filter(
+                models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
+                models.WebCatalogDescriptionTemplate.template_key == next_template_key,
+                models.WebCatalogDescriptionTemplate.id != row.id,
+            )
+            .first()
+        )
+        if duplicate:
+            raise ValueError("Ya existe una plantilla con esa clave")
+        row.template_key = next_template_key
+    if "label" in data:
+        row.label = (data.get("label") or "").strip()
+    if "assigned_category_key" in data:
+        row.assigned_category_key = _normalize_web_catalog_category_key(data.get("assigned_category_key")) or None
+    if "keywords" in data:
+        row.keywords_json = _serialize_web_description_template_keywords(data.get("keywords") or [])
+    if "paragraph1" in data:
+        row.paragraph1 = data.get("paragraph1") or ""
+    if "paragraph2" in data:
+        row.paragraph2 = data.get("paragraph2") or ""
+    if "paragraph3" in data:
+        row.paragraph3 = data.get("paragraph3") or ""
+    if "closing" in data:
+        row.closing = data.get("closing") or ""
+    if "sort_order" in data:
+        row.sort_order = int(data.get("sort_order") or 0)
+    row.updated_by_user_id = actor_user_id
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _serialize_web_description_template(row)
+
+
+def delete_comercio_web_description_template(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    template_key: str,
+) -> None:
+    normalized_template_key = _normalize_web_description_template_key(template_key)
+    row = (
+        db.query(models.WebCatalogDescriptionTemplate)
+        .filter(
+            models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
+            models.WebCatalogDescriptionTemplate.template_key == normalized_template_key,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Plantilla no encontrada")
+    total = (
+        db.query(func.count(models.WebCatalogDescriptionTemplate.id))
+        .filter(models.WebCatalogDescriptionTemplate.tenant_id == tenant_id)
+        .scalar()
+    )
+    if int(total or 0) <= 1:
+        raise ValueError("Debes mantener al menos una plantilla")
+    db.delete(row)
+    db.commit()
+
+
+def reset_comercio_web_description_templates(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    actor_user_id: Optional[int] = None,
+) -> list[schemas.ComercioWebDescriptionTemplateRead]:
+    (
+        db.query(models.WebCatalogDescriptionTemplate)
+        .filter(models.WebCatalogDescriptionTemplate.tenant_id == tenant_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    _seed_default_web_description_templates(db, tenant_id=tenant_id)
+    rows = (
+        db.query(models.WebCatalogDescriptionTemplate)
+        .filter(models.WebCatalogDescriptionTemplate.tenant_id == tenant_id)
+        .all()
+    )
+    if actor_user_id is not None:
+        now = datetime.utcnow()
+        for row in rows:
+            row.updated_by_user_id = actor_user_id
+            row.updated_at = now
+            db.add(row)
+        db.commit()
+    return list_comercio_web_description_templates(db, tenant_id=tenant_id)
 
 
 def _normalize_discount_code(value: str) -> str:

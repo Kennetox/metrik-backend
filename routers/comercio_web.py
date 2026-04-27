@@ -392,6 +392,110 @@ def delete_comercio_web_catalog_category(
 
 
 @router.get(
+    "/catalog/description-templates",
+    response_model=list[schemas.ComercioWebDescriptionTemplateRead],
+)
+def list_comercio_web_description_templates(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_description_templates(
+        db,
+        tenant_id=tenant_id,
+    )
+
+
+@router.post(
+    "/catalog/description-templates",
+    response_model=schemas.ComercioWebDescriptionTemplateRead,
+)
+def create_comercio_web_description_template(
+    payload: schemas.ComercioWebDescriptionTemplateCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_comercio_web_description_template(
+            db,
+            tenant_id=tenant_id,
+            payload=payload,
+            actor_user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put(
+    "/catalog/description-templates/{template_key}",
+    response_model=schemas.ComercioWebDescriptionTemplateRead,
+)
+def update_comercio_web_description_template(
+    template_key: str,
+    payload: schemas.ComercioWebDescriptionTemplateUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_description_template(
+            db,
+            tenant_id=tenant_id,
+            template_key=template_key,
+            payload=payload,
+            actor_user_id=current_user.id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.delete("/catalog/description-templates/{template_key}")
+def delete_comercio_web_description_template(
+    template_key: str,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        crud.delete_comercio_web_description_template(
+            db,
+            tenant_id=tenant_id,
+            template_key=template_key,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return {"ok": True}
+
+
+@router.post(
+    "/catalog/description-templates/reset",
+    response_model=list[schemas.ComercioWebDescriptionTemplateRead],
+)
+def reset_comercio_web_description_templates(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.reset_comercio_web_description_templates(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=current_user.id,
+    )
+
+
+@router.get(
     "/catalog/discount-codes",
     response_model=schemas.ComercioWebDiscountCodePage,
 )

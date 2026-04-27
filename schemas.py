@@ -318,6 +318,93 @@ class ComercioWebCatalogCategoryRead(ComercioWebCatalogCategoryBase):
         from_attributes = True
 
 
+class ComercioWebDescriptionTemplateBase(BaseModel):
+    template_key: SlugStr
+    label: NonEmptyStr
+    assigned_category_key: Optional[SlugStr] = None
+    keywords: List[str] = Field(default_factory=list)
+    paragraph1: str = ""
+    paragraph2: str = ""
+    paragraph3: str = ""
+    closing: str = ""
+    sort_order: int = 0
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _sanitize_keywords(cls, value: Any):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",")]
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append(normalized)
+        return clean
+
+
+class ComercioWebDescriptionTemplateCreate(ComercioWebDescriptionTemplateBase):
+    pass
+
+
+class ComercioWebDescriptionTemplateUpdate(BaseModel):
+    template_key: Optional[SlugStr] = None
+    label: Optional[NonEmptyStr] = None
+    assigned_category_key: Optional[SlugStr] = None
+    keywords: Optional[List[str]] = None
+    paragraph1: Optional[str] = None
+    paragraph2: Optional[str] = None
+    paragraph3: Optional[str] = None
+    closing: Optional[str] = None
+    sort_order: Optional[int] = None
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _sanitize_keywords(cls, value: Any):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",")]
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append(normalized)
+        return clean
+
+
+class ComercioWebDescriptionTemplateRead(ComercioWebDescriptionTemplateBase):
+    id: int
+    created_by_user_id: Optional[int] = None
+    updated_by_user_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ProductAuditLogRead(BaseModel):
     id: int
     product_id: int
