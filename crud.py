@@ -2806,7 +2806,25 @@ def delete_comercio_web_catalog_category(
 
 
 def _normalize_web_description_template_key(value: Optional[str]) -> str:
-    return _normalize_web_catalog_category_key(value)
+    normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9_-]+", "_", ascii_text)
+    slug = re.sub(r"_+", "_", slug)
+    slug = re.sub(r"-+", "-", slug)
+    return slug.strip("_-")[:64]
+
+
+def _web_description_template_key_candidates(value: Optional[str]) -> list[str]:
+    normalized = _normalize_web_description_template_key(value)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    hyphen_variant = normalized.replace("_", "-")
+    underscore_variant = normalized.replace("-", "_")
+    for item in [hyphen_variant, underscore_variant]:
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
 
 
 def _parse_web_description_template_keywords(raw: Optional[str]) -> list[str]:
@@ -2886,7 +2904,7 @@ def _seed_default_web_description_templates(
     rows = [
         models.WebCatalogDescriptionTemplate(
             tenant_id=tenant_id,
-            template_key=item["template_key"],
+            template_key=_normalize_web_description_template_key(item["template_key"]),
             label=item["label"],
             assigned_category_key=_normalize_web_catalog_category_key(item.get("assigned_category_key")) or None,
             keywords_json=_serialize_web_description_template_keywords(item.get("keywords", [])),
@@ -2933,11 +2951,12 @@ def create_comercio_web_description_template(
     template_key = _normalize_web_description_template_key(payload.template_key)
     if not template_key:
         raise ValueError("La clave interna de la plantilla es inválida")
+    key_candidates = _web_description_template_key_candidates(template_key)
     duplicate = (
         db.query(models.WebCatalogDescriptionTemplate.id)
         .filter(
             models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
-            models.WebCatalogDescriptionTemplate.template_key == template_key,
+            models.WebCatalogDescriptionTemplate.template_key.in_(key_candidates),
         )
         .first()
     )
@@ -2974,12 +2993,12 @@ def update_comercio_web_description_template(
     payload: schemas.ComercioWebDescriptionTemplateUpdate,
     actor_user_id: Optional[int] = None,
 ) -> schemas.ComercioWebDescriptionTemplateRead:
-    normalized_template_key = _normalize_web_description_template_key(template_key)
+    key_candidates = _web_description_template_key_candidates(template_key)
     row = (
         db.query(models.WebCatalogDescriptionTemplate)
         .filter(
             models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
-            models.WebCatalogDescriptionTemplate.template_key == normalized_template_key,
+            models.WebCatalogDescriptionTemplate.template_key.in_(key_candidates),
         )
         .first()
     )
@@ -2990,11 +3009,12 @@ def update_comercio_web_description_template(
         next_template_key = _normalize_web_description_template_key(data.get("template_key"))
         if not next_template_key:
             raise ValueError("La clave interna de la plantilla es inválida")
+        next_key_candidates = _web_description_template_key_candidates(next_template_key)
         duplicate = (
             db.query(models.WebCatalogDescriptionTemplate.id)
             .filter(
                 models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
-                models.WebCatalogDescriptionTemplate.template_key == next_template_key,
+                models.WebCatalogDescriptionTemplate.template_key.in_(next_key_candidates),
                 models.WebCatalogDescriptionTemplate.id != row.id,
             )
             .first()
@@ -3032,12 +3052,12 @@ def delete_comercio_web_description_template(
     tenant_id: Optional[int] = None,
     template_key: str,
 ) -> None:
-    normalized_template_key = _normalize_web_description_template_key(template_key)
+    key_candidates = _web_description_template_key_candidates(template_key)
     row = (
         db.query(models.WebCatalogDescriptionTemplate)
         .filter(
             models.WebCatalogDescriptionTemplate.tenant_id == tenant_id,
-            models.WebCatalogDescriptionTemplate.template_key == normalized_template_key,
+            models.WebCatalogDescriptionTemplate.template_key.in_(key_candidates),
         )
         .first()
     )
