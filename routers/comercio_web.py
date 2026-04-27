@@ -1,6 +1,10 @@
+from datetime import datetime
+import io
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
 from sqlalchemy.orm import Session
 
 import crud
@@ -123,6 +127,154 @@ def list_comercio_web_publications(
         active_only=active_only,
         skip=skip,
         limit=limit,
+    )
+
+
+@router.get("/catalog/publications/export/xlsx")
+def export_comercio_web_publications_xlsx(
+    q: Optional[str] = Query(default=None),
+    field: str = Query(default="all"),
+    status_filter: str = Query(default="all"),
+    featured_filter: str = Query(default="all"),
+    badge_filter: str = Query(default="all"),
+    category_key: Optional[str] = Query(default=None),
+    subcategory_key: Optional[str] = Query(default=None),
+    order: str = Query(default="newest"),
+    active_only: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    page = crud.list_comercio_web_publications_page(
+        db,
+        tenant_id=tenant_id,
+        q=q,
+        field=field,
+        status_filter=status_filter,
+        featured_filter=featured_filter,
+        badge_filter=badge_filter,
+        category_key=category_key,
+        subcategory_key=subcategory_key,
+        order=order,
+        active_only=active_only,
+        skip=0,
+        limit=200000,
+    )
+
+    categories = crud.list_comercio_web_catalog_categories(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=True,
+    )
+    category_name_by_key = {
+        (row.key or "").strip().lower(): row.name for row in categories if row.key
+    }
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Publicaciones"
+    headers = [
+        "ID",
+        "Nombre web",
+        "Nombre base",
+        "Slug web",
+        "SKU",
+        "Código barras",
+        "Marca",
+        "Grupo",
+        "Proveedor",
+        "Categoría web key",
+        "Categoría web nombre",
+        "Precio base",
+        "Precio web calculado",
+        "Precio comparar",
+        "Fuente precio web",
+        "Valor precio web",
+        "Modo precio web",
+        "Estado web",
+        "Publicado web",
+        "Activo inventario",
+        "Destacado",
+        "Badge",
+        "Orden web",
+        "Visible sin stock",
+        "Servicio",
+        "Unidad",
+        "Imagen principal",
+        "Imagen miniatura",
+        "Galería",
+        "Descripción corta",
+        "Descripción larga",
+        "Mensaje WhatsApp",
+        "Garantía",
+        "Publicado en",
+        "Actualizado en",
+    ]
+    sheet.append(headers)
+
+    for product in page.get("items", []):
+        category_key_value = (product.web_category_key or "").strip()
+        category_name = category_name_by_key.get(category_key_value.lower(), category_key_value)
+        gallery_value = product.web_gallery_urls
+        if isinstance(gallery_value, list):
+            gallery_text = " | ".join(str(item).strip() for item in gallery_value if str(item).strip())
+        else:
+            gallery_text = str(gallery_value or "").strip()
+        sale_price = float(crud.resolve_web_product_sale_price(product))
+        compare_price = (
+            float(product.web_compare_price)
+            if product.web_compare_price is not None
+            else None
+        )
+        sheet.append(
+            [
+                int(product.id),
+                (product.web_name or "").strip(),
+                (product.name or "").strip(),
+                (product.web_slug or "").strip(),
+                (product.sku or "").strip(),
+                (product.barcode or "").strip(),
+                (product.brand or "").strip(),
+                (product.group_name or "").strip(),
+                (product.supplier or "").strip(),
+                category_key_value,
+                category_name or "",
+                float(product.price or 0),
+                sale_price,
+                compare_price,
+                (product.web_price_source or "base").strip(),
+                float(product.web_price_value) if product.web_price_value is not None else None,
+                (product.web_price_mode or "visible").strip(),
+                "publicado" if bool(product.web_published) else "pausado",
+                "si" if bool(product.web_published) else "no",
+                "si" if bool(product.active) else "no",
+                "si" if bool(product.web_featured) else "no",
+                (product.web_badge_text or "").strip(),
+                int(product.web_sort_order or 0),
+                "si" if bool(product.web_visible_when_out_of_stock) else "no",
+                "si" if bool(product.service) else "no",
+                (product.unit or "").strip(),
+                (product.image_url or "").strip(),
+                (product.image_thumb_url or "").strip(),
+                gallery_text,
+                (product.web_short_description or "").strip(),
+                (product.web_long_description or "").strip(),
+                (product.web_whatsapp_message or "").strip(),
+                (product.web_warranty_text or "").strip(),
+                product.web_published_at.isoformat() if product.web_published_at else "",
+                product.updated_at.isoformat() if product.updated_at else "",
+            ]
+        )
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    filename = f"catalogo_web_publicaciones_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
