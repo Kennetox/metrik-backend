@@ -130,7 +130,60 @@ def _extract_personalization_service_skus_from_checkout_context(
     return collected
 
 
+def _extract_personalization_service_ids_from_checkout_context(
+    checkout_context: Optional[dict[str, Any]],
+) -> set[int]:
+    if not isinstance(checkout_context, dict):
+        return set()
+    personalization = checkout_context.get("personalization")
+    if not isinstance(personalization, dict):
+        return set()
+
+    collected: set[int] = set()
+
+    binding = personalization.get("binding")
+    if isinstance(binding, dict):
+        raw_id = str(binding.get("personalization_id") or "").strip()
+        if raw_id.isdigit():
+            collected.add(int(raw_id))
+
+    entries = personalization.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_binding = entry.get("binding")
+            if not isinstance(entry_binding, dict):
+                continue
+            raw_id = str(entry_binding.get("personalization_id") or "").strip()
+            if raw_id.isdigit():
+                collected.add(int(raw_id))
+
+    return collected
+
+
+def _extract_personalization_service_ids_and_skus_from_bindings(
+    db: Session,
+    tenant_id: int,
+) -> tuple[set[int], set[str]]:
+    service_ids: set[int] = set()
+    service_skus: set[str] = set()
+    bindings = crud.get_public_web_personalization_bindings(db, tenant_id=tenant_id)
+    for row in bindings.values():
+        if not isinstance(row, dict):
+            continue
+        raw_id = str(row.get("service_id") or "").strip()
+        if raw_id.isdigit():
+            service_ids.add(int(raw_id))
+        sku = str(row.get("service_sku") or "").strip()
+        if sku:
+            service_skus.add(sku)
+    return service_ids, service_skus
+
+
 def _is_hidden_personalization_service_allowed_for_checkout(
+    db: Session,
+    tenant_id: int,
     product: Optional[models.Product],
     checkout_context: Optional[dict[str, Any]],
 ) -> bool:
@@ -145,12 +198,22 @@ def _is_hidden_personalization_service_allowed_for_checkout(
     personalization = checkout_context.get("personalization")
     if not isinstance(personalization, dict):
         return False
-    sku = (product.sku or "").strip()
-    if not sku:
-        return False
     allowed_skus = _get_hidden_personalization_service_skus()
     allowed_skus.update(_extract_personalization_service_skus_from_checkout_context(checkout_context))
-    return sku in allowed_skus
+
+    allowed_ids, binding_skus = _extract_personalization_service_ids_and_skus_from_bindings(
+        db,
+        tenant_id=tenant_id,
+    )
+    allowed_skus.update(binding_skus)
+    allowed_ids.update(_extract_personalization_service_ids_from_checkout_context(checkout_context))
+
+    sku = (product.sku or "").strip()
+    if sku and sku in allowed_skus:
+        return True
+    if product.id in allowed_ids:
+        return True
+    return False
 
 
 def _get_mercadopago_env_label() -> str:
@@ -1522,6 +1585,8 @@ def _create_guest_order(
                 detail=f"Producto {item_input.product_id} no disponible para checkout web.",
             )
         if not product.web_published and not _is_hidden_personalization_service_allowed_for_checkout(
+            db,
+            tenant_id,
             product,
             payload.checkout_context if isinstance(payload.checkout_context, dict) else None,
         ):
