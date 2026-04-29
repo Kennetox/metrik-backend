@@ -79,3 +79,31 @@ def get_web_personalization_bindings(
 ):
     tenant_id = crud.resolve_public_catalog_tenant_id(db)
     return crud.get_public_web_personalization_bindings(db, tenant_id=tenant_id)
+
+
+@router.get(
+    "/personalization/service-by-sku",
+    response_model=schemas.ProductRead,
+)
+def get_web_personalization_service_by_sku(
+    sku: str = Query(min_length=1),
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    normalized_sku = sku.strip()
+    bindings = crud.get_public_web_personalization_bindings(db, tenant_id=tenant_id)
+    allowed_service_skus = {
+        str(row.get("service_sku") or "").strip()
+        for row in (bindings or {}).values()
+        if isinstance(row, dict)
+    }
+    if not normalized_sku or normalized_sku not in allowed_service_skus:
+        raise HTTPException(status_code=404, detail="Servicio de personalización no disponible")
+
+    product = crud.get_product_by_sku(db, normalized_sku, tenant_id=tenant_id)
+    if not product or not bool(product.active):
+        raise HTTPException(status_code=404, detail="Servicio de personalización no encontrado")
+    if not bool(product.service):
+        raise HTTPException(status_code=400, detail="El SKU vinculado no corresponde a un servicio")
+
+    return crud.get_product(db, product.id, tenant_id=tenant_id)
