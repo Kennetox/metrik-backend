@@ -98,6 +98,38 @@ def _get_hidden_personalization_service_skus() -> set[str]:
     return {token.strip() for token in raw.split(",") if token.strip()}
 
 
+def _extract_personalization_service_skus_from_checkout_context(
+    checkout_context: Optional[dict[str, Any]],
+) -> set[str]:
+    if not isinstance(checkout_context, dict):
+        return set()
+    personalization = checkout_context.get("personalization")
+    if not isinstance(personalization, dict):
+        return set()
+
+    collected: set[str] = set()
+
+    binding = personalization.get("binding")
+    if isinstance(binding, dict):
+        sku = str(binding.get("personalization_sku") or "").strip()
+        if sku:
+            collected.add(sku)
+
+    entries = personalization.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_binding = entry.get("binding")
+            if not isinstance(entry_binding, dict):
+                continue
+            sku = str(entry_binding.get("personalization_sku") or "").strip()
+            if sku:
+                collected.add(sku)
+
+    return collected
+
+
 def _is_hidden_personalization_service_allowed_for_checkout(
     product: Optional[models.Product],
     checkout_context: Optional[dict[str, Any]],
@@ -116,7 +148,9 @@ def _is_hidden_personalization_service_allowed_for_checkout(
     sku = (product.sku or "").strip()
     if not sku:
         return False
-    return sku in _get_hidden_personalization_service_skus()
+    allowed_skus = _get_hidden_personalization_service_skus()
+    allowed_skus.update(_extract_personalization_service_skus_from_checkout_context(checkout_context))
+    return sku in allowed_skus
 
 
 def _get_mercadopago_env_label() -> str:
