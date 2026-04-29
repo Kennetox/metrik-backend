@@ -1051,6 +1051,33 @@ class WebCatalogDescriptionTemplate(Base):
     updater = relationship("PosUser", foreign_keys=[updated_by_user_id])
 
 
+class WebCatalogHomeSlider(Base):
+    __tablename__ = "web_catalog_home_sliders"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slot", name="web_catalog_home_sliders_tenant_slot_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    slot = Column(Integer, nullable=False, index=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    image_url = Column(String(512), nullable=True)
+    alt_text = Column(String(180), nullable=True)
+    cta_label = Column(String(90), nullable=True)
+    cta_x_percent = Column(Float, nullable=False, default=50)
+    cta_y_percent = Column(Float, nullable=False, default=80)
+    link_type = Column(String(24), nullable=False, default="catalogo")
+    link_value = Column(String(255), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
 class WebOrder(Base):
     __tablename__ = "web_orders"
     __table_args__ = (

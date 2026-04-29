@@ -29,6 +29,15 @@ def list_web_catalog_categories(
     return schemas.WebCatalogCategoryList(items=items)
 
 
+@router.get("/home-sliders", response_model=schemas.WebCatalogHomeSliderList)
+def list_web_catalog_home_sliders(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    items = crud.list_public_web_home_sliders(db, tenant_id=tenant_id)
+    return schemas.WebCatalogHomeSliderList(items=items)
+
+
 @router.get("/products", response_model=schemas.WebCatalogProductList)
 def list_web_catalog_products(
     q: str | None = Query(default=None),

@@ -392,6 +392,45 @@ def delete_comercio_web_catalog_category(
 
 
 @router.get(
+    "/home-sliders",
+    response_model=list[schemas.ComercioWebHomeSliderRead],
+)
+def list_comercio_web_home_sliders(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_home_sliders(db, tenant_id=tenant_id)
+
+
+@router.put(
+    "/home-sliders/{slot}",
+    response_model=schemas.ComercioWebHomeSliderRead,
+)
+def update_comercio_web_home_slider(
+    slot: int,
+    payload: schemas.ComercioWebHomeSliderUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_home_slider(
+            db,
+            tenant_id=tenant_id,
+            slot=slot,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrado" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.get(
     "/catalog/description-templates",
     response_model=list[schemas.ComercioWebDescriptionTemplateRead],
 )

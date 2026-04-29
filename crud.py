@@ -2500,6 +2500,247 @@ def list_comercio_web_publications_page(
     }
 
 
+def _seed_comercio_web_home_sliders(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+) -> None:
+    existing = (
+        db.query(func.count(models.WebCatalogHomeSlider.id))
+        .filter(models.WebCatalogHomeSlider.tenant_id == tenant_id)
+        .scalar()
+    )
+    if int(existing or 0) > 0:
+        return
+    now = datetime.utcnow()
+    rows: list[models.WebCatalogHomeSlider] = []
+    for slot in range(1, 6):
+        rows.append(
+            models.WebCatalogHomeSlider(
+                tenant_id=tenant_id,
+                slot=slot,
+                enabled=False,
+                image_url=None,
+                alt_text=None,
+                cta_label=None,
+                cta_x_percent=50,
+                cta_y_percent=80,
+                link_type="catalogo",
+                link_value=None,
+                sort_order=slot,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    db.add_all(rows)
+    db.commit()
+
+
+def _normalize_slider_link_type(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"sin_link", "catalogo", "categoria", "subcategoria", "personalizacion", "contacto", "url_interna"}:
+        return normalized
+    return "catalogo"
+
+
+def _normalize_slider_text(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip()
+    return normalized or None
+
+
+def _validate_home_slider_link(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    link_type: str,
+    link_value: Optional[str],
+) -> str | None:
+    clean_value = _normalize_slider_text(link_value)
+    if link_type == "sin_link":
+        return None
+    if link_type == "catalogo":
+        return None
+    if link_type == "categoria":
+        if not clean_value:
+            raise ValueError("Debes elegir una categoría para este slider.")
+        category_map = _get_tenant_web_catalog_category_map(
+            db,
+            tenant_id=tenant_id,
+            include_inactive=False,
+            ensure_seeded=True,
+        )
+        if clean_value not in category_map:
+            raise ValueError("La categoría configurada para este slider no existe o está inactiva.")
+        return clean_value
+    if link_type == "subcategoria":
+        if not clean_value:
+            raise ValueError("Debes elegir categoría y subcategoría para este slider.")
+        if "::" not in clean_value:
+            raise ValueError("La subcategoría debe incluir categoría padre y subcategoría.")
+        parent_key, child_key = [item.strip() for item in clean_value.split("::", 1)]
+        if not parent_key or not child_key:
+            raise ValueError("La subcategoría debe incluir categoría padre y subcategoría.")
+        category_map = _get_tenant_web_catalog_category_map(
+            db,
+            tenant_id=tenant_id,
+            include_inactive=False,
+            ensure_seeded=True,
+        )
+        parent_row = category_map.get(parent_key)
+        child_row = category_map.get(child_key)
+        if not parent_row or not child_row:
+            raise ValueError("La categoría/subcategoría configurada no existe o está inactiva.")
+        child_parent = _normalize_web_catalog_category_key(child_row.parent_key)
+        if child_parent != parent_key:
+            raise ValueError("La subcategoría no pertenece a la categoría seleccionada.")
+        return f"{parent_key}::{child_key}"
+    if link_type == "personalizacion":
+        return None
+    if link_type == "contacto":
+        return clean_value or "inicio"
+    if link_type == "url_interna":
+        if not clean_value:
+            raise ValueError("Debes escribir una ruta interna para este slider.")
+        if not clean_value.startswith("/") or clean_value.startswith("//"):
+            raise ValueError("La ruta interna debe iniciar con `/`.")
+        if "://" in clean_value:
+            raise ValueError("Solo se permiten rutas internas del sitio.")
+        return clean_value
+    return None
+
+
+def list_comercio_web_home_sliders(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> list[schemas.ComercioWebHomeSliderRead]:
+    _seed_comercio_web_home_sliders(db, tenant_id=tenant_id)
+    rows = (
+        db.query(models.WebCatalogHomeSlider)
+        .filter(models.WebCatalogHomeSlider.tenant_id == tenant_id)
+        .order_by(models.WebCatalogHomeSlider.slot.asc(), models.WebCatalogHomeSlider.id.asc())
+        .all()
+    )
+    return [
+        schemas.ComercioWebHomeSliderRead(
+            id=row.id,
+            slot=int(row.slot or 0),
+            enabled=bool(row.enabled),
+            image_url=row.image_url,
+            alt_text=row.alt_text,
+            cta_label=row.cta_label,
+            cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
+            cta_y_percent=float(row.cta_y_percent if row.cta_y_percent is not None else 80),
+            link_type=_normalize_slider_link_type(row.link_type),
+            link_value=row.link_value,
+            sort_order=int(row.sort_order or 0),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row in rows
+    ]
+
+
+def update_comercio_web_home_slider(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    slot: int,
+    payload: schemas.ComercioWebHomeSliderUpdate,
+) -> schemas.ComercioWebHomeSliderRead:
+    if slot < 1 or slot > 5:
+        raise ValueError("Slot inválido. Debe estar entre 1 y 5.")
+    _seed_comercio_web_home_sliders(db, tenant_id=tenant_id)
+    row = (
+        db.query(models.WebCatalogHomeSlider)
+        .filter(
+            models.WebCatalogHomeSlider.tenant_id == tenant_id,
+            models.WebCatalogHomeSlider.slot == slot,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Slider no encontrado")
+
+    data = payload.model_dump(exclude_unset=True)
+    next_link_type = _normalize_slider_link_type(data.get("link_type", row.link_type))
+    next_link_value = _validate_home_slider_link(
+        db,
+        tenant_id=tenant_id,
+        link_type=next_link_type,
+        link_value=data.get("link_value", row.link_value),
+    )
+    next_image_url = _normalize_slider_text(data.get("image_url", row.image_url))
+    next_enabled = bool(data.get("enabled", row.enabled))
+    if next_enabled and not next_image_url:
+        raise ValueError("No puedes activar un slider sin imagen.")
+
+    if "enabled" in data:
+        row.enabled = next_enabled
+    if "image_url" in data:
+        row.image_url = next_image_url
+    if "alt_text" in data:
+        row.alt_text = _normalize_slider_text(data.get("alt_text"))
+    if "cta_label" in data:
+        row.cta_label = _normalize_slider_text(data.get("cta_label"))
+    if "cta_x_percent" in data:
+        row.cta_x_percent = max(0.0, min(100.0, float(data.get("cta_x_percent") or 0)))
+    if "cta_y_percent" in data:
+        row.cta_y_percent = max(0.0, min(100.0, float(data.get("cta_y_percent") or 0)))
+    row.link_type = next_link_type
+    row.link_value = next_link_value
+    if "sort_order" in data:
+        row.sort_order = int(data.get("sort_order") or 0)
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    return schemas.ComercioWebHomeSliderRead(
+        id=row.id,
+        slot=int(row.slot or 0),
+        enabled=bool(row.enabled),
+        image_url=row.image_url,
+        alt_text=row.alt_text,
+        cta_label=row.cta_label,
+        cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
+        cta_y_percent=float(row.cta_y_percent if row.cta_y_percent is not None else 80),
+        link_type=_normalize_slider_link_type(row.link_type),
+        link_value=row.link_value,
+        sort_order=int(row.sort_order or 0),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def list_public_web_home_sliders(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> list[schemas.WebCatalogHomeSlider]:
+    items = list_comercio_web_home_sliders(db, tenant_id=tenant_id)
+    filtered = [
+        item
+        for item in items
+        if item.enabled and bool((item.image_url or "").strip())
+    ]
+    filtered.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
+    return [
+        schemas.WebCatalogHomeSlider(
+            slot=item.slot,
+            image_url=item.image_url,
+            alt_text=item.alt_text,
+            cta_label=item.cta_label,
+            cta_x_percent=item.cta_x_percent,
+            cta_y_percent=item.cta_y_percent,
+            link_type=item.link_type,
+            link_value=item.link_value,
+            sort_order=item.sort_order,
+        )
+        for item in filtered[:5]
+    ]
+
+
 def list_comercio_web_catalog_categories(
     db: Session,
     *,

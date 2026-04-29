@@ -318,6 +318,51 @@ class ComercioWebCatalogCategoryRead(ComercioWebCatalogCategoryBase):
         from_attributes = True
 
 
+ComercioWebHomeSliderLinkType = Literal[
+    "sin_link",
+    "catalogo",
+    "categoria",
+    "subcategoria",
+    "personalizacion",
+    "contacto",
+    "url_interna",
+]
+
+
+class ComercioWebHomeSliderBase(BaseModel):
+    slot: int = Field(ge=1, le=5)
+    enabled: bool = False
+    image_url: Optional[str] = None
+    alt_text: Optional[str] = Field(default=None, max_length=180)
+    cta_label: Optional[str] = Field(default=None, max_length=90)
+    cta_x_percent: float = Field(default=50, ge=0, le=100)
+    cta_y_percent: float = Field(default=80, ge=0, le=100)
+    link_type: ComercioWebHomeSliderLinkType = "catalogo"
+    link_value: Optional[str] = Field(default=None, max_length=255)
+    sort_order: int = 0
+
+
+class ComercioWebHomeSliderUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    image_url: Optional[str] = None
+    alt_text: Optional[str] = Field(default=None, max_length=180)
+    cta_label: Optional[str] = Field(default=None, max_length=90)
+    cta_x_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    cta_y_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    link_type: Optional[ComercioWebHomeSliderLinkType] = None
+    link_value: Optional[str] = Field(default=None, max_length=255)
+    sort_order: Optional[int] = None
+
+
+class ComercioWebHomeSliderRead(ComercioWebHomeSliderBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ComercioWebDescriptionTemplateBase(BaseModel):
     template_key: SlugStr
     label: NonEmptyStr
@@ -447,6 +492,22 @@ class WebCatalogCategory(BaseModel):
 
 class WebCatalogCategoryList(BaseModel):
     items: List[WebCatalogCategory]
+
+
+class WebCatalogHomeSlider(BaseModel):
+    slot: int
+    image_url: Optional[str] = None
+    alt_text: Optional[str] = None
+    cta_label: Optional[str] = None
+    cta_x_percent: float = 50
+    cta_y_percent: float = 80
+    link_type: ComercioWebHomeSliderLinkType = "catalogo"
+    link_value: Optional[str] = None
+    sort_order: int = 0
+
+
+class WebCatalogHomeSliderList(BaseModel):
+    items: List[WebCatalogHomeSlider]
 
 
 class WebCatalogProductCard(BaseModel):

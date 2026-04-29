@@ -249,6 +249,124 @@ def _ensure_web_description_template_schema(connection, backend: str) -> None:
     )
 
 
+def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
+    table = "web_catalog_home_sliders"
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS web_catalog_home_sliders (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER REFERENCES tenants(id),
+                    slot INTEGER NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    image_url VARCHAR(512),
+                    alt_text VARCHAR(180),
+                    cta_label VARCHAR(90),
+                    cta_x_percent DOUBLE PRECISION NOT NULL DEFAULT 50,
+                    cta_y_percent DOUBLE PRECISION NOT NULL DEFAULT 80,
+                    link_type VARCHAR(24) NOT NULL DEFAULT 'catalogo',
+                    link_value VARCHAR(255),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "slot", "INTEGER")
+        _ensure_column_postgres(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT FALSE")
+        _ensure_column_postgres(connection, table, "image_url", "VARCHAR(512)")
+        _ensure_column_postgres(connection, table, "alt_text", "VARCHAR(180)")
+        _ensure_column_postgres(connection, table, "cta_label", "VARCHAR(90)")
+        _ensure_column_postgres(connection, table, "cta_x_percent", "DOUBLE PRECISION NOT NULL DEFAULT 50")
+        _ensure_column_postgres(connection, table, "cta_y_percent", "DOUBLE PRECISION NOT NULL DEFAULT 80")
+        _ensure_column_postgres(connection, table, "link_type", "VARCHAR(24) NOT NULL DEFAULT 'catalogo'")
+        _ensure_column_postgres(connection, table, "link_value", "VARCHAR(255)")
+        _ensure_column_postgres(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "created_at", "TIMESTAMP")
+        _ensure_column_postgres(connection, table, "updated_at", "TIMESTAMP")
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_home_sliders_tenant_slot_key
+                ON web_catalog_home_sliders (tenant_id, slot)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_tenant_id "
+                "ON web_catalog_home_sliders (tenant_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_slot "
+                "ON web_catalog_home_sliders (slot)"
+            )
+        )
+        return
+
+    if not _table_exists(connection, table):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE web_catalog_home_sliders (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
+                    slot INTEGER NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT 0,
+                    image_url TEXT,
+                    alt_text TEXT,
+                    cta_label TEXT,
+                    cta_x_percent FLOAT NOT NULL DEFAULT 50,
+                    cta_y_percent FLOAT NOT NULL DEFAULT 80,
+                    link_type TEXT NOT NULL DEFAULT 'catalogo',
+                    link_value TEXT,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    _ensure_column(connection, table, "tenant_id", "INTEGER")
+    _ensure_column(connection, table, "slot", "INTEGER")
+    _ensure_column(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "image_url", "TEXT")
+    _ensure_column(connection, table, "alt_text", "TEXT")
+    _ensure_column(connection, table, "cta_label", "TEXT")
+    _ensure_column(connection, table, "cta_x_percent", "FLOAT NOT NULL DEFAULT 50")
+    _ensure_column(connection, table, "cta_y_percent", "FLOAT NOT NULL DEFAULT 80")
+    _ensure_column(connection, table, "link_type", "TEXT NOT NULL DEFAULT 'catalogo'")
+    _ensure_column(connection, table, "link_value", "TEXT")
+    _ensure_column(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "created_at", "DATETIME")
+    _ensure_column(connection, table, "updated_at", "DATETIME")
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_home_sliders_tenant_slot_key
+            ON web_catalog_home_sliders (tenant_id, slot)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_tenant_id "
+            "ON web_catalog_home_sliders (tenant_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_slot "
+            "ON web_catalog_home_sliders (slot)"
+        )
+    )
+
+
 def _table_exists_postgres(connection, table: str) -> bool:
     row = connection.execute(
         text(
@@ -1381,6 +1499,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_cart_coupon_schema(connection, backend="postgresql")
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
                 _ensure_web_description_template_schema(connection, backend="postgresql")
+                _ensure_web_catalog_home_slider_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -2486,6 +2605,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_cart_coupon_schema(connection, backend="sqlite")
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
                 _ensure_web_description_template_schema(connection, backend="sqlite")
+                _ensure_web_catalog_home_slider_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:
