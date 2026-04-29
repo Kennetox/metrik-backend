@@ -823,6 +823,7 @@ class PosSettings(Base):
     role_permissions = Column(JSON, nullable=True)
     web_pos_send_closure_email = Column(Boolean, nullable=True, default=True)
     station_closure_email_overrides = Column(JSON, nullable=True)
+    web_personalization_bindings = Column(JSON, nullable=True)
 
 
 class MonthlyReportDispatch(Base):

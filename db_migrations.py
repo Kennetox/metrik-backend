@@ -1070,6 +1070,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column_postgres(
                     connection,
+                    "pos_settings",
+                    "web_personalization_bindings",
+                    "JSONB DEFAULT '{}'::jsonb",
+                )
+                _ensure_column_postgres(
+                    connection,
                     "pos_stations",
                     "bound_device_id",
                     "TEXT",
@@ -2009,6 +2015,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                         connection,
                         "pos_settings",
                         "station_closure_email_overrides",
+                        "TEXT DEFAULT '{}'",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "web_personalization_bindings",
                         "TEXT DEFAULT '{}'",
                     )
             if not _table_exists(connection, "pos_closures"):

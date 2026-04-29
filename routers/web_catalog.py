@@ -68,3 +68,14 @@ def get_web_catalog_product(
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return product
+
+
+@router.get(
+    "/personalization/bindings",
+    response_model=schemas.WebPersonalizationBindings,
+)
+def get_web_personalization_bindings(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    return crud.get_public_web_personalization_bindings(db, tenant_id=tenant_id)

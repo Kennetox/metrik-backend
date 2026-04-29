@@ -908,6 +908,52 @@ def get_tenant_company_settings(
     )
 
 
+_DEFAULT_WEB_PERSONALIZATION_BINDINGS: dict[str, dict[str, str]] = {
+    "campana_clasica_mediana": {},
+    "campana_clasica_grande": {},
+    "campana_cromada_mediana": {},
+    "campana_cromada_grande": {},
+    "guiro_mediano": {},
+    "guiro_grande": {},
+    "maraca_par": {},
+}
+
+
+def _normalize_web_personalization_bindings(value: Any) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {
+        key: dict(default_value) for key, default_value in _DEFAULT_WEB_PERSONALIZATION_BINDINGS.items()
+    }
+    if not isinstance(value, dict):
+        return result
+    for variant_key in result.keys():
+        row = value.get(variant_key)
+        if not isinstance(row, dict):
+            continue
+        normalized: dict[str, str] = {}
+        for field in (
+            "product_id",
+            "product_sku",
+            "product_name",
+            "product_slug",
+            "service_id",
+            "service_sku",
+            "service_name",
+        ):
+            raw = row.get(field)
+            normalized[field] = str(raw).strip() if raw is not None else ""
+        result[variant_key] = normalized
+    return result
+
+
+def get_public_web_personalization_bindings(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> dict[str, dict[str, str]]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
+    return _normalize_web_personalization_bindings(settings.web_personalization_bindings)
+
+
 def build_platform_tenant_read(
     db: Session,
     tenant: models.Tenant,
@@ -6360,6 +6406,9 @@ def get_pos_settings(
         settings.web_pos_send_closure_email = True
     settings.station_closure_email_overrides = (
         settings.station_closure_email_overrides or {}
+    )
+    settings.web_personalization_bindings = (
+        settings.web_personalization_bindings or {}
     )
     normalized_permissions = permissions.ensure_permissions(settings.role_permissions)
     if settings.role_permissions != normalized_permissions:

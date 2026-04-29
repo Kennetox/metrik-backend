@@ -1285,6 +1285,40 @@ class NotificationSettings(BaseModel):
     monthly_report_email: bool = False
 
 
+class WebPersonalizationBindingEntry(BaseModel):
+    product_id: Optional[str] = None
+    product_sku: Optional[str] = None
+    product_name: Optional[str] = None
+    product_slug: Optional[str] = None
+    service_id: Optional[str] = None
+    service_sku: Optional[str] = None
+    service_name: Optional[str] = None
+
+
+class WebPersonalizationBindings(BaseModel):
+    campana_clasica_mediana: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    campana_clasica_grande: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    campana_cromada_mediana: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    campana_cromada_grande: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    guiro_mediano: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    guiro_grande: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+    maraca_par: WebPersonalizationBindingEntry = Field(
+        default_factory=WebPersonalizationBindingEntry
+    )
+
+
 class PosSettingsBase(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     theme_mode: Literal["dark", "midnight", "light"] = "light"
@@ -1324,6 +1358,9 @@ class PosSettingsBase(BaseModel):
     web_pos_send_closure_email: bool = True
     station_closure_email_overrides: Dict[str, bool] = Field(
         default_factory=dict
+    )
+    web_personalization_bindings: WebPersonalizationBindings = Field(
+        default_factory=WebPersonalizationBindings
     )
 
     @field_validator(
