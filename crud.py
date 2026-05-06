@@ -4701,6 +4701,8 @@ def get_web_catalog_best_sellers(
             models.SaleItem.product_id.label("product_id"),
             func.sum(func.coalesce(models.SaleItem.quantity, 0)).label("qty_sold"),
             func.sum(func.coalesce(models.SaleItem.total, 0)).label("gross_sold"),
+            func.count(models.SaleItem.id).label("line_count"),
+            func.max(models.Sale.created_at).label("last_sale_at"),
         )
         .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
         .join(models.Product, models.Product.id == models.SaleItem.product_id)
@@ -4724,15 +4726,21 @@ def get_web_catalog_best_sellers(
             func.sum(func.coalesce(models.SaleItem.total, 0)).desc(),
             models.SaleItem.product_id.asc(),
         )
-        .limit(max(safe_limit * 4, 20))
+        .limit(max(safe_limit * 8, 40))
         .all()
     )
     ranked_ids = [int(row.product_id) for row in ranked_rows if getattr(row, "product_id", None)]
-    ranked_order = {product_id: index for index, product_id in enumerate(ranked_ids)}
-    if ranked_order:
-        ranked_order_expr = case(ranked_order, value=models.Product.id, else_=len(ranked_order) + 999)
-    else:
-        ranked_order_expr = models.Product.id.asc()
+    metrics_by_product: Dict[int, Dict[str, Any]] = {}
+    for row in ranked_rows:
+        if not getattr(row, "product_id", None):
+            continue
+        product_id = int(row.product_id)
+        metrics_by_product[product_id] = {
+            "qty_sold": float(row.qty_sold or 0),
+            "gross_sold": float(row.gross_sold or 0),
+            "line_count": float(row.line_count or 0),
+            "last_sale_at": row.last_sale_at,
+        }
 
     query = (
         db.query(
@@ -4755,28 +4763,146 @@ def get_web_catalog_best_sellers(
             else true()
         )
         .filter(models.Product.id.in_(ranked_ids) if ranked_ids else false())
-        .filter(
-            or_(
-                models.Product.web_visible_when_out_of_stock.is_(True),
-                models.Product.web_visible_when_out_of_stock.is_(None),
-                models.Product.service.is_(True),
-                qty_col > 0,
-            )
-        )
-        .order_by(ranked_order_expr)
+        .order_by(models.Product.id.asc())
     )
 
     base_rows = query.all()
-    items: List[schemas.WebCatalogProductCard] = []
-    selected_ids: set[int] = set()
-    for product, qty_on_hand, category_name in base_rows:
+
+    # Pool ampliado para mezclar rotación real + productos de identidad (ticket/margen/featured).
+    pool_rows = list(base_rows)
+    if len(pool_rows) < max(safe_limit * 3, 30):
+        enrichment_rows = (
+            db.query(
+                models.Product,
+                func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+                models.ProductGroup.display_name.label("category_name"),
+            )
+            .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+            .outerjoin(
+                models.ProductGroup,
+                and_(
+                    models.ProductGroup.path == models.Product.group_name,
+                    models.ProductGroup.tenant_id == models.Product.tenant_id,
+                ),
+            )
+            .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+            .filter(
+                models.Product.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            )
+            .filter(
+                or_(
+                    models.Product.web_featured.is_(True),
+                    models.Product.web_sort_order <= 40,
+                )
+            )
+            .order_by(
+                models.Product.web_featured.desc(),
+                models.Product.web_sort_order.asc(),
+                models.Product.updated_at.desc(),
+            )
+            .limit(max(safe_limit * 6, 50))
+            .all()
+        )
+        seen_pool_ids: set[int] = {int(product.id) for product, _, _ in pool_rows}
+        for row in enrichment_rows:
+            product = row[0]
+            if int(product.id) in seen_pool_ids:
+                continue
+            pool_rows.append(row)
+            seen_pool_ids.add(int(product.id))
+
+    max_qty = max((m["qty_sold"] for m in metrics_by_product.values()), default=0.0)
+    max_gross = max((m["gross_sold"] for m in metrics_by_product.values()), default=0.0)
+    price_candidates = [
+        float(resolve_web_product_sale_price(product) or 0)
+        for product, _, _ in pool_rows
+        if float(resolve_web_product_sale_price(product) or 0) > 0
+    ]
+    max_price = max(price_candidates, default=0.0)
+
+    def _safe_norm(value: float, max_value: float) -> float:
+        if max_value <= 0:
+            return 0.0
+        return max(0.0, min(1.0, value / max_value))
+
+    def _compute_score(product: models.Product) -> float:
+        metrics = metrics_by_product.get(int(product.id), {})
+        qty_score = _safe_norm(float(metrics.get("qty_sold", 0.0) or 0.0), max_qty)
+        gross_score = _safe_norm(float(metrics.get("gross_sold", 0.0) or 0.0), max_gross)
+        last_sale_at = metrics.get("last_sale_at")
+        recency_score = 0.0
+        if isinstance(last_sale_at, datetime):
+            age_days = max(0.0, (now - last_sale_at).total_seconds() / 86400.0)
+            recency_score = math.exp(-age_days / max(14.0, safe_days / 3.0))
+        sale_price = float(resolve_web_product_sale_price(product) or 0.0)
+        cost_value = float(product.cost or 0.0)
+        margin_score = 0.0
+        if sale_price > 0:
+            margin_score = max(0.0, min(1.0, (sale_price - cost_value) / sale_price))
+        price_identity_score = _safe_norm(sale_price, max_price)
+        featured_bonus = 1.0 if bool(product.web_featured) else 0.0
+
+        # Prioriza ventas reales, pero empuja identidad/margen para no llenar de solo rotación.
+        return (
+            qty_score * 0.34
+            + gross_score * 0.20
+            + recency_score * 0.16
+            + margin_score * 0.15
+            + price_identity_score * 0.10
+            + featured_bonus * 0.05
+        )
+
+    candidates: list[tuple[float, Any]] = []
+    for product, qty_on_hand, category_name in pool_rows:
         normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
         if normalized_category_key and normalized_category_key in inactive_category_keys:
             continue
-        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+        candidates.append((_compute_score(product), (product, qty_on_hand, category_name)))
+    candidates.sort(key=lambda entry: (-entry[0], int(entry[1][0].web_sort_order or 999999), -int(entry[1][0].id or 0)))
+
+    brand_cap = max(2, int(math.ceil(safe_limit * 0.35)))
+    category_cap = max(2, int(math.ceil(safe_limit * 0.40)))
+    brand_counts: Dict[str, int] = defaultdict(int)
+    category_counts: Dict[str, int] = defaultdict(int)
+    selected_rows: list[Any] = []
+    selected_ids: set[int] = set()
+
+    for _, row in candidates:
+        product = row[0]
+        pid = int(product.id)
+        if pid in selected_ids:
             continue
+        brand_key = (product.brand or "__none__").strip().lower()
+        category_key = (_normalize_web_catalog_category_key(product.web_category_key) or (product.group_name or "__none__")).strip().lower()
+        if brand_counts[brand_key] >= brand_cap:
+            continue
+        if category_counts[category_key] >= category_cap:
+            continue
+        selected_rows.append(row)
+        selected_ids.add(pid)
+        brand_counts[brand_key] += 1
+        category_counts[category_key] += 1
+        if len(selected_rows) >= safe_limit:
+            break
+
+    if len(selected_rows) < safe_limit:
+        for _, row in candidates:
+            product = row[0]
+            pid = int(product.id)
+            if pid in selected_ids:
+                continue
+            selected_rows.append(row)
+            selected_ids.add(pid)
+            if len(selected_rows) >= safe_limit:
+                break
+
+    items: List[schemas.WebCatalogProductCard] = []
+    for product, qty_on_hand, category_name in selected_rows:
+        normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
         category_def = category_map.get(normalized_category_key)
+        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
         price_mode = (product.web_price_mode or "visible").strip().lower()
         sale_price = resolve_web_product_sale_price(product)
         items.append(
@@ -4802,9 +4928,6 @@ def get_web_catalog_best_sellers(
                 featured=bool(product.web_featured),
             )
         )
-        selected_ids.add(product.id)
-        if len(items) >= safe_limit:
-            break
 
     if len(items) < safe_limit:
         fallback_rows = (
@@ -4828,20 +4951,7 @@ def get_web_catalog_best_sellers(
                 else true()
             )
             .filter(~models.Product.id.in_(list(selected_ids)) if selected_ids else true())
-            .filter(
-                or_(
-                    models.Product.web_featured.is_(True),
-                    models.Product.web_sort_order <= 20,
-                )
-            )
-            .filter(
-                or_(
-                    models.Product.web_visible_when_out_of_stock.is_(True),
-                    models.Product.web_visible_when_out_of_stock.is_(None),
-                    models.Product.service.is_(True),
-                    qty_col > 0,
-                )
-            )
+            .filter(or_(models.Product.web_featured.is_(True), models.Product.web_sort_order <= 20))
             .order_by(
                 models.Product.web_featured.desc(),
                 models.Product.web_sort_order.asc(),
@@ -4856,8 +4966,6 @@ def get_web_catalog_best_sellers(
             if normalized_category_key and normalized_category_key in inactive_category_keys:
                 continue
             stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
-                continue
             category_def = category_map.get(normalized_category_key)
             price_mode = (product.web_price_mode or "visible").strip().lower()
             sale_price = resolve_web_product_sale_price(product)
