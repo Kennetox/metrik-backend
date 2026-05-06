@@ -67,6 +67,22 @@ def list_web_catalog_products(
     )
 
 
+@router.get("/best-sellers", response_model=schemas.WebCatalogBestSellerList)
+def list_web_catalog_best_sellers(
+    limit: int = Query(default=10, ge=1, le=20),
+    days: int = Query(default=90, ge=7, le=365),
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    items, updated_at = crud.get_web_catalog_best_sellers(
+        db,
+        tenant_id=tenant_id,
+        limit=limit,
+        days=days,
+    )
+    return schemas.WebCatalogBestSellerList(items=items, updated_at=updated_at)
+
+
 @router.get("/products/{slug}", response_model=schemas.WebCatalogProductDetail)
 def get_web_catalog_product(
     slug: str,

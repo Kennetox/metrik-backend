@@ -555,6 +555,11 @@ class WebCatalogProductList(BaseModel):
     filters: WebCatalogFilters
 
 
+class WebCatalogBestSellerList(BaseModel):
+    items: List[WebCatalogProductCard]
+    updated_at: datetime
+
+
 class WebCatalogProductDetail(BaseModel):
     id: int
     sku: Optional[str] = None

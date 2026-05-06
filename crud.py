@@ -14,7 +14,7 @@ import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
-from sqlalchemy import String, and_, case, cast, func, not_, or_, text, true
+from sqlalchemy import String, and_, case, cast, false, func, not_, or_, text, true
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
@@ -54,6 +54,11 @@ def _web_order_reuse_window_minutes() -> int:
 
 
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
+_WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProductCard], datetime]] = {}
+
+
+def _web_best_sellers_cache_ttl_seconds() -> int:
+    return _env_int("WEB_BEST_SELLERS_CACHE_TTL_SECONDS", 12 * 60 * 60, min_value=300, max_value=7 * 24 * 60 * 60)
 
 
 def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
@@ -4657,6 +4662,241 @@ def get_web_catalog_products(
     )
 
 
+def get_web_catalog_best_sellers(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    limit: int = 10,
+    days: int = 90,
+) -> tuple[List[schemas.WebCatalogProductCard], datetime]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    safe_limit = max(1, min(int(limit or 10), 20))
+    safe_days = max(7, min(int(days or 90), 365))
+
+    cache_key = f"{effective_tenant_id}:{safe_limit}:{safe_days}"
+    now = datetime.utcnow()
+    cache_entry = _WEB_BEST_SELLERS_CACHE.get(cache_key)
+    if cache_entry:
+        expires_at, cached_items, cached_updated_at = cache_entry
+        if now < expires_at:
+            return list(cached_items), cached_updated_at
+
+    category_map = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=effective_tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    )
+    inactive_category_keys = {
+        _normalize_web_catalog_category_key(item.key)
+        for item in category_map.values()
+        if not bool(item.is_active)
+    }
+    stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
+    qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
+
+    cutoff = now - timedelta(days=safe_days)
+    ranked_rows = (
+        db.query(
+            models.SaleItem.product_id.label("product_id"),
+            func.sum(func.coalesce(models.SaleItem.quantity, 0)).label("qty_sold"),
+            func.sum(func.coalesce(models.SaleItem.total, 0)).label("gross_sold"),
+        )
+        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+        .join(models.Product, models.Product.id == models.SaleItem.product_id)
+        .filter(models.Sale.created_at >= cutoff)
+        .filter(models.Sale.voided_at.is_(None))
+        .filter(func.coalesce(models.SaleItem.quantity, 0) > 0)
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+        .filter(
+            models.Product.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .filter(
+            models.Sale.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .group_by(models.SaleItem.product_id)
+        .order_by(
+            func.sum(func.coalesce(models.SaleItem.quantity, 0)).desc(),
+            func.sum(func.coalesce(models.SaleItem.total, 0)).desc(),
+            models.SaleItem.product_id.asc(),
+        )
+        .limit(max(safe_limit * 4, 20))
+        .all()
+    )
+    ranked_ids = [int(row.product_id) for row in ranked_rows if getattr(row, "product_id", None)]
+    ranked_order = {product_id: index for index, product_id in enumerate(ranked_ids)}
+    if ranked_order:
+        ranked_order_expr = case(ranked_order, value=models.Product.id, else_=len(ranked_order) + 999)
+    else:
+        ranked_order_expr = models.Product.id.asc()
+
+    query = (
+        db.query(
+            models.Product,
+            func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+            models.ProductGroup.display_name.label("category_name"),
+        )
+        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+        .outerjoin(
+            models.ProductGroup,
+            and_(
+                models.ProductGroup.path == models.Product.group_name,
+                models.ProductGroup.tenant_id == models.Product.tenant_id,
+            ),
+        )
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+        .filter(
+            models.Product.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .filter(models.Product.id.in_(ranked_ids) if ranked_ids else false())
+        .filter(
+            or_(
+                models.Product.web_visible_when_out_of_stock.is_(True),
+                models.Product.web_visible_when_out_of_stock.is_(None),
+                models.Product.service.is_(True),
+                qty_col > 0,
+            )
+        )
+        .order_by(ranked_order_expr)
+    )
+
+    base_rows = query.all()
+    items: List[schemas.WebCatalogProductCard] = []
+    selected_ids: set[int] = set()
+    for product, qty_on_hand, category_name in base_rows:
+        normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
+        if normalized_category_key and normalized_category_key in inactive_category_keys:
+            continue
+        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            continue
+        category_def = category_map.get(normalized_category_key)
+        price_mode = (product.web_price_mode or "visible").strip().lower()
+        sale_price = resolve_web_product_sale_price(product)
+        items.append(
+            schemas.WebCatalogProductCard(
+                id=product.id,
+                sku=product.sku,
+                slug=resolve_product_web_slug(product),
+                name=resolve_product_web_name(product),
+                badge_text=(product.web_badge_text or None),
+                short_description=product.web_short_description,
+                long_description=product.web_long_description,
+                brand=product.brand,
+                group_name=category_name or product.group_name,
+                category_path=product.web_category_key,
+                category_name=(category_def.name if category_def else None),
+                image_url=product.image_url,
+                image_thumb_url=product.image_thumb_url,
+                gallery=_build_product_gallery_urls(product),
+                price_mode=price_mode,
+                price=(sale_price if price_mode == "visible" else None),
+                compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
+                stock_status=stock_status,
+                featured=bool(product.web_featured),
+            )
+        )
+        selected_ids.add(product.id)
+        if len(items) >= safe_limit:
+            break
+
+    if len(items) < safe_limit:
+        fallback_rows = (
+            db.query(
+                models.Product,
+                func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+                models.ProductGroup.display_name.label("category_name"),
+            )
+            .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+            .outerjoin(
+                models.ProductGroup,
+                and_(
+                    models.ProductGroup.path == models.Product.group_name,
+                    models.ProductGroup.tenant_id == models.Product.tenant_id,
+                ),
+            )
+            .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+            .filter(
+                models.Product.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            )
+            .filter(~models.Product.id.in_(list(selected_ids)) if selected_ids else true())
+            .filter(
+                or_(
+                    models.Product.web_featured.is_(True),
+                    models.Product.web_sort_order <= 20,
+                )
+            )
+            .filter(
+                or_(
+                    models.Product.web_visible_when_out_of_stock.is_(True),
+                    models.Product.web_visible_when_out_of_stock.is_(None),
+                    models.Product.service.is_(True),
+                    qty_col > 0,
+                )
+            )
+            .order_by(
+                models.Product.web_featured.desc(),
+                models.Product.web_sort_order.asc(),
+                models.Product.updated_at.desc(),
+                models.Product.name.asc(),
+            )
+            .limit(max(safe_limit * 2, 20))
+            .all()
+        )
+        for product, qty_on_hand, category_name in fallback_rows:
+            normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
+            if normalized_category_key and normalized_category_key in inactive_category_keys:
+                continue
+            stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+                continue
+            category_def = category_map.get(normalized_category_key)
+            price_mode = (product.web_price_mode or "visible").strip().lower()
+            sale_price = resolve_web_product_sale_price(product)
+            items.append(
+                schemas.WebCatalogProductCard(
+                    id=product.id,
+                    sku=product.sku,
+                    slug=resolve_product_web_slug(product),
+                    name=resolve_product_web_name(product),
+                    badge_text=(product.web_badge_text or None),
+                    short_description=product.web_short_description,
+                    long_description=product.web_long_description,
+                    brand=product.brand,
+                    group_name=category_name or product.group_name,
+                    category_path=product.web_category_key,
+                    category_name=(category_def.name if category_def else None),
+                    image_url=product.image_url,
+                    image_thumb_url=product.image_thumb_url,
+                    gallery=_build_product_gallery_urls(product),
+                    price_mode=price_mode,
+                    price=(sale_price if price_mode == "visible" else None),
+                    compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
+                    stock_status=stock_status,
+                    featured=bool(product.web_featured),
+                )
+            )
+            if len(items) >= safe_limit:
+                break
+
+    updated_at = now
+    ttl_seconds = _web_best_sellers_cache_ttl_seconds()
+    _WEB_BEST_SELLERS_CACHE[cache_key] = (
+        now + timedelta(seconds=ttl_seconds),
+        list(items),
+        updated_at,
+    )
+    return items, updated_at
+
+
 def get_web_catalog_product_by_slug(
     db: Session,
     slug: str,
@@ -6664,7 +6904,7 @@ def update_pos_settings(
     settings: models.PosSettings,
     settings_in: schemas.PosSettingsUpdate,
 ) -> models.PosSettings:
-    data = settings_in.model_dump()
+    data = settings_in.model_dump(exclude_unset=True)
     notifications = data.pop("notifications", None)
     for field, value in data.items():
         setattr(settings, field, value)

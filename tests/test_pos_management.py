@@ -90,6 +90,64 @@ def test_settings_default_and_update(client: TestClient):
     assert refreshed.json()["smtp_host"] == "smtp.kensar.com"
 
 
+def test_settings_update_preserves_personalization_bindings_when_omitted(client: TestClient):
+    headers = _auth_headers(client)
+    baseline = client.get("/pos/settings", headers=headers).json()
+    assert baseline.get("id")
+
+    seeded_bindings = {
+        "campana_clasica_mediana": {
+            "product_id": "101",
+            "product_sku": "CAMP-MED-BASE",
+            "product_name": "Campana mediana",
+            "product_slug": "campana-mediana",
+            "service_id": "201",
+            "service_sku": "SERV-CAMP-MED",
+            "service_name": "Personalizacion campana mediana",
+        },
+        "campana_clasica_grande": {},
+        "campana_cromada_mediana": {},
+        "campana_cromada_grande": {},
+        "guiro_mediano": {},
+        "guiro_grande": {},
+        "maraca_par": {},
+    }
+    seeded_payload = dict(baseline)
+    seeded_payload["web_personalization_bindings"] = seeded_bindings
+    seeded_payload.pop("id", None)
+    seeded_response = client.put("/pos/settings", json=seeded_payload, headers=headers)
+    assert seeded_response.status_code == 200
+    assert (
+        seeded_response.json()["web_personalization_bindings"]["campana_clasica_mediana"]["service_sku"]
+        == "SERV-CAMP-MED"
+    )
+
+    # Simula payload parcial como el de dashboard/settings (sin web_personalization_bindings).
+    partial_payload = {
+        "company_name": "Kensar Labs Updated",
+        "theme_mode": "light",
+        "accent_color": "#0A84FF",
+        "auto_close_ticket": False,
+        "low_stock_alert": True,
+        "require_seller_pin": False,
+        "notifications": {
+            "daily_summary_email": False,
+            "cash_alert_email": False,
+            "cash_alert_sms": False,
+            "monthly_report_email": False,
+        },
+    }
+    partial_response = client.put("/pos/settings", json=partial_payload, headers=headers)
+    assert partial_response.status_code == 200
+    persisted = client.get("/pos/settings", headers=headers)
+    assert persisted.status_code == 200
+    persisted_json = persisted.json()
+    assert (
+        persisted_json["web_personalization_bindings"]["campana_clasica_mediana"]["service_sku"]
+        == "SERV-CAMP-MED"
+    )
+
+
 def test_create_and_update_pos_user(client: TestClient):
     create_payload = {
         "name": "Ana Pérez",
