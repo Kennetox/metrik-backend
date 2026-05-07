@@ -2632,6 +2632,7 @@ def list_comercio_web_home_sliders(
             slot=int(row.slot or 0),
             enabled=bool(row.enabled),
             image_url=row.image_url,
+            mobile_image_url=row.mobile_image_url,
             alt_text=row.alt_text,
             cta_label=row.cta_label,
             cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
@@ -2676,6 +2677,7 @@ def update_comercio_web_home_slider(
         link_value=data.get("link_value", row.link_value),
     )
     next_image_url = _normalize_slider_text(data.get("image_url", row.image_url))
+    next_mobile_image_url = _normalize_slider_text(data.get("mobile_image_url", row.mobile_image_url))
     next_enabled = bool(data.get("enabled", row.enabled))
     if next_enabled and not next_image_url:
         raise ValueError("No puedes activar un slider sin imagen.")
@@ -2684,6 +2686,8 @@ def update_comercio_web_home_slider(
         row.enabled = next_enabled
     if "image_url" in data:
         row.image_url = next_image_url
+    if "mobile_image_url" in data:
+        row.mobile_image_url = next_mobile_image_url
     if "alt_text" in data:
         row.alt_text = _normalize_slider_text(data.get("alt_text"))
     if "cta_label" in data:
@@ -2706,6 +2710,7 @@ def update_comercio_web_home_slider(
         slot=int(row.slot or 0),
         enabled=bool(row.enabled),
         image_url=row.image_url,
+        mobile_image_url=row.mobile_image_url,
         alt_text=row.alt_text,
         cta_label=row.cta_label,
         cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
@@ -2734,6 +2739,7 @@ def list_public_web_home_sliders(
         schemas.WebCatalogHomeSlider(
             slot=item.slot,
             image_url=item.image_url,
+            mobile_image_url=item.mobile_image_url,
             alt_text=item.alt_text,
             cta_label=item.cta_label,
             cta_x_percent=item.cta_x_percent,

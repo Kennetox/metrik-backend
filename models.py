@@ -1062,6 +1062,7 @@ class WebCatalogHomeSlider(Base):
     slot = Column(Integer, nullable=False, index=True)
     enabled = Column(Boolean, nullable=False, default=False)
     image_url = Column(String(512), nullable=True)
+    mobile_image_url = Column(String(512), nullable=True)
     alt_text = Column(String(180), nullable=True)
     cta_label = Column(String(90), nullable=True)
     cta_x_percent = Column(Float, nullable=False, default=50)

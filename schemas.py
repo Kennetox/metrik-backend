@@ -333,6 +333,7 @@ class ComercioWebHomeSliderBase(BaseModel):
     slot: int = Field(ge=1, le=5)
     enabled: bool = False
     image_url: Optional[str] = None
+    mobile_image_url: Optional[str] = None
     alt_text: Optional[str] = Field(default=None, max_length=180)
     cta_label: Optional[str] = Field(default=None, max_length=90)
     cta_x_percent: float = Field(default=50, ge=0, le=100)
@@ -345,6 +346,7 @@ class ComercioWebHomeSliderBase(BaseModel):
 class ComercioWebHomeSliderUpdate(BaseModel):
     enabled: Optional[bool] = None
     image_url: Optional[str] = None
+    mobile_image_url: Optional[str] = None
     alt_text: Optional[str] = Field(default=None, max_length=180)
     cta_label: Optional[str] = Field(default=None, max_length=90)
     cta_x_percent: Optional[float] = Field(default=None, ge=0, le=100)
@@ -497,6 +499,7 @@ class WebCatalogCategoryList(BaseModel):
 class WebCatalogHomeSlider(BaseModel):
     slot: int
     image_url: Optional[str] = None
+    mobile_image_url: Optional[str] = None
     alt_text: Optional[str] = None
     cta_label: Optional[str] = None
     cta_x_percent: float = 50

@@ -261,6 +261,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
                     slot INTEGER NOT NULL,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     image_url VARCHAR(512),
+                    mobile_image_url VARCHAR(512),
                     alt_text VARCHAR(180),
                     cta_label VARCHAR(90),
                     cta_x_percent DOUBLE PRECISION NOT NULL DEFAULT 50,
@@ -278,6 +279,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
         _ensure_column_postgres(connection, table, "slot", "INTEGER")
         _ensure_column_postgres(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT FALSE")
         _ensure_column_postgres(connection, table, "image_url", "VARCHAR(512)")
+        _ensure_column_postgres(connection, table, "mobile_image_url", "VARCHAR(512)")
         _ensure_column_postgres(connection, table, "alt_text", "VARCHAR(180)")
         _ensure_column_postgres(connection, table, "cta_label", "VARCHAR(90)")
         _ensure_column_postgres(connection, table, "cta_x_percent", "DOUBLE PRECISION NOT NULL DEFAULT 50")
@@ -319,6 +321,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
                     slot INTEGER NOT NULL,
                     enabled BOOLEAN NOT NULL DEFAULT 0,
                     image_url TEXT,
+                    mobile_image_url TEXT,
                     alt_text TEXT,
                     cta_label TEXT,
                     cta_x_percent FLOAT NOT NULL DEFAULT 50,
@@ -336,6 +339,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "slot", "INTEGER")
     _ensure_column(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT 0")
     _ensure_column(connection, table, "image_url", "TEXT")
+    _ensure_column(connection, table, "mobile_image_url", "TEXT")
     _ensure_column(connection, table, "alt_text", "TEXT")
     _ensure_column(connection, table, "cta_label", "TEXT")
     _ensure_column(connection, table, "cta_x_percent", "FLOAT NOT NULL DEFAULT 50")
