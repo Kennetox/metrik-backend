@@ -174,6 +174,7 @@ def export_comercio_web_publications_xlsx(
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Publicaciones"
+    cop_number_format = '"$" #,##0'
     headers = [
         "ID",
         "Nombre web",
@@ -187,6 +188,7 @@ def export_comercio_web_publications_xlsx(
         "Categoría web key",
         "Categoría web nombre",
         "Precio base",
+        "Costo",
         "Precio web calculado",
         "Precio comparar",
         "Fuente precio web",
@@ -212,6 +214,16 @@ def export_comercio_web_publications_xlsx(
         "Actualizado en",
     ]
     sheet.append(headers)
+    money_columns = {
+        "Precio base": None,
+        "Costo": None,
+        "Precio web calculado": None,
+        "Precio comparar": None,
+        "Valor precio web": None,
+    }
+    for index, header in enumerate(headers, start=1):
+        if header in money_columns:
+            money_columns[header] = index
 
     for product in page.get("items", []):
         category_key_value = (product.web_category_key or "").strip()
@@ -227,45 +239,50 @@ def export_comercio_web_publications_xlsx(
             if product.web_compare_price is not None
             else None
         )
-        sheet.append(
-            [
-                int(product.id),
-                (product.web_name or "").strip(),
-                (product.name or "").strip(),
-                (product.web_slug or "").strip(),
-                (product.sku or "").strip(),
-                (product.barcode or "").strip(),
-                (product.brand or "").strip(),
-                (product.group_name or "").strip(),
-                (product.supplier or "").strip(),
-                category_key_value,
-                category_name or "",
-                float(product.price or 0),
-                sale_price,
-                compare_price,
-                (product.web_price_source or "base").strip(),
-                float(product.web_price_value) if product.web_price_value is not None else None,
-                (product.web_price_mode or "visible").strip(),
-                "publicado" if bool(product.web_published) else "pausado",
-                "si" if bool(product.web_published) else "no",
-                "si" if bool(product.active) else "no",
-                "si" if bool(product.web_featured) else "no",
-                (product.web_badge_text or "").strip(),
-                int(product.web_sort_order or 0),
-                "si" if bool(product.web_visible_when_out_of_stock) else "no",
-                "si" if bool(product.service) else "no",
-                (product.unit or "").strip(),
-                (product.image_url or "").strip(),
-                (product.image_thumb_url or "").strip(),
-                gallery_text,
-                (product.web_short_description or "").strip(),
-                (product.web_long_description or "").strip(),
-                (product.web_whatsapp_message or "").strip(),
-                (product.web_warranty_text or "").strip(),
-                product.web_published_at.isoformat() if product.web_published_at else "",
-                product.updated_at.isoformat() if product.updated_at else "",
-            ]
-        )
+        row_values = [
+            int(product.id),
+            (product.web_name or "").strip(),
+            (product.name or "").strip(),
+            (product.web_slug or "").strip(),
+            (product.sku or "").strip(),
+            (product.barcode or "").strip(),
+            (product.brand or "").strip(),
+            (product.group_name or "").strip(),
+            (product.supplier or "").strip(),
+            category_key_value,
+            category_name or "",
+            float(product.price or 0),
+            float(product.cost or 0),
+            sale_price,
+            compare_price,
+            (product.web_price_source or "base").strip(),
+            float(product.web_price_value) if product.web_price_value is not None else None,
+            (product.web_price_mode or "visible").strip(),
+            "publicado" if bool(product.web_published) else "pausado",
+            "si" if bool(product.web_published) else "no",
+            "si" if bool(product.active) else "no",
+            "si" if bool(product.web_featured) else "no",
+            (product.web_badge_text or "").strip(),
+            int(product.web_sort_order or 0),
+            "si" if bool(product.web_visible_when_out_of_stock) else "no",
+            "si" if bool(product.service) else "no",
+            (product.unit or "").strip(),
+            (product.image_url or "").strip(),
+            (product.image_thumb_url or "").strip(),
+            gallery_text,
+            (product.web_short_description or "").strip(),
+            (product.web_long_description or "").strip(),
+            (product.web_whatsapp_message or "").strip(),
+            (product.web_warranty_text or "").strip(),
+            product.web_published_at.isoformat() if product.web_published_at else "",
+            product.updated_at.isoformat() if product.updated_at else "",
+        ]
+        sheet.append(row_values)
+        current_row = sheet.max_row
+        for col_index in money_columns.values():
+            if not col_index:
+                continue
+            sheet.cell(row=current_row, column=col_index).number_format = cop_number_format
 
     output = io.BytesIO()
     workbook.save(output)
