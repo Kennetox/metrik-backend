@@ -2528,7 +2528,10 @@ def list_comercio_web_publications_page(
         func.sum(
             case(
                 (
-                    func.coalesce(stock_subquery.c.qty_on_hand, 0) > 0,
+                    and_(
+                        models.Product.web_published.is_(True),
+                        func.coalesce(stock_subquery.c.qty_on_hand, 0) > 0,
+                    ),
                     1,
                 ),
                 else_=0,
@@ -2537,7 +2540,10 @@ def list_comercio_web_publications_page(
         func.sum(
             case(
                 (
-                    func.coalesce(stock_subquery.c.qty_on_hand, 0) <= 0,
+                    and_(
+                        models.Product.web_published.is_(True),
+                        func.coalesce(stock_subquery.c.qty_on_hand, 0) <= 0,
+                    ),
                     1,
                 ),
                 else_=0,
