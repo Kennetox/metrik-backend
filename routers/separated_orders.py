@@ -18,6 +18,10 @@ router = APIRouter(
 
 FREE_SALE_NAME_FRAGMENT = "venta libre"
 FREE_SALE_REASON_LABEL = "motivo venta libre"
+TECH_SERVICE_REASON_LABEL = "motivo servicio tecnico"
+BALANCE_TOPUP_REASON_LABEL = "motivo abono de saldo"
+TECH_SERVICE_SKU = "138"
+BALANCE_TOPUP_SKU = "1087"
 FREE_SALE_REASON_REQUIRED = (
     os.getenv("FREE_SALE_REASON_REQUIRED", "true").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -31,24 +35,38 @@ def _normalize_text(value: Optional[str]) -> str:
     return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
 
 
-def _sale_contains_free_sale(separated_in: schemas.SeparatedOrderCreate) -> bool:
+def _sale_contains_required_reason_product(separated_in: schemas.SeparatedOrderCreate) -> bool:
     for item in separated_in.items or []:
         name = _normalize_text(getattr(item, "product_name", ""))
         sku = _normalize_text(getattr(item, "product_sku", ""))
-        if FREE_SALE_NAME_FRAGMENT in name or "venta-libre" in sku or "venta libre" in sku:
+        if (
+            FREE_SALE_NAME_FRAGMENT in name
+            or "venta-libre" in sku
+            or "venta libre" in sku
+            or sku == TECH_SERVICE_SKU
+            or sku == BALANCE_TOPUP_SKU
+        ):
             return True
     return False
 
 
-def _has_required_free_sale_reason(notes: Optional[str]) -> bool:
+def _has_required_sale_reason(notes: Optional[str]) -> bool:
     normalized_notes = _normalize_text(notes)
     if not normalized_notes:
         return False
-    label_index = normalized_notes.find(FREE_SALE_REASON_LABEL)
-    if label_index < 0:
-        return False
-    tail = normalized_notes[label_index + len(FREE_SALE_REASON_LABEL) :].strip(" :\n\t\r-")
-    return bool(tail)
+    labels = [
+        FREE_SALE_REASON_LABEL,
+        TECH_SERVICE_REASON_LABEL,
+        BALANCE_TOPUP_REASON_LABEL,
+    ]
+    for label in labels:
+        label_index = normalized_notes.find(label)
+        if label_index < 0:
+            continue
+        tail = normalized_notes[label_index + len(label) :].strip(" :\n\t\r-")
+        if tail:
+            return True
+    return False
 
 
 @router.post(
@@ -65,13 +83,13 @@ def create_separated_order(
 ):
     if (
         FREE_SALE_REASON_REQUIRED
-        and _sale_contains_free_sale(separated_in)
-        and not _has_required_free_sale_reason(separated_in.notes)
+        and _sale_contains_required_reason_product(separated_in)
+        and not _has_required_sale_reason(separated_in.notes)
     ):
         raise HTTPException(
             status_code=400,
             detail=(
-                "La nota debe incluir el motivo de venta libre cuando se use este producto."
+                "La nota debe incluir el motivo correspondiente cuando se use este producto."
             ),
         )
     try:
