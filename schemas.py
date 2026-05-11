@@ -183,6 +183,7 @@ class ProductRead(ProductBase):
     id: int
     web_published_at: Optional[datetime] = None
     group_meta: Optional[ProductGroupRead] = None
+    qty_on_hand: Optional[float] = None
 
     @field_validator("web_gallery_urls", mode="before")
     @classmethod
@@ -219,6 +220,8 @@ class ComercioWebCatalogPublicationStats(BaseModel):
     featured: int
     discounted: int
     consult: int
+    with_stock: int
+    without_stock: int
 
 
 class ComercioWebCatalogPublicationPage(BaseModel):

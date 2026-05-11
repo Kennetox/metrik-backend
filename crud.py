@@ -2317,7 +2317,14 @@ def list_comercio_web_publications_page(
         func.trim(models.Product.web_badge_text) != "",
     )
 
-    query = db.query(models.Product).filter(configured_expr)
+    stock_subquery = _get_catalog_stock_subquery(db, tenant_id)
+    qty_on_hand_col = func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand")
+
+    query = (
+        db.query(models.Product, qty_on_hand_col)
+        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+        .filter(configured_expr)
+    )
     if tenant_id is not None:
         query = query.filter(models.Product.tenant_id == tenant_id)
 
@@ -2429,6 +2436,27 @@ def list_comercio_web_publications_page(
             query = query.filter(models.Product.id == -1)
 
     normalized_order = (order or "newest").strip().lower()
+    web_price_expr = case(
+        (
+            func.lower(func.coalesce(models.Product.web_price_source, "base")) == "fixed",
+            func.coalesce(models.Product.web_price_value, 0),
+        ),
+        (
+            func.lower(func.coalesce(models.Product.web_price_source, "base")) == "discount_percent",
+            models.Product.price
+            * (
+                1
+                - (
+                    func.least(
+                        100.0,
+                        func.greatest(0.0, func.coalesce(models.Product.web_price_value, 0)),
+                    )
+                    / 100.0
+                )
+            ),
+        ),
+        else_=models.Product.price,
+    )
     publication_created_null_order = case(
         (models.Product.web_published_at.is_(None), 1),
         else_=0,
@@ -2444,6 +2472,16 @@ def list_comercio_web_publications_page(
             func.lower(func.coalesce(models.Product.web_name, models.Product.name, "")).asc(),
             models.Product.id.asc(),
         ]
+    elif normalized_order == "price_asc":
+        order_by = [
+            web_price_expr.asc(),
+            models.Product.id.asc(),
+        ]
+    elif normalized_order == "price_desc":
+        order_by = [
+            web_price_expr.desc(),
+            models.Product.id.desc(),
+        ]
     else:
         order_by = [
             publication_created_null_order.asc(),
@@ -2452,12 +2490,13 @@ def list_comercio_web_publications_page(
         ]
 
     total = query.count()
-    items = (
+    rows = (
         query.order_by(*order_by)
         .offset(skip)
         .limit(limit)
         .all()
     )
+    items = [product for product, _qty_on_hand in rows]
 
     group_names = {p.group_name for p in items if p.group_name}
     group_map = {}
@@ -2467,8 +2506,9 @@ def list_comercio_web_publications_page(
             groups_query = groups_query.filter(models.ProductGroup.tenant_id == tenant_id)
         groups = groups_query.all()
         group_map = {g.path: g for g in groups}
-    for product in items:
+    for product, qty_on_hand in rows:
         product.group_meta = group_map.get(product.group_name or "")
+        product.qty_on_hand = float(qty_on_hand or 0.0)
 
     stats_query = db.query(
         func.count(models.Product.id).label("configured"),
@@ -2485,7 +2525,25 @@ def list_comercio_web_publications_page(
                 else_=0,
             )
         ).label("consult"),
-    ).filter(configured_expr)
+        func.sum(
+            case(
+                (
+                    func.coalesce(stock_subquery.c.qty_on_hand, 0) > 0,
+                    1,
+                ),
+                else_=0,
+            )
+        ).label("with_stock"),
+        func.sum(
+            case(
+                (
+                    func.coalesce(stock_subquery.c.qty_on_hand, 0) <= 0,
+                    1,
+                ),
+                else_=0,
+            )
+        ).label("without_stock"),
+    ).outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id).filter(configured_expr)
     if tenant_id is not None:
         stats_query = stats_query.filter(models.Product.tenant_id == tenant_id)
     stats_row = stats_query.first()
@@ -2501,6 +2559,8 @@ def list_comercio_web_publications_page(
             "featured": int((stats_row.featured if stats_row else 0) or 0),
             "discounted": int((stats_row.discounted if stats_row else 0) or 0),
             "consult": int((stats_row.consult if stats_row else 0) or 0),
+            "with_stock": int((stats_row.with_stock if stats_row else 0) or 0),
+            "without_stock": int((stats_row.without_stock if stats_row else 0) or 0),
         },
     }
 
