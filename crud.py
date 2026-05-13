@@ -2303,6 +2303,7 @@ def list_comercio_web_publications_page(
     status_filter: str = "all",
     featured_filter: str = "all",
     badge_filter: str = "all",
+    stock_filter: str = "all",
     category_key: Optional[str] = None,
     subcategory_key: Optional[str] = None,
     order: str = "newest",
@@ -2391,6 +2392,11 @@ def list_comercio_web_publications_page(
         query = query.filter(has_badge_expr)
     elif badge_filter == "without_badge":
         query = query.filter(not_(has_badge_expr))
+
+    if stock_filter == "with_stock":
+        query = query.filter(qty_on_hand_col > 0)
+    elif stock_filter == "without_stock":
+        query = query.filter(qty_on_hand_col <= 0)
 
     if active_only and status_filter != "paused":
         query = query.filter(models.Product.web_published.is_(True))
