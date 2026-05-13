@@ -1433,6 +1433,12 @@ def search_receiving_products(
     term = (q or "").strip()
     if term:
         like = f"%{term}%"
+        normalized_term = term.lower()
+        normalized_term_no_zeros = normalized_term.lstrip("0")
+        barcode_expr = func.lower(func.coalesce(models.Product.barcode, ""))
+        sku_expr = func.lower(func.coalesce(models.Product.sku, ""))
+        name_expr = func.lower(func.coalesce(models.Product.name, ""))
+        barcode_no_zeros_expr = func.ltrim(barcode_expr, "0")
         query = query.filter(
             or_(
                 models.Product.name.ilike(like),
@@ -1440,12 +1446,73 @@ def search_receiving_products(
                 models.Product.barcode.ilike(like),
             )
         )
-    return (
-        query.order_by(models.Product.name.asc(), models.Product.id.asc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        exact_barcode_rank = case((barcode_expr == normalized_term, 0), else_=1)
+        exact_barcode_no_zeros_rank = case(
+            (
+                and_(
+                    normalized_term_no_zeros != "",
+                    barcode_no_zeros_expr == normalized_term_no_zeros,
+                ),
+                0,
+            ),
+            else_=1,
+        )
+        exact_sku_rank = case((sku_expr == normalized_term, 0), else_=1)
+        barcode_prefix_rank = case((barcode_expr.like(f"{normalized_term}%"), 0), else_=1)
+        sku_prefix_rank = case((sku_expr.like(f"{normalized_term}%"), 0), else_=1)
+        name_prefix_rank = case((name_expr.like(f"{normalized_term}%"), 0), else_=1)
+        query = query.order_by(
+            exact_barcode_rank.asc(),
+            exact_barcode_no_zeros_rank.asc(),
+            exact_sku_rank.asc(),
+            barcode_prefix_rank.asc(),
+            sku_prefix_rank.asc(),
+            name_prefix_rank.asc(),
+            models.Product.name.asc(),
+            models.Product.id.asc(),
+        )
+    else:
+        query = query.order_by(models.Product.name.asc(), models.Product.id.asc())
+
+    return query.offset(skip).limit(limit).all()
+
+
+def resolve_receiving_product_by_barcode(
+    db: Session,
+    scan_code: str,
+    *,
+    include_inactive: bool = False,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.Product]:
+    normalized = "".join(ch for ch in (scan_code or "").strip().lower() if ch.isprintable() and not ch.isspace())
+    if normalized.startswith("]") and len(normalized) >= 3 and normalized[1].isalnum() and normalized[2].isalnum():
+        normalized = normalized[3:]
+    if not normalized:
+        return None
+
+    normalized_no_zeros = normalized.lstrip("0")
+    query = db.query(models.Product)
+    if not include_inactive:
+        query = query.filter(models.Product.active.is_(True))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+
+    barcode_expr = func.lower(func.coalesce(models.Product.barcode, ""))
+    barcode_no_zeros_expr = func.ltrim(barcode_expr, "0")
+    filters = [barcode_expr == normalized]
+    if normalized_no_zeros:
+        filters.append(barcode_no_zeros_expr == normalized_no_zeros)
+
+    exact_query = (
+        query.filter(or_(*filters))
+        .order_by(
+            case((barcode_expr == normalized, 0), else_=1).asc(),
+            models.Product.name.asc(),
+            models.Product.id.asc(),
+        )
     )
+    return exact_query.first()
 
 
 def _next_numeric_code(values: List[str]) -> str:

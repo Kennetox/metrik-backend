@@ -34,6 +34,16 @@ def _normalize_optional_text(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _normalize_scanner_code(value: str | None) -> str:
+    normalized = "".join(
+        ch for ch in (value or "").strip().lower() if ch.isprintable() and not ch.isspace()
+    )
+    # AIM symbology identifier prefix, e.g. ]C1 / ]E0
+    if normalized.startswith("]") and len(normalized) >= 3 and normalized[1].isalnum() and normalized[2].isalnum():
+        normalized = normalized[3:]
+    return normalized
+
+
 def _parse_iso_datetime(value: str | None, field_name: str) -> datetime | None:
     if value is None:
         return None
@@ -252,15 +262,38 @@ def search_receiving_products(
     current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
     tenant_id = _require_tenant_id(db, current_user)
+    normalized_q = _normalize_scanner_code(q)
     products = crud.search_receiving_products(
         db,
-        q=q,
+        q=normalized_q,
         skip=skip,
         limit=limit,
         include_inactive=include_inactive,
         tenant_id=tenant_id,
     )
     return [schemas.ReceivingProductLookup.model_validate(product) for product in products]
+
+
+@router.get("/products/resolve-by-barcode", response_model=schemas.ReceivingProductLookup | None)
+def resolve_receiving_product_by_barcode(
+    code: str = Query(min_length=1),
+    include_inactive: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
+):
+    tenant_id = _require_tenant_id(db, current_user)
+    normalized_code = _normalize_scanner_code(code)
+    if not normalized_code:
+        return None
+    product = crud.resolve_receiving_product_by_barcode(
+        db,
+        normalized_code,
+        include_inactive=include_inactive,
+        tenant_id=tenant_id,
+    )
+    if not product:
+        return None
+    return schemas.ReceivingProductLookup.model_validate(product)
 
 
 @router.get("/product-groups", response_model=List[schemas.ReceivingProductGroupOption])
