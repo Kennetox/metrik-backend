@@ -4818,8 +4818,22 @@ def get_web_catalog_best_sellers(
     safe_limit = max(1, min(int(limit or 10), 20))
     safe_days = max(7, min(int(days or 90), 365))
 
-    cache_key = f"{effective_tenant_id}:{safe_limit}:{safe_days}"
     now = datetime.utcnow()
+    catalog_updated_at = (
+        db.query(func.max(models.Product.updated_at))
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+        .filter(
+            models.Product.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .scalar()
+    )
+    catalog_version_token = (
+        int(catalog_updated_at.timestamp()) if isinstance(catalog_updated_at, datetime) else 0
+    )
+    cache_key_prefix = f"{effective_tenant_id}:{safe_limit}:{safe_days}:"
+    cache_key = f"{cache_key_prefix}{catalog_version_token}"
     cache_entry = _WEB_BEST_SELLERS_CACHE.get(cache_key)
     if cache_entry:
         expires_at, cached_items, cached_updated_at = cache_entry
@@ -5142,6 +5156,10 @@ def get_web_catalog_best_sellers(
 
     updated_at = now
     ttl_seconds = _web_best_sellers_cache_ttl_seconds()
+    for stale_key in list(_WEB_BEST_SELLERS_CACHE.keys()):
+        if stale_key.startswith(cache_key_prefix) and stale_key != cache_key:
+            _WEB_BEST_SELLERS_CACHE.pop(stale_key, None)
+
     _WEB_BEST_SELLERS_CACHE[cache_key] = (
         now + timedelta(seconds=ttl_seconds),
         list(items),
