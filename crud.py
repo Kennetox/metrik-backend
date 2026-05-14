@@ -4412,9 +4412,15 @@ def _build_web_catalog_filters(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
 ):
-    query = db.query(models.Product).filter(
-        models.Product.active.is_(True),
-        models.Product.web_published.is_(True),
+    stock_subquery = _get_catalog_stock_subquery(db, tenant_id)
+    qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
+    query = (
+        db.query(models.Product)
+        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+        .filter(
+            models.Product.active.is_(True),
+            models.Product.web_published.is_(True),
+        )
     )
     if tenant_id is not None:
         query = query.filter(models.Product.tenant_id == tenant_id)
@@ -4434,6 +4440,32 @@ def _build_web_catalog_filters(
         )
     if featured is not None:
         query = query.filter(models.Product.web_featured.is_(featured))
+    category_map_with_inactive = _get_tenant_web_catalog_category_map(
+        db,
+        tenant_id=tenant_id,
+        include_inactive=True,
+        ensure_seeded=True,
+    )
+    inactive_category_keys = {
+        _normalize_web_catalog_category_key(item.key)
+        for item in category_map_with_inactive.values()
+        if not bool(item.is_active)
+    }
+    if inactive_category_keys:
+        query = query.filter(
+            or_(
+                models.Product.web_category_key.is_(None),
+                ~models.Product.web_category_key.in_(inactive_category_keys),
+            )
+        )
+    query = query.filter(
+        or_(
+            models.Product.web_visible_when_out_of_stock.is_(True),
+            models.Product.web_visible_when_out_of_stock.is_(None),
+            models.Product.service.is_(True),
+            qty_col > 0,
+        )
+    )
     category_map = _get_tenant_web_catalog_category_map(
         db,
         tenant_id=tenant_id,
