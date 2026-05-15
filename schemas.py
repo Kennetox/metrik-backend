@@ -222,6 +222,7 @@ class ComercioWebCatalogPublicationStats(BaseModel):
     consult: int
     with_stock: int
     without_stock: int
+    without_image: int
 
 
 class ComercioWebCatalogPublicationPage(BaseModel):

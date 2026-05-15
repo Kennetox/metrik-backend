@@ -2384,6 +2384,16 @@ def list_comercio_web_publications_page(
         models.Product.web_badge_text.is_not(None),
         func.trim(models.Product.web_badge_text) != "",
     )
+    has_image_expr = or_(
+        and_(
+            models.Product.image_url.is_not(None),
+            func.trim(models.Product.image_url) != "",
+        ),
+        and_(
+            models.Product.image_thumb_url.is_not(None),
+            func.trim(models.Product.image_thumb_url) != "",
+        ),
+    )
 
     stock_subquery = _get_catalog_stock_subquery(db, tenant_id)
     qty_on_hand_col = func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand")
@@ -2464,6 +2474,13 @@ def list_comercio_web_publications_page(
         query = query.filter(qty_on_hand_col > 0)
     elif stock_filter == "without_stock":
         query = query.filter(qty_on_hand_col <= 0)
+    elif stock_filter == "without_image":
+        query = query.filter(
+            and_(
+                qty_on_hand_col > 0,
+                not_(has_image_expr),
+            )
+        )
 
     if active_only and status_filter != "paused":
         query = query.filter(models.Product.web_published.is_(True))
@@ -2622,6 +2639,19 @@ def list_comercio_web_publications_page(
                 else_=0,
             )
         ).label("without_stock"),
+        func.sum(
+            case(
+                (
+                    and_(
+                        models.Product.web_published.is_(True),
+                        func.coalesce(stock_subquery.c.qty_on_hand, 0) > 0,
+                        not_(has_image_expr),
+                    ),
+                    1,
+                ),
+                else_=0,
+            )
+        ).label("without_image"),
     ).outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id).filter(configured_expr)
     if tenant_id is not None:
         stats_query = stats_query.filter(models.Product.tenant_id == tenant_id)
@@ -2640,6 +2670,7 @@ def list_comercio_web_publications_page(
             "consult": int((stats_row.consult if stats_row else 0) or 0),
             "with_stock": int((stats_row.with_stock if stats_row else 0) or 0),
             "without_stock": int((stats_row.without_stock if stats_row else 0) or 0),
+            "without_image": int((stats_row.without_image if stats_row else 0) or 0),
         },
     }
 
