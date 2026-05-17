@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from html import escape
+import hashlib
 from io import BytesIO
 import os
 from pathlib import Path
@@ -34,6 +35,23 @@ router = APIRouter(
 )
 
 
+def _normalize_favorite_ids(ids: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in ids:
+        preset_id = raw.strip()
+        if not preset_id or len(preset_id) > 80 or preset_id in seen:
+            continue
+        seen.add(preset_id)
+        normalized.append(preset_id)
+    return normalized
+
+
+def _favorites_version(preset_ids: list[str]) -> str:
+    payload = "\x1f".join(preset_ids)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class ReportPdfExportRequest(BaseModel):
     title: Optional[str] = None
     document_html: str
@@ -58,8 +76,10 @@ def get_report_favorites(
         .order_by(models.ReportFavorite.created_at.asc(), models.ReportFavorite.id.asc())
         .all()
     )
+    preset_ids = _normalize_favorite_ids([row.preset_id for row in rows if row.preset_id])
     return schemas.ReportFavoritesResponse(
-        preset_ids=[row.preset_id for row in rows if row.preset_id]
+        preset_ids=preset_ids,
+        version=_favorites_version(preset_ids),
     )
 
 
@@ -75,14 +95,28 @@ def update_report_favorites(
     ),
 ):
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in payload.preset_ids:
-        preset_id = raw.strip()
-        if not preset_id or len(preset_id) > 80 or preset_id in seen:
-            continue
-        seen.add(preset_id)
-        normalized.append(preset_id)
+    current_rows = (
+        db.query(models.ReportFavorite.preset_id)
+        .filter(models.ReportFavorite.tenant_id == tenant_id)
+        .filter(models.ReportFavorite.user_id == current_user.id)
+        .order_by(models.ReportFavorite.created_at.asc(), models.ReportFavorite.id.asc())
+        .all()
+    )
+    current_ids = _normalize_favorite_ids(
+        [row.preset_id for row in current_rows if row.preset_id]
+    )
+    current_version = _favorites_version(current_ids)
+
+    if payload.expected_version and payload.expected_version != current_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Los favoritos fueron actualizados desde otra sesión.",
+                "current_version": current_version,
+            },
+        )
+
+    normalized = _normalize_favorite_ids(payload.preset_ids)
 
     (
         db.query(models.ReportFavorite)
@@ -99,7 +133,10 @@ def update_report_favorites(
             )
         )
     db.commit()
-    return schemas.ReportFavoritesResponse(preset_ids=normalized)
+    return schemas.ReportFavoritesResponse(
+        preset_ids=normalized,
+        version=_favorites_version(normalized),
+    )
 
 
 def _month_utc_bounds(year: int, month: int) -> tuple[datetime, datetime]:

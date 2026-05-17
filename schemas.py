@@ -2684,10 +2684,12 @@ class ReportsQuickInsightsResponse(BaseModel):
 
 class ReportFavoritesUpdateRequest(BaseModel):
     preset_ids: List[str] = Field(default_factory=list)
+    expected_version: Optional[str] = None
 
 
 class ReportFavoritesResponse(BaseModel):
     preset_ids: List[str] = Field(default_factory=list)
+    version: str = ""
 
 
 class ReportExportCompanyInfo(BaseModel):
