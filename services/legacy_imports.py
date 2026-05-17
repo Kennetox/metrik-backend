@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -24,7 +25,10 @@ class ProcessResult:
 def _clean_str(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).strip()
+    text = str(value).replace("\x00", "")
+    # Drop non-printable control chars that can break PostgreSQL text fields.
+    text = re.sub(r"[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    return text.strip()
 
 
 def _norm_key(value: str) -> str:
@@ -100,7 +104,14 @@ def _parse_dt(value: Any) -> datetime:
     for pattern in patterns:
         try:
             parsed = datetime.strptime(raw, pattern)
-            return parsed
+            bogota_tz = ZoneInfo("America/Bogota")
+            # Legacy exports carry local business time; persist as UTC-naive
+            # to match the rest of the schema/query conventions.
+            return (
+                parsed.replace(tzinfo=bogota_tz)
+                .astimezone(timezone.utc)
+                .replace(tzinfo=None)
+            )
         except Exception:
             continue
     return datetime.utcnow()
