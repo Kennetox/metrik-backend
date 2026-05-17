@@ -63,7 +63,7 @@ class ProductBase(BaseModel):
 
 
 class ProductCreate(ProductBase):
-    pass
+    cost_suggestion_meta: Optional[Dict[str, Any]] = None
 
 
 class ProductUpdate(BaseModel):
@@ -113,6 +113,7 @@ class ProductUpdate(BaseModel):
         pattern=r"^#([0-9a-fA-F]{6})$",
         description="Hex color like #112233",
     )
+    cost_suggestion_meta: Optional[Dict[str, Any]] = None
 
     @field_validator("web_gallery_urls", mode="before")
     @classmethod
@@ -212,6 +213,31 @@ class ProductRead(ProductBase):
 
     class Config:
         from_attributes = True
+
+
+class ProductCostSuggestionRequest(BaseModel):
+    price: float = Field(gt=0)
+    group_name: Optional[str] = None
+    brand: Optional[str] = None
+    supplier: Optional[str] = None
+    exclude_product_id: Optional[int] = Field(default=None, ge=1)
+
+
+class ProductCostSuggestionResponse(BaseModel):
+    suggested_cost: float
+    range_min_cost: float
+    range_max_cost: float
+    confidence_score: float
+    confidence_label: Literal["alta", "media", "baja"]
+    method: str
+    method_label: Optional[str] = None
+    sample_size: int
+    markup_used: float
+    markup_p25: float
+    markup_p50: float
+    markup_p75: float
+    recency_half_life_days: int
+    notes: Optional[str] = None
 
 
 class ComercioWebCatalogPublicationStats(BaseModel):
@@ -2706,6 +2732,47 @@ class ReportFavoritesResponse(BaseModel):
     version: str = ""
 
 
+class LegacyImportBatchCreate(BaseModel):
+    title: str
+    source_system: str = "aronium"
+    batch_key: Optional[str] = None
+    note: Optional[str] = None
+
+
+class LegacyImportBatchRead(BaseModel):
+    id: int
+    tenant_id: Optional[int] = None
+    source_system: str
+    batch_key: str
+    title: str
+    status: str
+    note: Optional[str] = None
+    uploaded_sales_path: Optional[str] = None
+    uploaded_items_path: Optional[str] = None
+    uploaded_payments_path: Optional[str] = None
+    uploaded_refunds_path: Optional[str] = None
+    processed_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LegacyImportBatchListResponse(BaseModel):
+    items: List[LegacyImportBatchRead] = Field(default_factory=list)
+    total: int = 0
+
+
+class LegacyImportProcessResponse(BaseModel):
+    batch: LegacyImportBatchRead
+    sales_loaded: int
+    items_loaded: int
+    payments_loaded: int
+    warnings: List[str] = Field(default_factory=list)
+
+
 class ReportExportCompanyInfo(BaseModel):
     name: str
     address: Optional[str] = None
@@ -2788,6 +2855,8 @@ class SaleRead(SaleBase):
     initial_payment_amount: Optional[float] = None
     balance: Optional[float] = None
     has_cash_payment: bool = False
+    source_system: str = "metrik"
+    is_imported: bool = False
 
     class Config:
         from_attributes = True

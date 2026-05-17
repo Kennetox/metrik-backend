@@ -1409,6 +1409,105 @@ class ReportFavorite(Base):
     user = relationship("PosUser")
 
 
+class LegacyImportBatch(Base):
+    __tablename__ = "legacy_import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "batch_key",
+            name="legacy_import_batches_tenant_batch_key",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    source_system = Column(String(40), nullable=False, default="aronium")
+    batch_key = Column(String(80), nullable=False)
+    title = Column(String(140), nullable=False)
+    status = Column(String(24), nullable=False, default="draft")
+    note = Column(Text, nullable=True)
+    uploaded_sales_path = Column(String(512), nullable=True)
+    uploaded_items_path = Column(String(512), nullable=True)
+    uploaded_payments_path = Column(String(512), nullable=True)
+    uploaded_refunds_path = Column(String(512), nullable=True)
+    processed_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class LegacySale(Base):
+    __tablename__ = "legacy_sales"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "source_system",
+            "source_document_id",
+            name="legacy_sales_tenant_source_doc_key",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    import_batch_id = Column(Integer, ForeignKey("legacy_import_batches.id"), nullable=False, index=True)
+    source_system = Column(String(40), nullable=False, default="aronium")
+    source_document_id = Column(String(80), nullable=False, index=True)
+    source_document_number = Column(String(80), nullable=True, index=True)
+    display_document_number = Column(String(100), nullable=True, index=True)
+    sale_number = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, index=True)
+    pos_name = Column(String(120), nullable=True)
+    vendor_name = Column(String(120), nullable=True)
+    customer_name = Column(String(160), nullable=True)
+    customer_phone = Column(String(80), nullable=True)
+    customer_email = Column(String(160), nullable=True)
+    payment_method = Column(String(80), nullable=True)
+    main_payment_method = Column(String(80), nullable=True)
+    total = Column(Float, nullable=False, default=0.0)
+    paid_amount = Column(Float, nullable=False, default=0.0)
+    change_amount = Column(Float, nullable=False, default=0.0)
+    status = Column(String(32), nullable=False, default="completed")
+    imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class LegacySaleItem(Base):
+    __tablename__ = "legacy_sale_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    import_batch_id = Column(Integer, ForeignKey("legacy_import_batches.id"), nullable=False, index=True)
+    legacy_sale_id = Column(Integer, ForeignKey("legacy_sales.id"), nullable=False, index=True)
+    source_item_id = Column(String(80), nullable=True)
+    product_id = Column(Integer, nullable=True, index=True)
+    product_sku = Column(String(120), nullable=True, index=True)
+    product_name = Column(String(255), nullable=False)
+    product_group = Column(String(255), nullable=True, index=True)
+    quantity = Column(Float, nullable=False, default=0.0)
+    unit_price = Column(Float, nullable=False, default=0.0)
+    line_discount_value = Column(Float, nullable=False, default=0.0)
+    total = Column(Float, nullable=False, default=0.0)
+    imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class LegacyPayment(Base):
+    __tablename__ = "legacy_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    import_batch_id = Column(Integer, ForeignKey("legacy_import_batches.id"), nullable=False, index=True)
+    legacy_sale_id = Column(Integer, ForeignKey("legacy_sales.id"), nullable=False, index=True)
+    source_payment_id = Column(String(80), nullable=True)
+    method = Column(String(80), nullable=False)
+    amount = Column(Float, nullable=False, default=0.0)
+    imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PosUserDocument(Base):
     __tablename__ = "pos_user_documents"
 

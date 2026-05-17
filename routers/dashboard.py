@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
@@ -275,6 +275,7 @@ def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: date
 
 @router.get("/summary", response_model=schemas.DashboardSummary)
 def get_dashboard_summary(
+    source: str = Query(default="metrik"),
     tenant_id: int = Depends(get_current_tenant_id),
     db: Session = Depends(get_db),
 ):
@@ -303,14 +304,21 @@ def get_dashboard_summary(
 
     month_start_utc = month_start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
     trend_start_utc = trend_start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    normalized_source = (source or "metrik").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
 
-    sales_month = (
-        db.query(models.Sale)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(models.Sale.created_at >= month_start_utc)
-        .all()
-    )
+    sales_month = []
+    if include_metrik:
+        sales_month = (
+            db.query(models.Sale)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= month_start_utc)
+            .all()
+        )
     returns_month = (
         db.query(models.SaleReturn)
         .filter(models.SaleReturn.tenant_id == tenant_id)
@@ -318,14 +326,14 @@ def get_dashboard_summary(
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.SaleReturn.adjustment_reference.is_(None))
         .all()
-    )
+    ) if include_metrik else []
     changes_month = (
         db.query(models.SaleChange)
         .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= month_start_utc)
         .filter(models.SaleChange.status == "confirmed")
         .all()
-    )
+    ) if include_metrik else []
     separated_payments_month = (
         db.query(models.SeparatedOrderPayment)
         .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
@@ -337,14 +345,14 @@ def get_dashboard_summary(
         )
         .filter(models.SeparatedOrderPayment.paid_at >= month_start_utc)
         .all()
-    )
+    ) if include_metrik else []
     sales_trend = (
         db.query(models.Sale)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= trend_start_utc)
         .all()
-    )
+    ) if include_metrik else []
     returns_trend = (
         db.query(models.SaleReturn)
         .filter(models.SaleReturn.tenant_id == tenant_id)
@@ -352,14 +360,14 @@ def get_dashboard_summary(
         .filter(models.SaleReturn.status == "confirmed")
         .filter(models.SaleReturn.adjustment_reference.is_(None))
         .all()
-    )
+    ) if include_metrik else []
     changes_trend = (
         db.query(models.SaleChange)
         .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= trend_start_utc)
         .filter(models.SaleChange.status == "confirmed")
         .all()
-    )
+    ) if include_metrik else []
     separated_payments_trend = (
         db.query(models.SeparatedOrderPayment)
         .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
@@ -371,7 +379,7 @@ def get_dashboard_summary(
         )
         .filter(models.SeparatedOrderPayment.paid_at >= trend_start_utc)
         .all()
-    )
+    ) if include_metrik else []
 
     totals_by_day = defaultdict(float)
     tickets_by_day = defaultdict(int)
@@ -380,7 +388,7 @@ def get_dashboard_summary(
     change_refund_by_day = defaultdict(float)
     payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales_month], tenant_id
-    )
+    ) if sales_month else ({}, {})
 
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
@@ -412,7 +420,7 @@ def get_dashboard_summary(
     trend_change_refund_by_day = defaultdict(float)
     _, trend_total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales_trend], tenant_id
-    )
+    ) if sales_trend else ({}, {})
 
     for sale in sales_trend:
         day = _to_bogota_date(sale.created_at, bogota_tz)
@@ -436,6 +444,41 @@ def get_dashboard_summary(
         day = _to_bogota_date(change.created_at, bogota_tz)
         trend_change_extra_by_day[day] += float(change.extra_payment or 0.0)
         trend_change_refund_by_day[day] += float(change.refund_due or 0.0)
+
+    if include_legacy:
+        legacy_month = (
+            db.query(models.LegacySale)
+            .join(
+                models.LegacyImportBatch,
+                models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
+            )
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacyImportBatch.status == "published")
+            .filter(models.LegacySale.created_at >= month_start_utc)
+            .all()
+        )
+        for sale in legacy_month:
+            day = _to_bogota_date(sale.created_at, bogota_tz)
+            totals_by_day[day] += float(sale.total or 0.0)
+            tickets_by_day[day] += 1
+
+        legacy_trend = (
+            db.query(models.LegacySale)
+            .join(
+                models.LegacyImportBatch,
+                models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
+            )
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacyImportBatch.status == "published")
+            .filter(models.LegacySale.created_at >= trend_start_utc)
+            .all()
+        )
+        for sale in legacy_trend:
+            day = _to_bogota_date(sale.created_at, bogota_tz)
+            trend_totals_by_day[day] += float(sale.total or 0.0)
+            trend_tickets_by_day[day] += 1
 
     today_date = today_start_bogota.date()
     today_sales_total = (
@@ -634,6 +677,7 @@ def export_documents_excel(
 )
 def get_monthly_sales(
     year: Optional[int] = None,
+    source: str = Query(default="metrik"),
     tenant_id: int = Depends(get_current_tenant_id),
     db: Session = Depends(get_db),
 ):
@@ -651,14 +695,22 @@ def get_monthly_sales(
         timezone.utc
     ).replace(tzinfo=None)
 
-    sales_year = (
-        db.query(models.Sale)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(models.Sale.created_at >= year_start)
-        .filter(models.Sale.created_at < year_end)
-        .all()
-    )
+    normalized_source = (source or "metrik").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
+    sales_year = []
+    if include_metrik:
+        sales_year = (
+            db.query(models.Sale)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= year_start)
+            .filter(models.Sale.created_at < year_end)
+            .all()
+        )
     returns_year = (
         db.query(models.SaleReturn)
         .filter(models.SaleReturn.tenant_id == tenant_id)
@@ -693,7 +745,7 @@ def get_monthly_sales(
     monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
     _, total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales_year], tenant_id
-    )
+    ) if sales_year else ({}, {})
 
     for sale in sales_year:
         net_total = _sale_cash_total(sale)
@@ -706,19 +758,41 @@ def get_monthly_sales(
         if delta:
             monthly[month]["total"] += float(delta)
 
-    for payment in separated_payments_year:
-        month = _to_bogota_date(payment.paid_at, bogota_tz).month
-        monthly[month]["total"] += float(payment.amount or 0.0)
+    if include_metrik:
+        for payment in separated_payments_year:
+            month = _to_bogota_date(payment.paid_at, bogota_tz).month
+            monthly[month]["total"] += float(payment.amount or 0.0)
 
-    for ret in returns_year:
-        month = _to_bogota_date(ret.created_at, bogota_tz).month
-        refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
-        monthly[month]["total"] -= refund_total
+    if include_metrik:
+        for ret in returns_year:
+            month = _to_bogota_date(ret.created_at, bogota_tz).month
+            refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
+            monthly[month]["total"] -= refund_total
 
-    for change in changes_year:
-        month = _to_bogota_date(change.created_at, bogota_tz).month
-        monthly[month]["total"] += float(change.extra_payment or 0.0)
-        monthly[month]["total"] -= float(change.refund_due or 0.0)
+    if include_metrik:
+        for change in changes_year:
+            month = _to_bogota_date(change.created_at, bogota_tz).month
+            monthly[month]["total"] += float(change.extra_payment or 0.0)
+            monthly[month]["total"] -= float(change.refund_due or 0.0)
+
+    if include_legacy:
+        legacy_sales = (
+            db.query(models.LegacySale)
+            .join(
+                models.LegacyImportBatch,
+                models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
+            )
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacyImportBatch.status == "published")
+            .filter(models.LegacySale.created_at >= year_start)
+            .filter(models.LegacySale.created_at < year_end)
+            .all()
+        )
+        for sale in legacy_sales:
+            month = _to_bogota_date(sale.created_at, bogota_tz).month
+            monthly[month]["total"] += float(sale.total or 0.0)
+            monthly[month]["tickets"] += 1
 
     return [
         schemas.MonthlySalesPoint(
@@ -737,6 +811,7 @@ def get_monthly_sales(
 def get_daily_sales(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
+    source: str = Query(default="metrik"),
     tenant_id: int = Depends(get_current_tenant_id),
     db: Session = Depends(get_db),
 ):
@@ -767,14 +842,22 @@ def get_daily_sales(
         + timedelta(days=1)
     ).astimezone(timezone.utc).replace(tzinfo=None)
 
-    sales = (
-        db.query(models.Sale)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(models.Sale.created_at >= start_utc)
-        .filter(models.Sale.created_at < end_utc)
-        .all()
-    )
+    normalized_source = (source or "metrik").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
+    sales = []
+    if include_metrik:
+        sales = (
+            db.query(models.Sale)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+            .all()
+        )
     returns = (
         db.query(models.SaleReturn)
         .filter(models.SaleReturn.tenant_id == tenant_id)
@@ -813,7 +896,7 @@ def get_daily_sales(
     change_refund_by_day = defaultdict(float)
     _, total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales], tenant_id
-    )
+    ) if sales else ({}, {})
 
     for sale in sales:
         day = _to_bogota_date(sale.created_at, bogota_tz)
@@ -824,19 +907,41 @@ def get_daily_sales(
             totals_by_day[day] += effective_total
             tickets_by_day[day] += 1
 
-    for payment in separated_payments:
-        day = _to_bogota_date(payment.paid_at, bogota_tz)
-        totals_by_day[day] += float(payment.amount or 0.0)
+    if include_metrik:
+        for payment in separated_payments:
+            day = _to_bogota_date(payment.paid_at, bogota_tz)
+            totals_by_day[day] += float(payment.amount or 0.0)
 
-    for ret in returns:
-        day = _to_bogota_date(ret.created_at, bogota_tz)
-        refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
-        refunds_by_day[day] += refund_total
+    if include_metrik:
+        for ret in returns:
+            day = _to_bogota_date(ret.created_at, bogota_tz)
+            refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
+            refunds_by_day[day] += refund_total
 
-    for change in changes:
-        day = _to_bogota_date(change.created_at, bogota_tz)
-        change_extra_by_day[day] += float(change.extra_payment or 0.0)
-        change_refund_by_day[day] += float(change.refund_due or 0.0)
+    if include_metrik:
+        for change in changes:
+            day = _to_bogota_date(change.created_at, bogota_tz)
+            change_extra_by_day[day] += float(change.extra_payment or 0.0)
+            change_refund_by_day[day] += float(change.refund_due or 0.0)
+
+    if include_legacy:
+        legacy_sales = (
+            db.query(models.LegacySale)
+            .join(
+                models.LegacyImportBatch,
+                models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
+            )
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacyImportBatch.status == "published")
+            .filter(models.LegacySale.created_at >= start_utc)
+            .filter(models.LegacySale.created_at < end_utc)
+            .all()
+        )
+        for sale in legacy_sales:
+            day = _to_bogota_date(sale.created_at, bogota_tz)
+            totals_by_day[day] += float(sale.total or 0.0)
+            tickets_by_day[day] += 1
 
     points: List[schemas.SalesTrendPoint] = []
     cursor = start_date

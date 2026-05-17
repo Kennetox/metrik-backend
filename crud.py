@@ -2197,6 +2197,225 @@ def get_active_pos_session_conflict(
 # ===================== PRODUCTS =====================
 
 
+def _normalized_text(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _weighted_quantile(values: List[float], weights: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    pairs = sorted(zip(values, weights), key=lambda item: item[0])
+    total_weight = sum(max(0.0, w) for _, w in pairs)
+    if total_weight <= 0:
+        return float(pairs[len(pairs) // 2][0])
+    target = min(max(q, 0.0), 1.0) * total_weight
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += max(0.0, weight)
+        if cumulative >= target:
+            return float(value)
+    return float(pairs[-1][0])
+
+
+def _compute_markup_stats(rows: List[dict[str, Any]]) -> Optional[dict[str, float]]:
+    if not rows:
+        return None
+    values = [float(row["markup"]) for row in rows]
+    weights = [float(row["weight"]) for row in rows]
+    p25 = _weighted_quantile(values, weights, 0.25)
+    p50 = _weighted_quantile(values, weights, 0.5)
+    p75 = _weighted_quantile(values, weights, 0.75)
+    iqr = p75 - p25
+    lower = p25 - (1.5 * iqr)
+    upper = p75 + (1.5 * iqr)
+    trimmed = [
+        row
+        for row in rows
+        if float(row["markup"]) >= lower
+        and float(row["markup"]) <= upper
+    ]
+    if len(trimmed) < max(3, int(len(rows) * 0.4)):
+        trimmed = rows
+    values2 = [float(row["markup"]) for row in trimmed]
+    weights2 = [float(row["weight"]) for row in trimmed]
+    return {
+        "p25": _weighted_quantile(values2, weights2, 0.25),
+        "p50": _weighted_quantile(values2, weights2, 0.5),
+        "p75": _weighted_quantile(values2, weights2, 0.75),
+        "sample_size": float(len(trimmed)),
+        "original_size": float(len(rows)),
+    }
+
+
+def suggest_product_cost(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    price: float,
+    group_name: Optional[str] = None,
+    brand: Optional[str] = None,
+    supplier: Optional[str] = None,
+    exclude_product_id: Optional[int] = None,
+    default_markup_percent: float = 50.0,
+) -> schemas.ProductCostSuggestionResponse:
+    safe_price = max(0.0, float(price or 0.0))
+    if safe_price <= 0:
+        raise ValueError("El precio debe ser mayor que cero para sugerir costo.")
+
+    base_query = db.query(
+        models.Product.id,
+        models.Product.price,
+        models.Product.cost,
+        models.Product.group_name,
+        models.Product.brand,
+        models.Product.supplier,
+        models.Product.updated_at,
+    ).filter(
+        models.Product.active.is_(True),
+        models.Product.price > 0,
+        models.Product.cost > 0,
+    )
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        base_query = base_query.filter(models.Product.tenant_id == effective_tenant_id)
+    if exclude_product_id is not None:
+        base_query = base_query.filter(models.Product.id != int(exclude_product_id))
+    source_rows = base_query.limit(50000).all()
+
+    now = datetime.utcnow()
+    half_life_days = 180.0
+    prepared: List[dict[str, Any]] = []
+    for row in source_rows:
+        cost = float(row.cost or 0.0)
+        sale_price = float(row.price or 0.0)
+        if cost <= 0 or sale_price <= 0:
+            continue
+        markup = ((sale_price - cost) / cost) * 100.0
+        if markup < -95.0 or markup > 1500.0:
+            continue
+        updated_at = row.updated_at if isinstance(row.updated_at, datetime) else now
+        age_days = max(0.0, (now - updated_at).total_seconds() / 86400.0)
+        recency_weight = math.exp(-math.log(2) * (age_days / half_life_days))
+        prepared.append(
+            {
+                "id": int(row.id),
+                "group": _normalized_text(row.group_name),
+                "brand": _normalized_text(row.brand),
+                "supplier": _normalized_text(row.supplier),
+                "markup": float(markup),
+                "weight": max(0.05, recency_weight),
+            }
+        )
+
+    target_group = _normalized_text(group_name)
+    target_brand = _normalized_text(brand)
+    target_supplier = _normalized_text(supplier)
+
+    strategies: List[tuple[str, List[dict[str, Any]]]] = []
+    if target_brand and target_group:
+        strategies.append(
+            (
+                "brand_group",
+                [
+                    row
+                    for row in prepared
+                    if row["brand"] == target_brand and row["group"] == target_group
+                ],
+            )
+        )
+    if target_group:
+        strategies.append(("group", [row for row in prepared if row["group"] == target_group]))
+    if target_supplier:
+        strategies.append(
+            (
+                "supplier",
+                [row for row in prepared if row["supplier"] == target_supplier],
+            )
+        )
+    strategies.append(("global", prepared))
+
+    chosen_method = "default"
+    chosen_stats: Optional[dict[str, float]] = None
+    for method, rows in strategies:
+        stats = _compute_markup_stats(rows)
+        if not stats:
+            continue
+        if stats["sample_size"] >= 8:
+            chosen_method = method
+            chosen_stats = stats
+            break
+        if chosen_stats is None:
+            chosen_method = method
+            chosen_stats = stats
+
+    if chosen_stats is None:
+        chosen_markup = float(default_markup_percent)
+        suggested_cost = safe_price / (1.0 + (chosen_markup / 100.0))
+        return schemas.ProductCostSuggestionResponse(
+            suggested_cost=round(max(0.0, suggested_cost), 2),
+            range_min_cost=round(max(0.0, suggested_cost), 2),
+            range_max_cost=round(max(0.0, suggested_cost), 2),
+            confidence_score=0.2,
+            confidence_label="baja",
+            method="default",
+            sample_size=0,
+            markup_used=round(chosen_markup, 4),
+            markup_p25=round(chosen_markup, 4),
+            markup_p50=round(chosen_markup, 4),
+            markup_p75=round(chosen_markup, 4),
+            recency_half_life_days=int(half_life_days),
+            notes="Sin muestra histórica válida; se usó markup por defecto.",
+        )
+
+    markup_p25 = float(chosen_stats["p25"])
+    markup_p50 = float(chosen_stats["p50"])
+    markup_p75 = float(chosen_stats["p75"])
+    suggested_cost = safe_price / (1.0 + (markup_p50 / 100.0))
+    range_min_cost = safe_price / (1.0 + (markup_p75 / 100.0))
+    range_max_cost = safe_price / (1.0 + (markup_p25 / 100.0))
+
+    sample_size = int(chosen_stats["sample_size"])
+    confidence = min(0.95, 0.25 + min(sample_size, 80) / 100.0)
+    dispersion = max(0.0, markup_p75 - markup_p25)
+    confidence *= max(0.55, 1.0 - min(dispersion, 200.0) / 300.0)
+    if chosen_method == "global":
+        confidence *= 0.85
+    confidence = max(0.2, min(0.95, confidence))
+
+    if confidence >= 0.75:
+        confidence_label = "alta"
+    elif confidence >= 0.5:
+        confidence_label = "media"
+    else:
+        confidence_label = "baja"
+
+    method_labels = {
+        "brand_group": "marca+grupo",
+        "group": "grupo",
+        "supplier": "proveedor",
+        "global": "global",
+        "default": "default",
+    }
+    return schemas.ProductCostSuggestionResponse(
+        suggested_cost=round(max(0.0, suggested_cost), 2),
+        range_min_cost=round(max(0.0, min(range_min_cost, range_max_cost)), 2),
+        range_max_cost=round(max(0.0, max(range_min_cost, range_max_cost)), 2),
+        confidence_score=round(confidence, 4),
+        confidence_label=confidence_label,
+        method=chosen_method,
+        method_label=method_labels.get(chosen_method, chosen_method),
+        sample_size=sample_size,
+        markup_used=round(markup_p50, 4),
+        markup_p25=round(markup_p25, 4),
+        markup_p50=round(markup_p50, 4),
+        markup_p75=round(markup_p75, 4),
+        recency_half_life_days=int(half_life_days),
+        notes="Sugerencia calculada con markups históricos, recencia y limpieza de outliers.",
+    )
+
+
 def get_products(
     db: Session,
     skip: int = 0,

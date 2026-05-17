@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from html import escape
-from typing import List, Optional, Literal
+from typing import Any, List, Optional, Literal
 import base64
 import os
 import unicodedata
@@ -33,6 +33,7 @@ from services import pdf_utils
 from services import permissions as permission_service
 from services import ticket_renderer
 from services import storage
+from services import legacy_imports
 from services.password_reset import (
     PASSWORD_RESET_TOKEN_TTL_SECONDS,
     build_reset_link,
@@ -650,7 +651,26 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
             has_cash_payment = True
     updates["has_cash_payment"] = has_cash_payment
 
+    updates["source_system"] = "metrik"
+    updates["is_imported"] = False
     return sale_schema.model_copy(update=updates)
+
+
+def _build_unified_sales_page(
+    *,
+    metrik_sales: list[models.Sale],
+    legacy_rows: list[dict[str, Any]],
+    skip: int,
+    limit: int,
+) -> list[schemas.SaleRead]:
+    payload: list[dict[str, Any]] = []
+    for sale in metrik_sales:
+        sale_row = _serialize_sale_response(sale).model_dump()
+        payload.append(sale_row)
+    payload.extend(legacy_rows)
+    payload.sort(key=lambda row: row.get("created_at") or datetime.min, reverse=True)
+    page = payload[skip : skip + limit]
+    return [schemas.SaleRead.model_validate(row) for row in page]
 
 
 @router.get(
@@ -894,6 +914,7 @@ def list_sales(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    source: str = Query(default="all"),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.sales", "sales_history.view", "reports.view")
@@ -911,15 +932,38 @@ def list_sales(
     if not can_view_history_range:
         date_from, date_to = _bogota_today_utc_bounds_naive()
 
-    sales = crud.get_sales(
-        db,
+    normalized_source = (source or "all").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
+    metrik_sales: list[models.Sale] = []
+    legacy_rows: list[dict[str, Any]] = []
+
+    if include_metrik:
+        metrik_sales = crud.get_sales(
+            db,
+            skip=0,
+            limit=50000,
+            date_from=date_from,
+            date_to=date_to,
+            tenant_id=tenant_id,
+        )
+    if include_legacy:
+        legacy_rows = legacy_imports.map_legacy_sales_to_report_rows(
+            db,
+            tenant_id=tenant_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+    return _build_unified_sales_page(
+        metrik_sales=metrik_sales,
+        legacy_rows=legacy_rows,
         skip=skip,
         limit=limit,
-        date_from=date_from,
-        date_to=date_to,
-        tenant_id=tenant_id,
     )
-    return [_serialize_sale_response(sale) for sale in sales]
 
 
 @router.get("/sales/history", response_model=schemas.SalesHistoryPage)
@@ -932,6 +976,7 @@ def list_sales_history(
     customer: Optional[str] = None,
     payment_method: Optional[str] = None,
     pos: Optional[str] = None,
+    source: str = Query(default="all"),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.sales", "sales_history.view")
@@ -952,10 +997,16 @@ def list_sales_history(
     else:
         date_from, date_to = _bogota_today_utc_bounds_naive()
 
+    normalized_source = (source or "all").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
     sales, total = crud.get_sales_history_page(
         db,
-        skip=skip,
-        limit=limit,
+        skip=0,
+        limit=50000,
         date_from=date_from,
         date_to=date_to,
         term=term,
@@ -964,11 +1015,60 @@ def list_sales_history(
         pos_name=pos,
         tenant_id=tenant_id,
     )
-    return schemas.SalesHistoryPage(
-        total=total,
+    if not include_metrik:
+        sales = []
+        total = 0
+
+    legacy_rows: list[dict[str, Any]] = []
+    if include_legacy:
+        legacy_rows = legacy_imports.map_legacy_sales_to_report_rows(
+            db,
+            tenant_id=tenant_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        cleaned_term = (term or "").strip().lower()
+        cleaned_customer = (customer or "").strip().lower()
+        cleaned_payment = (payment_method or "").strip().lower()
+        cleaned_pos = (pos or "").strip().lower()
+        filtered_legacy: list[dict[str, Any]] = []
+        for row in legacy_rows:
+            if cleaned_term:
+                haystack = " ".join(
+                    [
+                        str(row.get("document_number") or ""),
+                        str(row.get("sale_number") or ""),
+                        str(row.get("customer_name") or ""),
+                        " ".join(str(item.get("product_name") or "") for item in row.get("items", [])),
+                        " ".join(str(item.get("product_sku") or "") for item in row.get("items", [])),
+                    ]
+                ).lower()
+                if cleaned_term not in haystack:
+                    continue
+            if cleaned_customer and cleaned_customer not in str(row.get("customer_name") or "").lower():
+                continue
+            if cleaned_payment:
+                payment_values = [str(row.get("payment_method") or "").lower()]
+                payment_values.extend(str(p.get("method") or "").lower() for p in row.get("payments", []))
+                if cleaned_payment not in payment_values:
+                    continue
+            if cleaned_pos and cleaned_pos not in str(row.get("pos_name") or "").lower():
+                continue
+            filtered_legacy.append(row)
+        legacy_rows = filtered_legacy
+
+    merged_page = _build_unified_sales_page(
+        metrik_sales=sales,
+        legacy_rows=legacy_rows,
         skip=skip,
         limit=limit,
-        items=[_serialize_sale_response(sale) for sale in sales],
+    )
+    total_unified = int((total if include_metrik else 0) + len(legacy_rows))
+    return schemas.SalesHistoryPage(
+        total=total_unified,
+        skip=skip,
+        limit=limit,
+        items=merged_page,
     )
 
 

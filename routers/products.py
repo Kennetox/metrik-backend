@@ -302,12 +302,36 @@ def get_catalog_version(
     }
 
 
+@router.post("/cost-suggestion", response_model=schemas.ProductCostSuggestionResponse)
+def get_product_cost_suggestion(
+    payload: schemas.ProductCostSuggestionRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    try:
+        return crud.suggest_product_cost(
+            db,
+            tenant_id=tenant_id,
+            price=payload.price,
+            group_name=payload.group_name,
+            brand=payload.brand,
+            supplier=payload.supplier,
+            exclude_product_id=payload.exclude_product_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/", response_model=schemas.ProductRead)
 def create_product(
     product_in: schemas.ProductCreate,
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
+    raw_create_payload = _model_dump(product_in)
+    cost_suggestion_meta = raw_create_payload.pop("cost_suggestion_meta", None)
+    product_in = schemas.ProductCreate(**raw_create_payload)
     if actor.role != "Administrador":
         product_in = product_in.model_copy(update={"is_investment": False})
 
@@ -341,7 +365,10 @@ def create_product(
         product_id=product.id,
         action="create",
         actor_user=actor,
-        changes={"after": _model_dump(product_in)},
+        changes={
+            "after": _model_dump(product_in),
+            **({"cost_suggestion_meta": cost_suggestion_meta} if cost_suggestion_meta else {}),
+        },
     )
     return product
 
@@ -366,6 +393,9 @@ def update_product(
     db: Session = Depends(get_db),
     actor: models.PosUser = Depends(require_permission("products.manage")),
 ):
+    incoming_payload = _model_dump(product_in)
+    cost_suggestion_meta = incoming_payload.pop("cost_suggestion_meta", None)
+    product_in = schemas.ProductUpdate(**incoming_payload)
     tenant_id = crud.resolve_user_tenant_id(db, actor)
     db_product = crud.get_product(db, product_id, tenant_id=tenant_id)
     if not db_product:
@@ -412,7 +442,7 @@ def update_product(
         product_id=updated.id,
         action="update",
         actor_user=actor,
-        changes=changes or None,
+        changes=((changes or {}) | ({"cost_suggestion_meta": cost_suggestion_meta} if cost_suggestion_meta else {})) or None,
     )
     return updated
 

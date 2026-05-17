@@ -9,7 +9,7 @@ from typing import List, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XlsxImage
@@ -268,6 +268,7 @@ def send_monthly_quick_report_now(
 def get_quick_insights(
     year: int,
     month: int,
+    source: str = Query(default="all"),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("reports.view", "sales_history.view", "pos.sales")
@@ -279,18 +280,41 @@ def get_quick_insights(
         raise HTTPException(status_code=400, detail="Año inválido")
 
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    normalized_source = (source or "all").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
     start_utc, end_utc = _month_utc_bounds(year, month)
 
-    min_sale_at, max_sale_at = (
-        db.query(
-            func.min(models.Sale.created_at),
-            func.max(models.Sale.created_at),
+    min_sale_at = None
+    max_sale_at = None
+    if include_metrik:
+        min_sale_at, max_sale_at = (
+            db.query(
+                func.min(models.Sale.created_at),
+                func.max(models.Sale.created_at),
+            )
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .first()
+            or (None, None)
         )
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .first()
-        or (None, None)
-    )
+    if include_legacy:
+        legacy_min, legacy_max = (
+            db.query(
+                func.min(models.LegacySale.created_at),
+                func.max(models.LegacySale.created_at),
+            )
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .first()
+            or (None, None)
+        )
+        candidates_min = [value for value in [min_sale_at, legacy_min] if value is not None]
+        candidates_max = [value for value in [max_sale_at, legacy_max] if value is not None]
+        min_sale_at = min(candidates_min) if candidates_min else None
+        max_sale_at = max(candidates_max) if candidates_max else None
     bogota_tz = ZoneInfo("America/Bogota")
     now_year = datetime.now(bogota_tz).year
     min_year = (
@@ -304,57 +328,109 @@ def get_quick_insights(
         else now_year
     )
 
-    top_products_rows = (
-        db.query(
-            models.SaleItem.product_name.label("name"),
-            func.sum(models.SaleItem.quantity).label("units"),
-            func.sum(models.SaleItem.total).label("total"),
-        )
-        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.created_at >= start_utc)
-        .filter(models.Sale.created_at < end_utc)
-        .group_by(models.SaleItem.product_name)
-        .order_by(func.sum(models.SaleItem.total).desc())
-        .limit(5)
-        .all()
-    )
+    top_products_acc: dict[str, dict[str, float]] = {}
+    top_groups_acc: dict[str, dict[str, float]] = {}
 
-    group_name_expr = func.coalesce(models.Product.group_name, "Sin grupo")
-    top_groups_rows = (
-        db.query(
-            group_name_expr.label("name"),
-            func.sum(models.SaleItem.quantity).label("units"),
-            func.sum(models.SaleItem.total).label("total"),
+    if include_metrik:
+        top_products_rows = (
+            db.query(
+                models.SaleItem.product_name.label("name"),
+                func.sum(models.SaleItem.quantity).label("units"),
+                func.sum(models.SaleItem.total).label("total"),
+            )
+            .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+            .group_by(models.SaleItem.product_name)
+            .all()
         )
-        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
-        .outerjoin(models.Product, models.Product.id == models.SaleItem.product_id)
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.created_at >= start_utc)
-        .filter(models.Sale.created_at < end_utc)
-        .group_by(group_name_expr)
-        .order_by(func.sum(models.SaleItem.total).desc())
-        .limit(5)
-        .all()
-    )
+        for row in top_products_rows:
+            key = str(row.name or "Producto")
+            bucket = top_products_acc.setdefault(key, {"units": 0.0, "total": 0.0})
+            bucket["units"] += float(row.units or 0.0)
+            bucket["total"] += float(row.total or 0.0)
+
+        group_name_expr = func.coalesce(models.Product.group_name, "Sin grupo")
+        top_groups_rows = (
+            db.query(
+                group_name_expr.label("name"),
+                func.sum(models.SaleItem.quantity).label("units"),
+                func.sum(models.SaleItem.total).label("total"),
+            )
+            .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+            .outerjoin(models.Product, models.Product.id == models.SaleItem.product_id)
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+            .group_by(group_name_expr)
+            .all()
+        )
+        for row in top_groups_rows:
+            key = str(row.name or "Sin grupo")
+            bucket = top_groups_acc.setdefault(key, {"units": 0.0, "total": 0.0})
+            bucket["units"] += float(row.units or 0.0)
+            bucket["total"] += float(row.total or 0.0)
+
+    if include_legacy:
+        legacy_product_rows = (
+            db.query(
+                models.LegacySaleItem.product_name.label("name"),
+                func.sum(models.LegacySaleItem.quantity).label("units"),
+                func.sum(models.LegacySaleItem.total).label("total"),
+            )
+            .join(models.LegacySale, models.LegacySale.id == models.LegacySaleItem.legacy_sale_id)
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacySale.created_at >= start_utc)
+            .filter(models.LegacySale.created_at < end_utc)
+            .group_by(models.LegacySaleItem.product_name)
+            .all()
+        )
+        for row in legacy_product_rows:
+            key = str(row.name or "Producto")
+            bucket = top_products_acc.setdefault(key, {"units": 0.0, "total": 0.0})
+            bucket["units"] += float(row.units or 0.0)
+            bucket["total"] += float(row.total or 0.0)
+
+        legacy_group_expr = func.coalesce(models.LegacySaleItem.product_group, "Sin grupo")
+        legacy_group_rows = (
+            db.query(
+                legacy_group_expr.label("name"),
+                func.sum(models.LegacySaleItem.quantity).label("units"),
+                func.sum(models.LegacySaleItem.total).label("total"),
+            )
+            .join(models.LegacySale, models.LegacySale.id == models.LegacySaleItem.legacy_sale_id)
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacySale.created_at >= start_utc)
+            .filter(models.LegacySale.created_at < end_utc)
+            .group_by(legacy_group_expr)
+            .all()
+        )
+        for row in legacy_group_rows:
+            key = str(row.name or "Sin grupo")
+            bucket = top_groups_acc.setdefault(key, {"units": 0.0, "total": 0.0})
+            bucket["units"] += float(row.units or 0.0)
+            bucket["total"] += float(row.total or 0.0)
 
     top_products = [
-        schemas.ReportsQuickTopRow(
-            name=str(row.name or "Producto"),
-            units=float(row.units or 0.0),
-            total=float(row.total or 0.0),
-        )
-        for row in top_products_rows
+        schemas.ReportsQuickTopRow(name=name, units=values["units"], total=values["total"])
+        for name, values in sorted(
+            top_products_acc.items(),
+            key=lambda item: item[1]["total"],
+            reverse=True,
+        )[:5]
     ]
     top_groups = [
-        schemas.ReportsQuickTopRow(
-            name=str(row.name or "Sin grupo"),
-            units=float(row.units or 0.0),
-            total=float(row.total or 0.0),
-        )
-        for row in top_groups_rows
+        schemas.ReportsQuickTopRow(name=name, units=values["units"], total=values["total"])
+        for name, values in sorted(
+            top_groups_acc.items(),
+            key=lambda item: item[1]["total"],
+            reverse=True,
+        )[:5]
     ]
 
     return schemas.ReportsQuickInsightsResponse(
