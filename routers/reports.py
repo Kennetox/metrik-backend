@@ -367,6 +367,53 @@ def get_quick_insights(
     )
 
 
+@router.post(
+    "/products/last-sales",
+    response_model=schemas.ReportProductsLastSalesResponse,
+)
+def get_products_last_sales(
+    payload: schemas.ReportProductsLastSalesRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale_ids = [int(value) for value in payload.sale_ids if isinstance(value, int) and value > 0]
+    product_ids = [
+        int(value)
+        for value in payload.product_ids
+        if isinstance(value, int) and value > 0
+    ]
+    if not sale_ids or not product_ids:
+        return schemas.ReportProductsLastSalesResponse(rows=[])
+
+    rows = (
+        db.query(
+            models.SaleItem.product_id.label("product_id"),
+            func.max(models.Sale.created_at).label("last_sale_at"),
+        )
+        .join(models.Sale, models.Sale.id == models.SaleItem.sale_id)
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(models.Sale.id.in_(sale_ids))
+        .filter(models.SaleItem.product_id.isnot(None))
+        .filter(models.SaleItem.product_id.in_(product_ids))
+        .group_by(models.SaleItem.product_id)
+        .all()
+    )
+
+    return schemas.ReportProductsLastSalesResponse(
+        rows=[
+            schemas.ReportProductLastSaleRow(
+                product_id=int(row.product_id),
+                last_sale_at=row.last_sale_at,
+            )
+            for row in rows
+            if row.product_id is not None and row.last_sale_at is not None
+        ]
+    )
+
+
 def _parse_money(raw_value: str) -> Optional[float]:
     cleaned = raw_value.strip()
     if not cleaned:

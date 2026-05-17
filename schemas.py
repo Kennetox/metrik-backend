@@ -2682,6 +2682,20 @@ class ReportsQuickInsightsResponse(BaseModel):
     top_groups: List[ReportsQuickTopRow] = Field(default_factory=list)
 
 
+class ReportProductsLastSalesRequest(BaseModel):
+    sale_ids: List[int] = Field(default_factory=list)
+    product_ids: List[int] = Field(default_factory=list)
+
+
+class ReportProductLastSaleRow(BaseModel):
+    product_id: int
+    last_sale_at: datetime
+
+
+class ReportProductsLastSalesResponse(BaseModel):
+    rows: List[ReportProductLastSaleRow] = Field(default_factory=list)
+
+
 class ReportFavoritesUpdateRequest(BaseModel):
     preset_ids: List[str] = Field(default_factory=list)
     expected_version: Optional[str] = None
