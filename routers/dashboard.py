@@ -154,7 +154,7 @@ def _collect_sales_aggregate_by_bucket(
     if bucket not in {"day", "month"}:
         raise ValueError("bucket inválido")
     sale_base_total = case(
-        (models.Sale.is_separated.is_(True), func.coalesce(models.Sale.paid_amount, 0.0)),
+        (models.SeparatedOrder.id.is_not(None), func.coalesce(models.Sale.paid_amount, 0.0)),
         else_=func.coalesce(models.Sale.total, 0.0),
     )
     adjustment_subquery = (
@@ -178,6 +178,10 @@ def _collect_sales_aggregate_by_bucket(
             bucket_expr.label("bucket"),
             func.coalesce(func.sum(sale_base_total + func.coalesce(adjustment_subquery.c.total_delta, 0.0)), 0.0).label("total"),
             func.count(models.Sale.id).label("tickets"),
+        )
+        .outerjoin(
+            models.SeparatedOrder,
+            models.SeparatedOrder.sale_id == models.Sale.id,
         )
         .outerjoin(adjustment_subquery, adjustment_subquery.c.sale_id == models.Sale.id)
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
