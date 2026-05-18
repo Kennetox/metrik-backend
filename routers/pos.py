@@ -1010,7 +1010,7 @@ def list_sales_history(
     sales, total = crud.get_sales_history_page(
         db,
         skip=0,
-        limit=50000,
+        limit=max(1, min(5000, skip + limit)),
         date_from=date_from,
         date_to=date_to,
         term=term,
@@ -1024,42 +1024,20 @@ def list_sales_history(
         total = 0
 
     legacy_rows: list[dict[str, Any]] = []
+    legacy_total = 0
     if include_legacy:
-        legacy_rows = legacy_imports.map_legacy_sales_to_report_rows(
+        legacy_rows, legacy_total = legacy_imports.get_legacy_sales_history_page(
             db,
+            skip=0,
+            limit=max(1, min(5000, skip + limit)),
             tenant_id=tenant_id,
             date_from=date_from,
             date_to=date_to,
+            term=term,
+            customer=customer,
+            payment_method=payment_method,
+            pos_name=pos,
         )
-        cleaned_term = (term or "").strip().lower()
-        cleaned_customer = (customer or "").strip().lower()
-        cleaned_payment = (payment_method or "").strip().lower()
-        cleaned_pos = (pos or "").strip().lower()
-        filtered_legacy: list[dict[str, Any]] = []
-        for row in legacy_rows:
-            if cleaned_term:
-                haystack = " ".join(
-                    [
-                        str(row.get("document_number") or ""),
-                        str(row.get("sale_number") or ""),
-                        str(row.get("customer_name") or ""),
-                        " ".join(str(item.get("product_name") or "") for item in row.get("items", [])),
-                        " ".join(str(item.get("product_sku") or "") for item in row.get("items", [])),
-                    ]
-                ).lower()
-                if cleaned_term not in haystack:
-                    continue
-            if cleaned_customer and cleaned_customer not in str(row.get("customer_name") or "").lower():
-                continue
-            if cleaned_payment:
-                payment_values = [str(row.get("payment_method") or "").lower()]
-                payment_values.extend(str(p.get("method") or "").lower() for p in row.get("payments", []))
-                if cleaned_payment not in payment_values:
-                    continue
-            if cleaned_pos and cleaned_pos not in str(row.get("pos_name") or "").lower():
-                continue
-            filtered_legacy.append(row)
-        legacy_rows = filtered_legacy
 
     merged_page = _build_unified_sales_page(
         metrik_sales=sales,
@@ -1067,7 +1045,7 @@ def list_sales_history(
         skip=skip,
         limit=limit,
     )
-    total_unified = int((total if include_metrik else 0) + len(legacy_rows))
+    total_unified = int((total if include_metrik else 0) + (legacy_total if include_legacy else 0))
     return schemas.SalesHistoryPage(
         total=total_unified,
         skip=skip,

@@ -8,6 +8,7 @@ import re
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import String, cast, false, func, or_
 from sqlalchemy.orm import Session
 
 import models
@@ -353,18 +354,33 @@ def map_legacy_sales_to_report_rows(
     if limit is not None and limit > 0:
         query = query.limit(limit)
     sales = query.all()
+    return _serialize_legacy_sales_rows(db, sales)
+
+
+def _serialize_legacy_sales_rows(
+    db: Session,
+    sales: list[models.LegacySale],
+) -> list[dict[str, Any]]:
     if not sales:
         return []
 
-    sale_ids = [sale.id for sale in sales]
+    sale_ids = [sale.id for sale in sales if sale.id is not None]
     items_by_sale: dict[int, list[models.LegacySaleItem]] = {}
     payments_by_sale: dict[int, list[models.LegacyPayment]] = {}
 
-    item_rows = db.query(models.LegacySaleItem).filter(models.LegacySaleItem.legacy_sale_id.in_(sale_ids)).all()
+    item_rows = (
+        db.query(models.LegacySaleItem)
+        .filter(models.LegacySaleItem.legacy_sale_id.in_(sale_ids))
+        .all()
+    )
     for item in item_rows:
         items_by_sale.setdefault(int(item.legacy_sale_id), []).append(item)
 
-    payment_rows = db.query(models.LegacyPayment).filter(models.LegacyPayment.legacy_sale_id.in_(sale_ids)).all()
+    payment_rows = (
+        db.query(models.LegacyPayment)
+        .filter(models.LegacyPayment.legacy_sale_id.in_(sale_ids))
+        .all()
+    )
     for payment in payment_rows:
         payments_by_sale.setdefault(int(payment.legacy_sale_id), []).append(payment)
 
@@ -431,3 +447,98 @@ def map_legacy_sales_to_report_rows(
             }
         )
     return out
+
+
+def get_legacy_sales_history_page(
+    db: Session,
+    *,
+    skip: int,
+    limit: int,
+    tenant_id: Optional[int],
+    date_from: Optional[datetime],
+    date_to: Optional[datetime],
+    term: Optional[str],
+    customer: Optional[str],
+    payment_method: Optional[str],
+    pos_name: Optional[str],
+) -> tuple[list[dict[str, Any]], int]:
+    query = (
+        db.query(models.LegacySale)
+        .join(
+            models.LegacyImportBatch,
+            models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
+        )
+        .filter(models.LegacySale.status == "completed")
+        .filter(models.LegacyImportBatch.status == "published")
+    )
+    if tenant_id is not None:
+        query = query.filter(models.LegacySale.tenant_id == tenant_id)
+    if date_from is not None:
+        query = query.filter(models.LegacySale.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.LegacySale.created_at < date_to)
+
+    cleaned_term = (term or "").strip()
+    if cleaned_term:
+        like_term = f"%{cleaned_term}%"
+        digits_only = "".join(ch for ch in cleaned_term if ch.isdigit())
+        term_filters = [
+            models.LegacySale.display_document_number.ilike(like_term),
+            models.LegacySale.source_document_number.ilike(like_term),
+            models.LegacySale.customer_name.ilike(like_term),
+            cast(models.LegacySale.sale_number, String).ilike(like_term),
+        ]
+        if digits_only:
+            try:
+                term_filters.append(models.LegacySale.sale_number == int(digits_only))
+            except ValueError:
+                pass
+        item_match_exists = (
+            db.query(models.LegacySaleItem.id)
+            .filter(models.LegacySaleItem.legacy_sale_id == models.LegacySale.id)
+            .filter(
+                or_(
+                    models.LegacySaleItem.product_name.ilike(like_term),
+                    models.LegacySaleItem.product_sku.ilike(like_term),
+                )
+            )
+            .exists()
+        )
+        term_filters.append(item_match_exists)
+        query = query.filter(or_(*term_filters))
+
+    cleaned_customer = (customer or "").strip()
+    if cleaned_customer:
+        query = query.filter(models.LegacySale.customer_name.ilike(f"%{cleaned_customer}%"))
+
+    cleaned_payment = (payment_method or "").strip().lower()
+    if cleaned_payment:
+        if cleaned_payment == "separado":
+            query = query.filter(false())
+        else:
+            payment_match_exists = (
+                db.query(models.LegacyPayment.id)
+                .filter(models.LegacyPayment.legacy_sale_id == models.LegacySale.id)
+                .filter(func.lower(models.LegacyPayment.method) == cleaned_payment)
+                .exists()
+            )
+            query = query.filter(
+                or_(
+                    func.lower(models.LegacySale.payment_method) == cleaned_payment,
+                    func.lower(models.LegacySale.main_payment_method) == cleaned_payment,
+                    payment_match_exists,
+                )
+            )
+
+    cleaned_pos = (pos_name or "").strip()
+    if cleaned_pos:
+        query = query.filter(models.LegacySale.pos_name.ilike(f"%{cleaned_pos}%"))
+
+    total = query.with_entities(func.count(models.LegacySale.id)).scalar() or 0
+    sales = (
+        query.order_by(models.LegacySale.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return _serialize_legacy_sales_rows(db, sales), int(total)
