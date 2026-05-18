@@ -694,11 +694,20 @@ def _serialize_sales_with_adjustments(
                     adjusted_payments[0][0] if adjusted_payments[0][0] else row.payment_method
                 )
                 updates["payments"] = [
-                    {"id": -(idx + 1), "method": method, "amount": amount}
+                    schemas.SalePaymentRead(
+                        id=max(1, idx + 1),
+                        method=method or "unknown",
+                        amount=float(amount or 0.0),
+                    )
                     for idx, (method, amount) in enumerate(adjusted_payments)
                 ]
 
-        out.append(row.model_copy(update=updates) if updates else row)
+        if updates:
+            merged_payload = row.model_dump()
+            merged_payload.update(updates)
+            out.append(schemas.SaleRead.model_validate(merged_payload))
+        else:
+            out.append(row)
     return out
 
 
