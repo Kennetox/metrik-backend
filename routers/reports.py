@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy import or_
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 import crud
@@ -634,6 +635,18 @@ def get_products_by_target(
             total_value += line_total
 
     if include_legacy:
+        tenant_batch_ids_subq = (
+            db.query(models.LegacyImportBatch.id)
+            .filter(models.LegacyImportBatch.tenant_id == tenant_id)
+            .subquery()
+        )
+        legacy_tenant_filter = or_(
+            models.LegacySale.tenant_id == tenant_id,
+            and_(
+                models.LegacySale.tenant_id.is_(None),
+                models.LegacySale.import_batch_id.in_(tenant_batch_ids_subq),
+            ),
+        )
         query = (
             db.query(
                 models.LegacySale.id.label("sale_id"),
@@ -650,7 +663,7 @@ def get_products_by_target(
                 models.LegacySaleItem.total.label("total_value"),
             )
             .join(models.LegacySaleItem, models.LegacySaleItem.legacy_sale_id == models.LegacySale.id)
-            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(legacy_tenant_filter)
             .filter(models.LegacySale.status == "completed")
             .filter(models.LegacySale.created_at >= start_utc)
             .filter(models.LegacySale.created_at < end_utc)
