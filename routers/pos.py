@@ -656,16 +656,62 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
     return sale_schema.model_copy(update=updates)
 
 
+def _serialize_sales_with_adjustments(
+    db: Session,
+    *,
+    sales: list[models.Sale],
+    tenant_id: int | None,
+    include_adjustments: bool,
+) -> list[schemas.SaleRead]:
+    base_rows = [_serialize_sale_response(sale) for sale in sales]
+    if not include_adjustments or not sales:
+        return base_rows
+
+    sale_ids = [sale.id for sale in sales if sale.id is not None]
+    latest_payment_adjustment, total_delta_by_sale = crud._collect_sale_adjustments(
+        db,
+        sale_ids,
+        tenant_id=tenant_id,
+    )
+    if not latest_payment_adjustment and not total_delta_by_sale:
+        return base_rows
+
+    out: list[schemas.SaleRead] = []
+    for row in base_rows:
+        updates: dict[str, Any] = {}
+        total_delta = float(total_delta_by_sale.get(row.id, 0.0))
+        if abs(total_delta) > 0.0001:
+            base_total = float(row.total or row.paid_amount or 0.0)
+            updates["total"] = max(0.0, base_total + total_delta)
+
+        adjustment = latest_payment_adjustment.get(row.id)
+        if adjustment:
+            adjusted_payments = crud._parse_adjustment_payments(adjustment.payload)
+            if adjusted_payments:
+                adjusted_paid_amount = _sum_payments(adjusted_payments)
+                updates["paid_amount"] = adjusted_paid_amount
+                updates["payment_method"] = (
+                    adjusted_payments[0][0] if adjusted_payments[0][0] else row.payment_method
+                )
+                updates["payments"] = [
+                    {"id": -(idx + 1), "method": method, "amount": amount}
+                    for idx, (method, amount) in enumerate(adjusted_payments)
+                ]
+
+        out.append(row.model_copy(update=updates) if updates else row)
+    return out
+
+
 def _build_unified_sales_page(
     *,
-    metrik_sales: list[models.Sale],
+    metrik_sales: list[models.Sale] | list[schemas.SaleRead],
     legacy_rows: list[dict[str, Any]],
     skip: int,
     limit: int,
 ) -> list[schemas.SaleRead]:
     payload: list[dict[str, Any]] = []
     for sale in metrik_sales:
-        sale_row = _serialize_sale_response(sale).model_dump()
+        sale_row = sale.model_dump() if isinstance(sale, schemas.SaleRead) else _serialize_sale_response(sale).model_dump()
         payload.append(sale_row)
     payload.extend(legacy_rows)
     payload.sort(key=lambda row: row.get("created_at") or datetime.min, reverse=True)
@@ -915,6 +961,7 @@ def list_sales(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     source: str = Query(default="all"),
+    include_adjustments: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.sales", "sales_history.view", "reports.view")
@@ -938,19 +985,25 @@ def list_sales(
     if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
         raise HTTPException(status_code=400, detail="Filtro source inválido")
 
-    metrik_sales: list[models.Sale] = []
+    metrik_sales: list[schemas.SaleRead] = []
     legacy_rows: list[dict[str, Any]] = []
     # Bounded window to avoid materializing massive datasets in memory.
     window_size = max(1, min(5000, skip + limit))
 
     if include_metrik:
-        metrik_sales = crud.get_sales(
+        metrik_sales_raw = crud.get_sales(
             db,
             skip=0,
             limit=window_size,
             date_from=date_from,
             date_to=date_to,
             tenant_id=tenant_id,
+        )
+        metrik_sales = _serialize_sales_with_adjustments(
+            db,
+            sales=metrik_sales_raw,
+            tenant_id=tenant_id,
+            include_adjustments=include_adjustments,
         )
     if include_legacy:
         legacy_rows = legacy_imports.map_legacy_sales_to_report_rows(
@@ -981,6 +1034,7 @@ def list_sales_history(
     payment_method: Optional[str] = None,
     pos: Optional[str] = None,
     source: str = Query(default="all"),
+    include_adjustments: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.sales", "sales_history.view")
@@ -1022,6 +1076,13 @@ def list_sales_history(
     if not include_metrik:
         sales = []
         total = 0
+    else:
+        sales = _serialize_sales_with_adjustments(
+            db,
+            sales=sales,
+            tenant_id=tenant_id,
+            include_adjustments=include_adjustments,
+        )
 
     legacy_rows: list[dict[str, Any]] = []
     legacy_total = 0
