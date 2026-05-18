@@ -168,6 +168,23 @@ def _normalize_sku_key(value: Optional[str]) -> str:
     return "".join(ch for ch in raw if ch.isalnum())
 
 
+def _normalize_name_key(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    return "".join(ch for ch in raw if ch.isalnum() or ch.isspace()).strip()
+
+
+def _sku_equivalent(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if left.isdigit() and right.isdigit():
+        return left.lstrip("0") == right.lstrip("0")
+    return False
+
+
 @router.post("/email")
 def send_report_email(
     payload: schemas.ReportEmailRequest,
@@ -544,7 +561,7 @@ def get_products_by_target(
     normalized_target_group_path = _normalize_group_key(target_group_path)
     normalized_target_group_name = _normalize_group_key(target_group_name)
     target_product_sku = _normalize_sku_key(payload.product_sku)
-    target_product_name = (payload.product_name or "").strip().lower()
+    target_product_name = _normalize_name_key(payload.product_name)
 
     rows: list[dict] = []
     documents: set[str] = set()
@@ -653,9 +670,15 @@ def get_products_by_target(
                 row_product_id = int(row.product_id) if row.product_id is not None else None
                 if row_product_id != payload.product_id:
                     row_sku = _normalize_sku_key(row.sku)
-                    row_product = (row.product or "").strip().lower()
-                    sku_match = bool(target_product_sku) and row_sku == target_product_sku
-                    name_match = bool(target_product_name) and row_product == target_product_name
+                    row_product = _normalize_name_key(row.product)
+                    sku_match = bool(target_product_sku) and _sku_equivalent(
+                        row_sku, target_product_sku
+                    )
+                    name_match = bool(target_product_name) and (
+                        row_product == target_product_name
+                        or row_product.startswith(target_product_name)
+                        or target_product_name.startswith(row_product)
+                    )
                     if not (sku_match or name_match):
                         continue
             if payload.mode == "group":
