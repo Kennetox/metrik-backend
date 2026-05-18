@@ -940,12 +940,14 @@ def list_sales(
 
     metrik_sales: list[models.Sale] = []
     legacy_rows: list[dict[str, Any]] = []
+    # Bounded window to avoid materializing massive datasets in memory.
+    window_size = max(1, min(5000, skip + limit))
 
     if include_metrik:
         metrik_sales = crud.get_sales(
             db,
             skip=0,
-            limit=50000,
+            limit=window_size,
             date_from=date_from,
             date_to=date_to,
             tenant_id=tenant_id,
@@ -956,6 +958,8 @@ def list_sales(
             tenant_id=tenant_id,
             date_from=date_from,
             date_to=date_to,
+            offset=0,
+            limit=window_size,
         )
 
     return _build_unified_sales_page(

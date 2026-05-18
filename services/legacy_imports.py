@@ -336,6 +336,8 @@ def map_legacy_sales_to_report_rows(
     tenant_id: Optional[int],
     date_from: Optional[datetime],
     date_to: Optional[datetime],
+    offset: int = 0,
+    limit: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     query = db.query(models.LegacySale)
     if tenant_id is not None:
@@ -345,7 +347,12 @@ def map_legacy_sales_to_report_rows(
         query = query.filter(models.LegacySale.created_at >= date_from)
     if date_to is not None:
         query = query.filter(models.LegacySale.created_at < date_to)
-    sales = query.order_by(models.LegacySale.created_at.desc()).all()
+    query = query.order_by(models.LegacySale.created_at.desc())
+    if offset > 0:
+        query = query.offset(offset)
+    if limit is not None and limit > 0:
+        query = query.limit(limit)
+    sales = query.all()
     if not sales:
         return []
 
