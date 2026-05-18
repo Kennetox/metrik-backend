@@ -2314,6 +2314,19 @@ def suggest_product_cost(
     target_supplier = _normalized_text(supplier)
 
     strategies: List[tuple[str, List[dict[str, Any]]]] = []
+    if target_brand and target_group and target_supplier:
+        strategies.append(
+            (
+                "brand_group_supplier",
+                [
+                    row
+                    for row in prepared
+                    if row["brand"] == target_brand
+                    and row["group"] == target_group
+                    and row["supplier"] == target_supplier
+                ],
+            )
+        )
     if target_brand and target_group:
         strategies.append(
             (
@@ -2322,6 +2335,17 @@ def suggest_product_cost(
                     row
                     for row in prepared
                     if row["brand"] == target_brand and row["group"] == target_group
+                ],
+            )
+        )
+    if target_supplier and target_group:
+        strategies.append(
+            (
+                "supplier_group",
+                [
+                    row
+                    for row in prepared
+                    if row["supplier"] == target_supplier and row["group"] == target_group
                 ],
             )
         )
@@ -2392,7 +2416,9 @@ def suggest_product_cost(
         confidence_label = "baja"
 
     method_labels = {
+        "brand_group_supplier": "marca+grupo+proveedor",
         "brand_group": "marca+grupo",
+        "supplier_group": "proveedor+grupo",
         "group": "grupo",
         "supplier": "proveedor",
         "global": "global",

@@ -1485,6 +1485,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_tenant_index_postgres(connection, table)
                 for table in shared_tenant_tables:
                     _ensure_tenant_index_postgres(connection, table)
+                _ensure_products_by_target_indexes(connection, backend="postgresql")
                 _ensure_column_postgres(connection, "web_orders", "customer_approval_email_sent_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "web_orders", "customer_approval_email_last_error", "TEXT")
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_sent_at", "TIMESTAMP")
@@ -1885,6 +1886,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 for table in shared_tenant_tables:
                     if _table_exists(connection, table):
                         _ensure_column(connection, table, "tenant_id", "INTEGER")
+                _ensure_products_by_target_indexes(connection, backend="sqlite")
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
                 _ensure_table_platform_login_2fa_challenges(connection)
@@ -4405,6 +4407,64 @@ def _ensure_tenant_index_postgres(connection, table: str) -> None:
             f"CREATE INDEX IF NOT EXISTS ix_{table}_tenant_id ON {table}(tenant_id)"
         )
     )
+
+
+def _ensure_products_by_target_indexes(connection, backend: str) -> None:
+    table_exists = (
+        _table_exists_postgres if backend == "postgresql" else _table_exists
+    )
+
+    statements: list[tuple[str, str]] = [
+        (
+            "sales",
+            "CREATE INDEX IF NOT EXISTS sales_tenant_created_at_idx "
+            "ON sales (tenant_id, created_at)",
+        ),
+        (
+            "sales",
+            "CREATE INDEX IF NOT EXISTS sales_tenant_status_created_at_idx "
+            "ON sales (tenant_id, status, created_at)",
+        ),
+        (
+            "sale_items",
+            "CREATE INDEX IF NOT EXISTS sale_items_tenant_product_sale_idx "
+            "ON sale_items (tenant_id, product_id, sale_id)",
+        ),
+        (
+            "sale_items",
+            "CREATE INDEX IF NOT EXISTS sale_items_tenant_sku_sale_idx "
+            "ON sale_items (tenant_id, product_sku, sale_id)",
+        ),
+        (
+            "legacy_sales",
+            "CREATE INDEX IF NOT EXISTS legacy_sales_tenant_status_created_at_idx "
+            "ON legacy_sales (tenant_id, status, created_at)",
+        ),
+        (
+            "legacy_sales",
+            "CREATE INDEX IF NOT EXISTS legacy_sales_tenant_source_created_at_idx "
+            "ON legacy_sales (tenant_id, source_system, created_at)",
+        ),
+        (
+            "legacy_sale_items",
+            "CREATE INDEX IF NOT EXISTS legacy_sale_items_tenant_product_sale_idx "
+            "ON legacy_sale_items (tenant_id, product_id, legacy_sale_id)",
+        ),
+        (
+            "legacy_sale_items",
+            "CREATE INDEX IF NOT EXISTS legacy_sale_items_tenant_group_sale_idx "
+            "ON legacy_sale_items (tenant_id, product_group, legacy_sale_id)",
+        ),
+        (
+            "legacy_sale_items",
+            "CREATE INDEX IF NOT EXISTS legacy_sale_items_tenant_sku_sale_idx "
+            "ON legacy_sale_items (tenant_id, product_sku, legacy_sale_id)",
+        ),
+    ]
+
+    for table_name, sql in statements:
+        if table_exists(connection, table_name):
+            connection.execute(text(sql))
 
 
 def _ensure_pos_settings_id_sequence_postgres(connection) -> None:

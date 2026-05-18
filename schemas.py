@@ -2722,6 +2722,38 @@ class ReportProductsLastSalesResponse(BaseModel):
     rows: List[ReportProductLastSaleRow] = Field(default_factory=list)
 
 
+class ReportProductsByTargetRequest(BaseModel):
+    date_from: date
+    date_to: date
+    source: str = "all"
+    mode: Literal["product", "group"] = "product"
+    result_mode: Literal["detailed", "grouped"] = "detailed"
+    product_id: Optional[int] = None
+    group_path: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class ReportProductsByTargetRow(BaseModel):
+    sku: str
+    product: str
+    group: str
+    units: float
+    unit_value: float
+    total_value: float
+    last_sale_at: Optional[datetime] = None
+    sale_at: Optional[datetime] = None
+    document: Optional[str] = None
+    pos_name: Optional[str] = None
+
+
+class ReportProductsByTargetResponse(BaseModel):
+    rows_count: int = 0
+    units: float = 0.0
+    total_value: float = 0.0
+    documents: int = 0
+    rows: List[ReportProductsByTargetRow] = Field(default_factory=list)
+
+
 class ReportFavoritesUpdateRequest(BaseModel):
     preset_ids: List[str] = Field(default_factory=list)
     expected_version: Optional[str] = None

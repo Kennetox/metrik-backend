@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 import hashlib
 from io import BytesIO
@@ -487,6 +487,245 @@ def get_products_last_sales(
             for row in rows
             if row.product_id is not None and row.last_sale_at is not None
         ]
+    )
+
+
+@router.post(
+    "/products/by-target",
+    response_model=schemas.ReportProductsByTargetResponse,
+)
+def get_products_by_target(
+    payload: schemas.ReportProductsByTargetRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    if payload.date_from > payload.date_to:
+        raise HTTPException(status_code=400, detail="Rango de fechas inválido")
+    if payload.mode == "product" and (payload.product_id is None or payload.product_id <= 0):
+        raise HTTPException(status_code=400, detail="product_id es requerido para modo producto")
+    if payload.mode == "group" and not (payload.group_path or payload.group_name):
+        raise HTTPException(status_code=400, detail="group_path o group_name es requerido para modo grupo")
+
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    normalized_source = (payload.source or "all").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
+    # Reutiliza fronteras UTC del día de Bogotá para evitar desfases en enero por timezone.
+    bogota_tz = ZoneInfo("America/Bogota")
+    start_bogota = datetime(payload.date_from.year, payload.date_from.month, payload.date_from.day, tzinfo=bogota_tz)
+    end_day = datetime(payload.date_to.year, payload.date_to.month, payload.date_to.day, tzinfo=bogota_tz)
+    end_bogota = end_day + timedelta(days=1)
+    start_utc = start_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_bogota.astimezone(timezone.utc).replace(tzinfo=None)
+
+    target_group_path = (payload.group_path or "").strip().lower()
+    target_group_name = (payload.group_name or "").strip().lower()
+
+    rows: list[dict] = []
+    documents: set[str] = set()
+    units_total = 0.0
+    total_value = 0.0
+
+    if include_metrik:
+        group_expr = func.coalesce(models.Product.group_name, "")
+        query = (
+            db.query(
+                models.Sale.id.label("sale_id"),
+                models.Sale.sale_number.label("sale_number"),
+                models.Sale.document_number.label("document_number"),
+                models.Sale.created_at.label("sale_at"),
+                models.Sale.pos_name.label("pos_name"),
+                models.SaleItem.product_id.label("product_id"),
+                models.SaleItem.product_sku.label("sku"),
+                models.SaleItem.product_name.label("product"),
+                group_expr.label("group_name"),
+                models.SaleItem.quantity.label("units"),
+                models.SaleItem.unit_price.label("unit_value"),
+                models.SaleItem.total.label("total_value"),
+            )
+            .join(models.SaleItem, models.SaleItem.sale_id == models.Sale.id)
+            .outerjoin(models.Product, models.Product.id == models.SaleItem.product_id)
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+            .filter(models.SaleItem.quantity > 0)
+        )
+        if payload.mode == "product" and payload.product_id is not None:
+            query = query.filter(models.SaleItem.product_id == payload.product_id)
+        metrik_rows = query.all()
+        for row in metrik_rows:
+            group_name = (row.group_name or "").strip()
+            if payload.mode == "group":
+                normalized_group = group_name.lower()
+                by_path = bool(target_group_path) and (
+                    normalized_group == target_group_path
+                    or normalized_group.startswith(f"{target_group_path}/")
+                )
+                by_name = bool(target_group_name) and (
+                    normalized_group == target_group_name
+                    or normalized_group.endswith(f"/{target_group_name}")
+                )
+                if not (by_path or by_name):
+                    continue
+            unit_value = float(row.unit_value or 0.0)
+            units = float(row.units or 0.0)
+            line_total = float(row.total_value or (unit_value * units))
+            document = row.document_number or (f"#{int(row.sale_number):04d}" if row.sale_number else None)
+            rows.append(
+                {
+                    "sku": (row.sku or "—").strip() or "—",
+                    "product": (row.product or "Producto sin nombre").strip() or "Producto sin nombre",
+                    "group": group_name or "Sin grupo",
+                    "units": units,
+                    "unit_value": unit_value,
+                    "total_value": line_total,
+                    "sale_at": row.sale_at,
+                    "document": document or "—",
+                    "pos_name": row.pos_name or "Sin POS",
+                    "document_key": f"metrik:{row.sale_id}",
+                    "product_id": int(row.product_id) if row.product_id is not None else None,
+                }
+            )
+            documents.add(f"metrik:{row.sale_id}")
+            units_total += units
+            total_value += line_total
+
+    if include_legacy:
+        query = (
+            db.query(
+                models.LegacySale.id.label("sale_id"),
+                models.LegacySale.sale_number.label("sale_number"),
+                models.LegacySale.display_document_number.label("document_number"),
+                models.LegacySale.created_at.label("sale_at"),
+                models.LegacySale.pos_name.label("pos_name"),
+                models.LegacySaleItem.product_id.label("product_id"),
+                models.LegacySaleItem.product_sku.label("sku"),
+                models.LegacySaleItem.product_name.label("product"),
+                models.LegacySaleItem.product_group.label("group_name"),
+                models.LegacySaleItem.quantity.label("units"),
+                models.LegacySaleItem.unit_price.label("unit_value"),
+                models.LegacySaleItem.total.label("total_value"),
+            )
+            .join(models.LegacySaleItem, models.LegacySaleItem.legacy_sale_id == models.LegacySale.id)
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacySale.created_at >= start_utc)
+            .filter(models.LegacySale.created_at < end_utc)
+            .filter(models.LegacySaleItem.quantity > 0)
+        )
+        if payload.mode == "product" and payload.product_id is not None:
+            query = query.filter(models.LegacySaleItem.product_id == payload.product_id)
+        legacy_rows = query.all()
+        for row in legacy_rows:
+            group_name = (row.group_name or "").strip()
+            if payload.mode == "group":
+                normalized_group = group_name.lower()
+                by_path = bool(target_group_path) and (
+                    normalized_group == target_group_path
+                    or normalized_group.startswith(f"{target_group_path}/")
+                )
+                by_name = bool(target_group_name) and (
+                    normalized_group == target_group_name
+                    or normalized_group.endswith(f"/{target_group_name}")
+                )
+                if not (by_path or by_name):
+                    continue
+            unit_value = float(row.unit_value or 0.0)
+            units = float(row.units or 0.0)
+            line_total = float(row.total_value or (unit_value * units))
+            document = row.document_number or (f"#{int(row.sale_number):04d}" if row.sale_number else None)
+            rows.append(
+                {
+                    "sku": (row.sku or "—").strip() or "—",
+                    "product": (row.product or "Producto sin nombre").strip() or "Producto sin nombre",
+                    "group": group_name or "Sin grupo",
+                    "units": units,
+                    "unit_value": unit_value,
+                    "total_value": line_total,
+                    "sale_at": row.sale_at,
+                    "document": document or "—",
+                    "pos_name": row.pos_name or "Sin POS",
+                    "document_key": f"legacy:{row.sale_id}",
+                    "product_id": int(row.product_id) if row.product_id is not None else None,
+                }
+            )
+            documents.add(f"legacy:{row.sale_id}")
+            units_total += units
+            total_value += line_total
+
+    if payload.result_mode == "grouped":
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            product_id = row.get("product_id")
+            key = f"id:{product_id}" if product_id else f"n:{row['sku']}|{row['product']}"
+            if key not in grouped:
+                grouped[key] = {
+                    "sku": row["sku"],
+                    "product": row["product"],
+                    "group": row["group"],
+                    "units": 0.0,
+                    "total_value": 0.0,
+                    "last_sale_at": None,
+                }
+            acc = grouped[key]
+            acc["units"] += float(row["units"])
+            acc["total_value"] += float(row["total_value"])
+            if acc["last_sale_at"] is None or row["sale_at"] > acc["last_sale_at"]:
+                acc["last_sale_at"] = row["sale_at"]
+        out_rows = [
+            schemas.ReportProductsByTargetRow(
+                sku=entry["sku"],
+                product=entry["product"],
+                group=entry["group"] or "Sin grupo",
+                units=float(entry["units"]),
+                unit_value=float(entry["total_value"] / entry["units"]) if entry["units"] > 0 else 0.0,
+                total_value=float(entry["total_value"]),
+                last_sale_at=entry["last_sale_at"],
+            )
+            for entry in sorted(
+                grouped.values(),
+                key=lambda value: (
+                    value["last_sale_at"] or datetime.min,
+                    value["total_value"],
+                ),
+                reverse=True,
+            )
+        ]
+    else:
+        out_rows = [
+            schemas.ReportProductsByTargetRow(
+                sku=row["sku"],
+                product=row["product"],
+                group=row["group"] or "Sin grupo",
+                units=float(row["units"]),
+                unit_value=float(row["unit_value"]),
+                total_value=float(row["total_value"]),
+                sale_at=row["sale_at"],
+                document=row["document"],
+                pos_name=row["pos_name"],
+            )
+            for row in sorted(
+                rows,
+                key=lambda value: (
+                    value["sale_at"] or datetime.min,
+                    value["total_value"],
+                ),
+                reverse=True,
+            )
+        ]
+
+    return schemas.ReportProductsByTargetResponse(
+        rows_count=len(out_rows),
+        units=units_total,
+        total_value=total_value,
+        documents=len(documents),
+        rows=out_rows,
     )
 
 
