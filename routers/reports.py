@@ -161,6 +161,13 @@ def _normalize_group_key(value: Optional[str]) -> str:
     return normalized
 
 
+def _normalize_sku_key(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    return "".join(ch for ch in raw if ch.isalnum())
+
+
 @router.post("/email")
 def send_report_email(
     payload: schemas.ReportEmailRequest,
@@ -536,7 +543,7 @@ def get_products_by_target(
     target_group_name = (payload.group_name or "").strip().lower()
     normalized_target_group_path = _normalize_group_key(target_group_path)
     normalized_target_group_name = _normalize_group_key(target_group_name)
-    target_product_sku = (payload.product_sku or "").strip().lower()
+    target_product_sku = _normalize_sku_key(payload.product_sku)
     target_product_name = (payload.product_name or "").strip().lower()
 
     rows: list[dict] = []
@@ -645,7 +652,7 @@ def get_products_by_target(
             if payload.mode == "product":
                 row_product_id = int(row.product_id) if row.product_id is not None else None
                 if row_product_id != payload.product_id:
-                    row_sku = (row.sku or "").strip().lower()
+                    row_sku = _normalize_sku_key(row.sku)
                     row_product = (row.product or "").strip().lower()
                     sku_match = bool(target_product_sku) and row_sku == target_product_sku
                     name_match = bool(target_product_name) and row_product == target_product_name
