@@ -169,6 +169,25 @@ def _normalize_sku_key(value: Optional[str]) -> str:
     return "".join(ch for ch in raw if ch.isalnum())
 
 
+def _sku_sql_normalized(column):
+    # Lower + strip common separators at DB level to keep filtering inside SQL.
+    return func.lower(
+        func.replace(
+            func.replace(
+                func.replace(
+                    func.replace(func.coalesce(column, ""), "-", ""),
+                    " ",
+                    "",
+                ),
+                ".",
+                "",
+            ),
+            "_",
+            "",
+        )
+    )
+
+
 def _normalize_name_key(value: Optional[str]) -> str:
     raw = (value or "").strip().lower()
     if not raw:
@@ -669,6 +688,45 @@ def get_products_by_target(
             .filter(models.LegacySale.created_at < end_utc)
             .filter(models.LegacySaleItem.quantity > 0)
         )
+        if payload.mode == "product":
+            product_filters = []
+            if payload.product_id is not None and payload.product_id > 0:
+                product_filters.append(models.LegacySaleItem.product_id == payload.product_id)
+            if target_product_sku:
+                product_filters.append(_sku_sql_normalized(models.LegacySaleItem.product_sku) == target_product_sku)
+            if target_product_name:
+                name_compact = target_product_name.replace(" ", "")
+                product_filters.append(
+                    func.replace(
+                        func.lower(func.coalesce(models.LegacySaleItem.product_name, "")),
+                        " ",
+                        "",
+                    )
+                    == name_compact
+                )
+            if product_filters:
+                query = query.filter(or_(*product_filters))
+            else:
+                # Never scan full legacy table for product mode without target keys.
+                query = query.filter(text("1=0"))
+        if payload.mode == "group":
+            group_filters = []
+            if normalized_target_group_path:
+                group_filters.append(
+                    func.lower(func.coalesce(models.LegacySaleItem.product_group, "")).like(
+                        f"{normalized_target_group_path}%"
+                    )
+                )
+            if normalized_target_group_name:
+                group_filters.append(
+                    func.lower(func.coalesce(models.LegacySaleItem.product_group, "")).like(
+                        f"%{normalized_target_group_name}"
+                    )
+                )
+            if group_filters:
+                query = query.filter(or_(*group_filters))
+            else:
+                query = query.filter(text("1=0"))
         legacy_rows = query.all()
         for row in legacy_rows:
             group_name = (row.group_name or "").strip()
