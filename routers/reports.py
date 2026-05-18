@@ -654,6 +654,38 @@ def get_products_by_target(
             total_value += line_total
 
     if include_legacy:
+        target_group_sku_map: dict[str, str] = {}
+        if payload.mode == "group":
+            product_group_query = (
+                db.query(models.Product.sku, models.Product.group_name)
+                .filter(models.Product.tenant_id == tenant_id)
+                .filter(models.Product.sku.isnot(None))
+                .filter(models.Product.group_name.isnot(None))
+            )
+            product_group_filters = []
+            if normalized_target_group_path:
+                product_group_filters.append(
+                    func.lower(func.coalesce(models.Product.group_name, "")).like(
+                        f"{normalized_target_group_path}%"
+                    )
+                )
+            if normalized_target_group_name:
+                product_group_filters.append(
+                    func.lower(func.coalesce(models.Product.group_name, "")).like(
+                        f"%{normalized_target_group_name}"
+                    )
+                )
+            if product_group_filters:
+                product_group_query = product_group_query.filter(or_(*product_group_filters))
+            for product_row in product_group_query.all():
+                sku_key = _normalize_sku_key(str(product_row.sku or ""))
+                if not sku_key:
+                    continue
+                group_name = (product_row.group_name or "").strip()
+                if not group_name:
+                    continue
+                target_group_sku_map[sku_key] = group_name
+
         tenant_batch_ids_subq = (
             db.query(models.LegacyImportBatch.id)
             .filter(models.LegacyImportBatch.tenant_id == tenant_id)
@@ -723,17 +755,24 @@ def get_products_by_target(
                         f"%{normalized_target_group_name}"
                     )
                 )
+            if target_group_sku_map:
+                group_filters.append(
+                    _sku_sql_normalized(models.LegacySaleItem.product_sku).in_(
+                        list(target_group_sku_map.keys())
+                    )
+                )
             if group_filters:
                 query = query.filter(or_(*group_filters))
             else:
                 query = query.filter(text("1=0"))
         legacy_rows = query.all()
         for row in legacy_rows:
-            group_name = (row.group_name or "").strip()
+            row_sku_key = _normalize_sku_key(row.sku)
+            group_name = (row.group_name or "").strip() or target_group_sku_map.get(row_sku_key, "")
             if payload.mode == "product":
                 row_product_id = int(row.product_id) if row.product_id is not None else None
                 if row_product_id != payload.product_id:
-                    row_sku = _normalize_sku_key(row.sku)
+                    row_sku = row_sku_key
                     row_product = _normalize_name_key(row.product)
                     sku_match = bool(target_product_sku) and _sku_equivalent(
                         row_sku, target_product_sku
