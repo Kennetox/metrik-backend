@@ -656,13 +656,6 @@ def get_products_by_target(
             .filter(models.LegacySale.created_at < end_utc)
             .filter(models.LegacySaleItem.quantity > 0)
         )
-        if payload.mode == "product" and payload.product_id is not None:
-            query = query.filter(
-                or_(
-                    models.LegacySaleItem.product_id == payload.product_id,
-                    models.LegacySaleItem.product_id.is_(None),
-                )
-            )
         legacy_rows = query.all()
         for row in legacy_rows:
             group_name = (row.group_name or "").strip()
