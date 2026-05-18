@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Date, case, cast, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only, selectinload
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from io import BytesIO
@@ -217,6 +217,21 @@ def get_payment_methods_summary(
 
     sales = (
         db.query(models.Sale)
+        .options(
+            load_only(
+                models.Sale.id,
+                models.Sale.total,
+                models.Sale.paid_amount,
+                models.Sale.change_amount,
+            ),
+            selectinload(models.Sale.payments).load_only(
+                models.SalePayment.method,
+                models.SalePayment.amount,
+            ),
+            selectinload(models.Sale.separated_order).load_only(
+                models.SeparatedOrder.id
+            ),
+        )
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= start_utc)
@@ -225,6 +240,13 @@ def get_payment_methods_summary(
     )
     returns = (
         db.query(models.SaleReturn)
+        .options(
+            load_only(models.SaleReturn.id),
+            selectinload(models.SaleReturn.payments).load_only(
+                models.SaleReturnPayment.method,
+                models.SaleReturnPayment.amount,
+            ),
+        )
         .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= start_utc)
         .filter(models.SaleReturn.created_at <= end_utc)
@@ -234,6 +256,13 @@ def get_payment_methods_summary(
     )
     changes = (
         db.query(models.SaleChange)
+        .options(
+            load_only(models.SaleChange.id, models.SaleChange.refund_due),
+            selectinload(models.SaleChange.payments).load_only(
+                models.SaleChangePayment.method,
+                models.SaleChangePayment.amount,
+            ),
+        )
         .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= start_utc)
         .filter(models.SaleChange.created_at <= end_utc)
@@ -372,6 +401,22 @@ def get_dashboard_summary(
     if include_metrik:
         sales_month = (
             db.query(models.Sale)
+            .options(
+                load_only(
+                    models.Sale.id,
+                    models.Sale.created_at,
+                    models.Sale.total,
+                    models.Sale.paid_amount,
+                    models.Sale.change_amount,
+                ),
+                selectinload(models.Sale.payments).load_only(
+                    models.SalePayment.method,
+                    models.SalePayment.amount,
+                ),
+                selectinload(models.Sale.separated_order).load_only(
+                    models.SeparatedOrder.id
+                ),
+            )
             .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
             .filter(models.Sale.tenant_id == tenant_id)
             .filter(models.Sale.created_at >= month_start_utc)
@@ -379,6 +424,13 @@ def get_dashboard_summary(
         )
     returns_month = (
         db.query(models.SaleReturn)
+        .options(
+            load_only(models.SaleReturn.created_at, models.SaleReturn.total_refund),
+            selectinload(models.SaleReturn.payments).load_only(
+                models.SaleReturnPayment.amount,
+                models.SaleReturnPayment.method,
+            ),
+        )
         .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= month_start_utc)
         .filter(models.SaleReturn.status == "confirmed")
@@ -387,6 +439,17 @@ def get_dashboard_summary(
     ) if include_metrik else []
     changes_month = (
         db.query(models.SaleChange)
+        .options(
+            load_only(
+                models.SaleChange.created_at,
+                models.SaleChange.extra_payment,
+                models.SaleChange.refund_due,
+            ),
+            selectinload(models.SaleChange.payments).load_only(
+                models.SaleChangePayment.amount,
+                models.SaleChangePayment.method,
+            ),
+        )
         .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= month_start_utc)
         .filter(models.SaleChange.status == "confirmed")
@@ -406,6 +469,17 @@ def get_dashboard_summary(
     ) if include_metrik else []
     sales_trend = (
         db.query(models.Sale)
+        .options(
+            load_only(
+                models.Sale.id,
+                models.Sale.created_at,
+                models.Sale.total,
+                models.Sale.paid_amount,
+            ),
+            selectinload(models.Sale.separated_order).load_only(
+                models.SeparatedOrder.id
+            ),
+        )
         .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
         .filter(models.Sale.tenant_id == tenant_id)
         .filter(models.Sale.created_at >= trend_start_utc)
@@ -413,6 +487,12 @@ def get_dashboard_summary(
     ) if include_metrik else []
     returns_trend = (
         db.query(models.SaleReturn)
+        .options(
+            load_only(models.SaleReturn.created_at, models.SaleReturn.total_refund),
+            selectinload(models.SaleReturn.payments).load_only(
+                models.SaleReturnPayment.amount
+            ),
+        )
         .filter(models.SaleReturn.tenant_id == tenant_id)
         .filter(models.SaleReturn.created_at >= trend_start_utc)
         .filter(models.SaleReturn.status == "confirmed")
@@ -421,6 +501,13 @@ def get_dashboard_summary(
     ) if include_metrik else []
     changes_trend = (
         db.query(models.SaleChange)
+        .options(
+            load_only(
+                models.SaleChange.created_at,
+                models.SaleChange.extra_payment,
+                models.SaleChange.refund_due,
+            )
+        )
         .filter(models.SaleChange.tenant_id == tenant_id)
         .filter(models.SaleChange.created_at >= trend_start_utc)
         .filter(models.SaleChange.status == "confirmed")
