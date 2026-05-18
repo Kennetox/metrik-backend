@@ -152,6 +152,15 @@ def _month_utc_bounds(year: int, month: int) -> tuple[datetime, datetime]:
     )
 
 
+def _normalize_group_key(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = raw.replace("\\", "/").replace(">", "/").replace(" - ", "/")
+    normalized = "/".join(part.strip() for part in normalized.split("/") if part.strip())
+    return normalized
+
+
 @router.post("/email")
 def send_report_email(
     payload: schemas.ReportEmailRequest,
@@ -525,6 +534,10 @@ def get_products_by_target(
 
     target_group_path = (payload.group_path or "").strip().lower()
     target_group_name = (payload.group_name or "").strip().lower()
+    normalized_target_group_path = _normalize_group_key(target_group_path)
+    normalized_target_group_name = _normalize_group_key(target_group_name)
+    target_product_sku = (payload.product_sku or "").strip().lower()
+    target_product_name = (payload.product_name or "").strip().lower()
 
     rows: list[dict] = []
     documents: set[str] = set()
@@ -562,14 +575,14 @@ def get_products_by_target(
         for row in metrik_rows:
             group_name = (row.group_name or "").strip()
             if payload.mode == "group":
-                normalized_group = group_name.lower()
-                by_path = bool(target_group_path) and (
-                    normalized_group == target_group_path
-                    or normalized_group.startswith(f"{target_group_path}/")
+                normalized_group = _normalize_group_key(group_name)
+                by_path = bool(normalized_target_group_path) and (
+                    normalized_group == normalized_target_group_path
+                    or normalized_group.startswith(f"{normalized_target_group_path}/")
                 )
-                by_name = bool(target_group_name) and (
-                    normalized_group == target_group_name
-                    or normalized_group.endswith(f"/{target_group_name}")
+                by_name = bool(normalized_target_group_name) and (
+                    normalized_group == normalized_target_group_name
+                    or normalized_group.endswith(f"/{normalized_target_group_name}")
                 )
                 if not (by_path or by_name):
                     continue
@@ -620,19 +633,33 @@ def get_products_by_target(
             .filter(models.LegacySaleItem.quantity > 0)
         )
         if payload.mode == "product" and payload.product_id is not None:
-            query = query.filter(models.LegacySaleItem.product_id == payload.product_id)
+            query = query.filter(
+                or_(
+                    models.LegacySaleItem.product_id == payload.product_id,
+                    models.LegacySaleItem.product_id.is_(None),
+                )
+            )
         legacy_rows = query.all()
         for row in legacy_rows:
             group_name = (row.group_name or "").strip()
+            if payload.mode == "product":
+                row_product_id = int(row.product_id) if row.product_id is not None else None
+                if row_product_id != payload.product_id:
+                    row_sku = (row.sku or "").strip().lower()
+                    row_product = (row.product or "").strip().lower()
+                    sku_match = bool(target_product_sku) and row_sku == target_product_sku
+                    name_match = bool(target_product_name) and row_product == target_product_name
+                    if not (sku_match or name_match):
+                        continue
             if payload.mode == "group":
-                normalized_group = group_name.lower()
-                by_path = bool(target_group_path) and (
-                    normalized_group == target_group_path
-                    or normalized_group.startswith(f"{target_group_path}/")
+                normalized_group = _normalize_group_key(group_name)
+                by_path = bool(normalized_target_group_path) and (
+                    normalized_group == normalized_target_group_path
+                    or normalized_group.startswith(f"{normalized_target_group_path}/")
                 )
-                by_name = bool(target_group_name) and (
-                    normalized_group == target_group_name
-                    or normalized_group.endswith(f"/{target_group_name}")
+                by_name = bool(normalized_target_group_name) and (
+                    normalized_group == normalized_target_group_name
+                    or normalized_group.endswith(f"/{normalized_target_group_name}")
                 )
                 if not (by_path or by_name):
                     continue

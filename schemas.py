@@ -2729,6 +2729,8 @@ class ReportProductsByTargetRequest(BaseModel):
     mode: Literal["product", "group"] = "product"
     result_mode: Literal["detailed", "grouped"] = "detailed"
     product_id: Optional[int] = None
+    product_sku: Optional[str] = None
+    product_name: Optional[str] = None
     group_path: Optional[str] = None
     group_name: Optional[str] = None
 
