@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_
+from sqlalchemy import Date, case, cast, func, or_
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
@@ -134,6 +134,60 @@ def _resolve_range_bounds(
     else:
         raise HTTPException(status_code=400, detail="Rango inválido")
     return start_dt, end_dt
+
+
+def _bogota_date_expr(timestamp_column):
+    utc_ts = func.timezone("UTC", timestamp_column)
+    bogota_ts = func.timezone("America/Bogota", utc_ts)
+    return cast(bogota_ts, Date)
+
+
+def _collect_sales_aggregate_by_bucket(
+    db: Session,
+    *,
+    tenant_id: int,
+    created_at_column,
+    bucket: str,
+    start_utc: datetime,
+    end_utc: datetime,
+):
+    if bucket not in {"day", "month"}:
+        raise ValueError("bucket inválido")
+    sale_base_total = case(
+        (models.Sale.is_separated.is_(True), func.coalesce(models.Sale.paid_amount, 0.0)),
+        else_=func.coalesce(models.Sale.total, 0.0),
+    )
+    adjustment_subquery = (
+        db.query(
+            models.DocumentAdjustment.doc_id.label("sale_id"),
+            func.coalesce(func.sum(models.DocumentAdjustment.total_delta), 0.0).label("total_delta"),
+        )
+        .filter(models.DocumentAdjustment.doc_type == "sale")
+        .filter(models.DocumentAdjustment.tenant_id == tenant_id)
+        .group_by(models.DocumentAdjustment.doc_id)
+        .subquery()
+    )
+    bogota_date = _bogota_date_expr(created_at_column)
+    bucket_expr = (
+        bogota_date
+        if bucket == "day"
+        else func.date_trunc("month", cast(bogota_date, Date))
+    )
+    rows = (
+        db.query(
+            bucket_expr.label("bucket"),
+            func.coalesce(func.sum(sale_base_total + func.coalesce(adjustment_subquery.c.total_delta, 0.0)), 0.0).label("total"),
+            func.count(models.Sale.id).label("tickets"),
+        )
+        .outerjoin(adjustment_subquery, adjustment_subquery.c.sale_id == models.Sale.id)
+        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+        .filter(models.Sale.tenant_id == tenant_id)
+        .filter(models.Sale.created_at >= start_utc)
+        .filter(models.Sale.created_at < end_utc)
+        .group_by(bucket_expr)
+        .all()
+    )
+    return rows
 
 
 @router.get("/payment-methods", response_model=schemas.PaymentMethodsSummary)
@@ -701,83 +755,84 @@ def get_monthly_sales(
     if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
         raise HTTPException(status_code=400, detail="Filtro source inválido")
 
-    sales_year = []
+    monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
     if include_metrik:
-        sales_year = (
-            db.query(models.Sale)
-            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-            .filter(models.Sale.tenant_id == tenant_id)
-            .filter(models.Sale.created_at >= year_start)
-            .filter(models.Sale.created_at < year_end)
+        sales_monthly_rows = _collect_sales_aggregate_by_bucket(
+            db,
+            tenant_id=tenant_id,
+            created_at_column=models.Sale.created_at,
+            bucket="month",
+            start_utc=year_start,
+            end_utc=year_end,
+        )
+        for row in sales_monthly_rows:
+            month = int(row.bucket.month)
+            monthly[month]["total"] += float(row.total or 0.0)
+            monthly[month]["tickets"] += int(row.tickets or 0)
+
+        separated_monthly_rows = (
+            db.query(
+                func.date_trunc("month", _bogota_date_expr(models.SeparatedOrderPayment.paid_at)).label("bucket"),
+                func.coalesce(func.sum(models.SeparatedOrderPayment.amount), 0.0).label("total"),
+            )
+            .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+            .filter(
+                or_(
+                    models.SeparatedOrderPayment.status.is_(None),
+                    models.SeparatedOrderPayment.status != "voided",
+                )
+            )
+            .filter(models.SeparatedOrderPayment.paid_at >= year_start)
+            .filter(models.SeparatedOrderPayment.paid_at < year_end)
+            .group_by("bucket")
             .all()
         )
-    returns_year = (
-        db.query(models.SaleReturn)
-        .filter(models.SaleReturn.tenant_id == tenant_id)
-        .filter(models.SaleReturn.created_at >= year_start)
-        .filter(models.SaleReturn.created_at < year_end)
-        .filter(models.SaleReturn.status == "confirmed")
-        .filter(models.SaleReturn.adjustment_reference.is_(None))
-        .all()
-    )
-    changes_year = (
-        db.query(models.SaleChange)
-        .filter(models.SaleChange.tenant_id == tenant_id)
-        .filter(models.SaleChange.created_at >= year_start)
-        .filter(models.SaleChange.created_at < year_end)
-        .filter(models.SaleChange.status == "confirmed")
-        .all()
-    )
-    separated_payments_year = (
-        db.query(models.SeparatedOrderPayment)
-        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
-        .filter(
-            or_(
-                models.SeparatedOrderPayment.status.is_(None),
-                models.SeparatedOrderPayment.status != "voided",
+        for row in separated_monthly_rows:
+            month = int(row.bucket.month)
+            monthly[month]["total"] += float(row.total or 0.0)
+
+        returns_monthly_rows = (
+            db.query(
+                func.date_trunc("month", _bogota_date_expr(models.SaleReturn.created_at)).label("bucket"),
+                func.coalesce(func.sum(models.SaleReturn.total_refund), 0.0).label("total"),
             )
+            .filter(models.SaleReturn.tenant_id == tenant_id)
+            .filter(models.SaleReturn.created_at >= year_start)
+            .filter(models.SaleReturn.created_at < year_end)
+            .filter(models.SaleReturn.status == "confirmed")
+            .filter(models.SaleReturn.adjustment_reference.is_(None))
+            .group_by("bucket")
+            .all()
         )
-        .filter(models.SeparatedOrderPayment.paid_at >= year_start)
-        .filter(models.SeparatedOrderPayment.paid_at < year_end)
-        .all()
-    )
+        for row in returns_monthly_rows:
+            month = int(row.bucket.month)
+            monthly[month]["total"] -= float(row.total or 0.0)
 
-    monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
-    _, total_delta_by_sale = _collect_sale_adjustments(
-        db, [sale.id for sale in sales_year], tenant_id
-    ) if sales_year else ({}, {})
-
-    for sale in sales_year:
-        net_total = _sale_cash_total(sale)
-        if net_total <= 0:
-            continue
-        month = _to_bogota_date(sale.created_at, bogota_tz).month
-        monthly[month]["total"] += net_total
-        monthly[month]["tickets"] += 1
-        delta = total_delta_by_sale.get(sale.id, 0.0)
-        if delta:
-            monthly[month]["total"] += float(delta)
-
-    if include_metrik:
-        for payment in separated_payments_year:
-            month = _to_bogota_date(payment.paid_at, bogota_tz).month
-            monthly[month]["total"] += float(payment.amount or 0.0)
-
-    if include_metrik:
-        for ret in returns_year:
-            month = _to_bogota_date(ret.created_at, bogota_tz).month
-            refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
-            monthly[month]["total"] -= refund_total
-
-    if include_metrik:
-        for change in changes_year:
-            month = _to_bogota_date(change.created_at, bogota_tz).month
-            monthly[month]["total"] += float(change.extra_payment or 0.0)
-            monthly[month]["total"] -= float(change.refund_due or 0.0)
+        changes_monthly_rows = (
+            db.query(
+                func.date_trunc("month", _bogota_date_expr(models.SaleChange.created_at)).label("bucket"),
+                func.coalesce(func.sum(models.SaleChange.extra_payment), 0.0).label("extra"),
+                func.coalesce(func.sum(models.SaleChange.refund_due), 0.0).label("refund"),
+            )
+            .filter(models.SaleChange.tenant_id == tenant_id)
+            .filter(models.SaleChange.created_at >= year_start)
+            .filter(models.SaleChange.created_at < year_end)
+            .filter(models.SaleChange.status == "confirmed")
+            .group_by("bucket")
+            .all()
+        )
+        for row in changes_monthly_rows:
+            month = int(row.bucket.month)
+            monthly[month]["total"] += float(row.extra or 0.0)
+            monthly[month]["total"] -= float(row.refund or 0.0)
 
     if include_legacy:
-        legacy_sales = (
-            db.query(models.LegacySale)
+        legacy_monthly_rows = (
+            db.query(
+                func.date_trunc("month", _bogota_date_expr(models.LegacySale.created_at)).label("bucket"),
+                func.coalesce(func.sum(models.LegacySale.total), 0.0).label("total"),
+                func.count(models.LegacySale.id).label("tickets"),
+            )
             .join(
                 models.LegacyImportBatch,
                 models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
@@ -787,12 +842,13 @@ def get_monthly_sales(
             .filter(models.LegacyImportBatch.status == "published")
             .filter(models.LegacySale.created_at >= year_start)
             .filter(models.LegacySale.created_at < year_end)
+            .group_by("bucket")
             .all()
         )
-        for sale in legacy_sales:
-            month = _to_bogota_date(sale.created_at, bogota_tz).month
-            monthly[month]["total"] += float(sale.total or 0.0)
-            monthly[month]["tickets"] += 1
+        for row in legacy_monthly_rows:
+            month = int(row.bucket.month)
+            monthly[month]["total"] += float(row.total or 0.0)
+            monthly[month]["tickets"] += int(row.tickets or 0)
 
     return [
         schemas.MonthlySalesPoint(
@@ -848,85 +904,85 @@ def get_daily_sales(
     if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
         raise HTTPException(status_code=400, detail="Filtro source inválido")
 
-    sales = []
-    if include_metrik:
-        sales = (
-            db.query(models.Sale)
-            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-            .filter(models.Sale.tenant_id == tenant_id)
-            .filter(models.Sale.created_at >= start_utc)
-            .filter(models.Sale.created_at < end_utc)
-            .all()
-        )
-    returns = (
-        db.query(models.SaleReturn)
-        .filter(models.SaleReturn.tenant_id == tenant_id)
-        .filter(models.SaleReturn.created_at >= start_utc)
-        .filter(models.SaleReturn.created_at < end_utc)
-        .filter(models.SaleReturn.status == "confirmed")
-        .filter(models.SaleReturn.adjustment_reference.is_(None))
-        .all()
-    )
-    changes = (
-        db.query(models.SaleChange)
-        .filter(models.SaleChange.tenant_id == tenant_id)
-        .filter(models.SaleChange.created_at >= start_utc)
-        .filter(models.SaleChange.created_at < end_utc)
-        .filter(models.SaleChange.status == "confirmed")
-        .all()
-    )
-    separated_payments = (
-        db.query(models.SeparatedOrderPayment)
-        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
-        .filter(
-            or_(
-                models.SeparatedOrderPayment.status.is_(None),
-                models.SeparatedOrderPayment.status != "voided",
-            )
-        )
-        .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
-        .filter(models.SeparatedOrderPayment.paid_at < end_utc)
-        .all()
-    )
-
     totals_by_day = defaultdict(float)
     tickets_by_day = defaultdict(int)
     refunds_by_day = defaultdict(float)
     change_extra_by_day = defaultdict(float)
     change_refund_by_day = defaultdict(float)
-    _, total_delta_by_sale = _collect_sale_adjustments(
-        db, [sale.id for sale in sales], tenant_id
-    ) if sales else ({}, {})
-
-    for sale in sales:
-        day = _to_bogota_date(sale.created_at, bogota_tz)
-        cash_total = _sale_cash_total(sale)
-        delta = float(total_delta_by_sale.get(sale.id, 0.0))
-        effective_total = cash_total + delta
-        if effective_total > 0:
-            totals_by_day[day] += effective_total
-            tickets_by_day[day] += 1
-
     if include_metrik:
-        for payment in separated_payments:
-            day = _to_bogota_date(payment.paid_at, bogota_tz)
-            totals_by_day[day] += float(payment.amount or 0.0)
+        sales_daily_rows = _collect_sales_aggregate_by_bucket(
+            db,
+            tenant_id=tenant_id,
+            created_at_column=models.Sale.created_at,
+            bucket="day",
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+        for row in sales_daily_rows:
+            day = row.bucket
+            totals_by_day[day] += float(row.total or 0.0)
+            tickets_by_day[day] += int(row.tickets or 0)
 
-    if include_metrik:
-        for ret in returns:
-            day = _to_bogota_date(ret.created_at, bogota_tz)
-            refund_total = sum(float(p.amount or 0.0) for p in ret.payments) or float(ret.total_refund or 0.0)
-            refunds_by_day[day] += refund_total
+        separated_daily_rows = (
+            db.query(
+                _bogota_date_expr(models.SeparatedOrderPayment.paid_at).label("bucket"),
+                func.coalesce(func.sum(models.SeparatedOrderPayment.amount), 0.0).label("total"),
+            )
+            .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+            .filter(
+                or_(
+                    models.SeparatedOrderPayment.status.is_(None),
+                    models.SeparatedOrderPayment.status != "voided",
+                )
+            )
+            .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
+            .filter(models.SeparatedOrderPayment.paid_at < end_utc)
+            .group_by("bucket")
+            .all()
+        )
+        for row in separated_daily_rows:
+            totals_by_day[row.bucket] += float(row.total or 0.0)
 
-    if include_metrik:
-        for change in changes:
-            day = _to_bogota_date(change.created_at, bogota_tz)
-            change_extra_by_day[day] += float(change.extra_payment or 0.0)
-            change_refund_by_day[day] += float(change.refund_due or 0.0)
+        returns_daily_rows = (
+            db.query(
+                _bogota_date_expr(models.SaleReturn.created_at).label("bucket"),
+                func.coalesce(func.sum(models.SaleReturn.total_refund), 0.0).label("total"),
+            )
+            .filter(models.SaleReturn.tenant_id == tenant_id)
+            .filter(models.SaleReturn.created_at >= start_utc)
+            .filter(models.SaleReturn.created_at < end_utc)
+            .filter(models.SaleReturn.status == "confirmed")
+            .filter(models.SaleReturn.adjustment_reference.is_(None))
+            .group_by("bucket")
+            .all()
+        )
+        for row in returns_daily_rows:
+            refunds_by_day[row.bucket] += float(row.total or 0.0)
+
+        changes_daily_rows = (
+            db.query(
+                _bogota_date_expr(models.SaleChange.created_at).label("bucket"),
+                func.coalesce(func.sum(models.SaleChange.extra_payment), 0.0).label("extra"),
+                func.coalesce(func.sum(models.SaleChange.refund_due), 0.0).label("refund"),
+            )
+            .filter(models.SaleChange.tenant_id == tenant_id)
+            .filter(models.SaleChange.created_at >= start_utc)
+            .filter(models.SaleChange.created_at < end_utc)
+            .filter(models.SaleChange.status == "confirmed")
+            .group_by("bucket")
+            .all()
+        )
+        for row in changes_daily_rows:
+            change_extra_by_day[row.bucket] += float(row.extra or 0.0)
+            change_refund_by_day[row.bucket] += float(row.refund or 0.0)
 
     if include_legacy:
-        legacy_sales = (
-            db.query(models.LegacySale)
+        legacy_daily_rows = (
+            db.query(
+                _bogota_date_expr(models.LegacySale.created_at).label("bucket"),
+                func.coalesce(func.sum(models.LegacySale.total), 0.0).label("total"),
+                func.count(models.LegacySale.id).label("tickets"),
+            )
             .join(
                 models.LegacyImportBatch,
                 models.LegacyImportBatch.id == models.LegacySale.import_batch_id,
@@ -936,12 +992,12 @@ def get_daily_sales(
             .filter(models.LegacyImportBatch.status == "published")
             .filter(models.LegacySale.created_at >= start_utc)
             .filter(models.LegacySale.created_at < end_utc)
+            .group_by("bucket")
             .all()
         )
-        for sale in legacy_sales:
-            day = _to_bogota_date(sale.created_at, bogota_tz)
-            totals_by_day[day] += float(sale.total or 0.0)
-            tickets_by_day[day] += 1
+        for row in legacy_daily_rows:
+            totals_by_day[row.bucket] += float(row.total or 0.0)
+            tickets_by_day[row.bucket] += int(row.tickets or 0)
 
     points: List[schemas.SalesTrendPoint] = []
     cursor = start_date
