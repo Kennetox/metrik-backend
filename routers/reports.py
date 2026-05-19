@@ -170,22 +170,9 @@ def _normalize_sku_key(value: Optional[str]) -> str:
 
 
 def _sku_sql_normalized(column):
-    # Lower + strip common separators at DB level to keep filtering inside SQL.
-    return func.lower(
-        func.replace(
-            func.replace(
-                func.replace(
-                    func.replace(func.coalesce(column, ""), "-", ""),
-                    " ",
-                    "",
-                ),
-                ".",
-                "",
-            ),
-            "_",
-            "",
-        )
-    )
+    # Keep SQL normalization equivalent to _normalize_sku_key:
+    # lowercase and keep only alphanumeric chars.
+    return func.lower(func.regexp_replace(func.coalesce(column, ""), r"[^a-zA-Z0-9]", "", "g"))
 
 
 def _normalize_name_key(value: Optional[str]) -> str:
