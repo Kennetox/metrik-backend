@@ -588,6 +588,18 @@ def get_products_by_target(
     units_total = 0.0
     total_value = 0.0
 
+    def _matches_target_group(group_name: str) -> bool:
+        normalized_group = _normalize_group_key(group_name)
+        by_path = bool(normalized_target_group_path) and (
+            normalized_group == normalized_target_group_path
+            or normalized_group.startswith(f"{normalized_target_group_path}/")
+        )
+        by_name = bool(normalized_target_group_name) and (
+            normalized_group == normalized_target_group_name
+            or normalized_group.endswith(f"/{normalized_target_group_name}")
+        )
+        return by_path or by_name
+
     if include_metrik:
         group_expr = func.coalesce(models.Product.group_name, "")
         query = (
@@ -619,16 +631,7 @@ def get_products_by_target(
         for row in metrik_rows:
             group_name = (row.group_name or "").strip()
             if payload.mode == "group":
-                normalized_group = _normalize_group_key(group_name)
-                by_path = bool(normalized_target_group_path) and (
-                    normalized_group == normalized_target_group_path
-                    or normalized_group.startswith(f"{normalized_target_group_path}/")
-                )
-                by_name = bool(normalized_target_group_name) and (
-                    normalized_group == normalized_target_group_name
-                    or normalized_group.endswith(f"/{normalized_target_group_name}")
-                )
-                if not (by_path or by_name):
+                if not _matches_target_group(group_name):
                     continue
             unit_value = float(row.unit_value or 0.0)
             units = float(row.units or 0.0)
@@ -662,27 +665,14 @@ def get_products_by_target(
                 .filter(models.Product.sku.isnot(None))
                 .filter(models.Product.group_name.isnot(None))
             )
-            product_group_filters = []
-            if normalized_target_group_path:
-                product_group_filters.append(
-                    func.lower(func.coalesce(models.Product.group_name, "")).like(
-                        f"{normalized_target_group_path}%"
-                    )
-                )
-            if normalized_target_group_name:
-                product_group_filters.append(
-                    func.lower(func.coalesce(models.Product.group_name, "")).like(
-                        f"%{normalized_target_group_name}"
-                    )
-                )
-            if product_group_filters:
-                product_group_query = product_group_query.filter(or_(*product_group_filters))
             for product_row in product_group_query.all():
                 sku_key = _normalize_sku_key(str(product_row.sku or ""))
                 if not sku_key:
                     continue
                 group_name = (product_row.group_name or "").strip()
                 if not group_name:
+                    continue
+                if not _matches_target_group(group_name):
                     continue
                 target_group_sku_map[sku_key] = group_name
 
@@ -785,16 +775,7 @@ def get_products_by_target(
                     if not (sku_match or name_match):
                         continue
             if payload.mode == "group":
-                normalized_group = _normalize_group_key(group_name)
-                by_path = bool(normalized_target_group_path) and (
-                    normalized_group == normalized_target_group_path
-                    or normalized_group.startswith(f"{normalized_target_group_path}/")
-                )
-                by_name = bool(normalized_target_group_name) and (
-                    normalized_group == normalized_target_group_name
-                    or normalized_group.endswith(f"/{normalized_target_group_name}")
-                )
-                if not (by_path or by_name):
+                if not _matches_target_group(group_name):
                     continue
             unit_value = float(row.unit_value or 0.0)
             units = float(row.units or 0.0)
