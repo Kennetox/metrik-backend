@@ -2740,6 +2740,7 @@ class ReportProductsByTargetRow(BaseModel):
     product: str
     group: str
     units: float
+    product_cost: Optional[float] = None
     unit_value: float
     total_value: float
     last_sale_at: Optional[datetime] = None
