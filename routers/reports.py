@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import and_
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import crud
@@ -791,7 +792,13 @@ def get_products_by_target(
         grouped: dict[str, dict] = {}
         for row in rows:
             product_id = row.get("product_id")
-            key = f"id:{product_id}" if product_id else f"n:{row['sku']}|{row['product']}"
+            sku_key = _normalize_sku_key(row.get("sku"))
+            if sku_key:
+                key = f"sku:{sku_key}"
+            elif product_id:
+                key = f"id:{product_id}"
+            else:
+                key = f"n:{row['product']}"
             if key not in grouped:
                 grouped[key] = {
                     "sku": row["sku"],
