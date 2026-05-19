@@ -163,6 +163,13 @@ def _normalize_group_key(value: Optional[str]) -> str:
     return normalized
 
 
+def _compact_group_key(value: Optional[str]) -> str:
+    normalized = _normalize_group_key(value)
+    if not normalized:
+        return ""
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
 def _normalize_sku_key(value: Optional[str]) -> str:
     raw = (value or "").strip().lower()
     if not raw:
@@ -568,6 +575,8 @@ def get_products_by_target(
     target_group_name = (payload.group_name or "").strip().lower()
     normalized_target_group_path = _normalize_group_key(target_group_path)
     normalized_target_group_name = _normalize_group_key(target_group_name)
+    compact_target_group_path = _compact_group_key(target_group_path)
+    compact_target_group_name = _compact_group_key(target_group_name)
     target_product_sku = _normalize_sku_key(payload.product_sku)
     target_product_name = _normalize_name_key(payload.product_name)
 
@@ -578,6 +587,23 @@ def get_products_by_target(
 
     def _matches_target_group(group_name: str) -> bool:
         normalized_group = _normalize_group_key(group_name)
+        compact_group = _compact_group_key(group_name)
+        if not normalized_group and not compact_group:
+            return False
+        target_keys = [
+            key
+            for key in [
+                normalized_target_group_path,
+                normalized_target_group_name,
+                normalized_target_group_path.split("/")[-1]
+                if normalized_target_group_path
+                else "",
+                normalized_target_group_name.split("/")[-1]
+                if normalized_target_group_name
+                else "",
+            ]
+            if key
+        ]
         by_path = bool(normalized_target_group_path) and (
             normalized_group == normalized_target_group_path
             or normalized_group.startswith(f"{normalized_target_group_path}/")
@@ -586,7 +612,22 @@ def get_products_by_target(
             normalized_group == normalized_target_group_name
             or normalized_group.endswith(f"/{normalized_target_group_name}")
         )
-        return by_path or by_name
+        by_segments = any(
+            normalized_group == key
+            or normalized_group.startswith(f"{key}/")
+            or normalized_group.endswith(f"/{key}")
+            for key in target_keys
+        )
+        compact_targets = [
+            key
+            for key in [compact_target_group_path, compact_target_group_name]
+            if key
+        ]
+        by_compact = any(
+            compact_group == compact_target or compact_target in compact_group
+            for compact_target in compact_targets
+        )
+        return by_path or by_name or by_segments or by_compact
 
     if include_metrik:
         group_expr = func.coalesce(models.Product.group_name, "")
