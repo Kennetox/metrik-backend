@@ -52,6 +52,6 @@ async def upload_product_video(
 
     return schemas.UploadProductVideoResponse(
         url=result.url,
-        duration_seconds=None,
+        duration_seconds=result.duration_seconds,
         size_bytes=result.size_bytes,
     )

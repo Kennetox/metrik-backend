@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -9,7 +12,8 @@ from fastapi import UploadFile
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 ALLOWED_VIDEO_EXTENSIONS = {".mp4"}
-MAX_VIDEO_SIZE = 20 * 1024 * 1024  # 20MB
+MAX_VIDEO_SIZE = 80 * 1024 * 1024  # 80MB input before compression
+MAX_VIDEO_DURATION_SECONDS = 45
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -30,6 +34,7 @@ class StoredProductVideo:
     filename: str
     url: str
     size_bytes: int
+    duration_seconds: int
 
 
 @dataclass
@@ -237,20 +242,118 @@ async def save_product_video(
     if extension not in ALLOWED_VIDEO_EXTENSIONS:
         raise ValueError("Formato no soportado. Usa MP4.")
 
+    ffmpeg_bin = shutil.which("ffmpeg")
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffmpeg_bin or not ffprobe_bin:
+        raise ValueError("No hay soporte de compresión de video disponible en el servidor.")
+
     contents = await file.read()
     if len(contents) > MAX_VIDEO_SIZE:
-        raise ValueError("El video supera los 20MB permitidos")
+        raise ValueError("El video supera los 80MB permitidos para procesar.")
 
-    filename = f"{uuid4().hex}{extension}"
-    base_dir = _get_product_video_dir(tenant_id)
-    base_dir.mkdir(parents=True, exist_ok=True)
-    file_path = base_dir / filename
+    with tempfile.TemporaryDirectory(prefix="metrik-video-") as temp_dir:
+        temp_root = Path(temp_dir)
+        input_path = temp_root / f"input{extension}"
+        output_path = temp_root / "output.mp4"
+        input_path.write_bytes(contents)
 
-    with open(file_path, "wb") as f:
-        f.write(contents)
+        duration_seconds = _probe_video_duration_seconds(ffprobe_bin, input_path)
+        if duration_seconds <= 0:
+            raise ValueError("No se pudo leer la duración del video.")
+        if duration_seconds > MAX_VIDEO_DURATION_SECONDS:
+            raise ValueError(f"El video no puede superar los {MAX_VIDEO_DURATION_SECONDS} segundos.")
+
+        scale_filter = (
+            "scale="
+            "if(gte(iw,ih),min(1280,iw),-2):"
+            "if(lt(iw,ih),min(1280,ih),-2)"
+        )
+        command = [
+            ffmpeg_bin,
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            scale_filter,
+            "-r",
+            "30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "28",
+            "-maxrate",
+            "2500k",
+            "-bufsize",
+            "5000k",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(output_path),
+        ]
+        process = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if process.returncode != 0 or not output_path.exists():
+            raise ValueError("No se pudo comprimir el video. Intenta con otro archivo MP4.")
+
+        output_size = output_path.stat().st_size
+        if output_size <= 0:
+            raise ValueError("No se pudo generar un video válido.")
+
+        filename = f"{uuid4().hex}.mp4"
+        base_dir = _get_product_video_dir(tenant_id)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        file_path = base_dir / filename
+        file_path.write_bytes(output_path.read_bytes())
 
     url = _build_product_video_public_url(filename, tenant_id)
-    return StoredProductVideo(filename=filename, url=url, size_bytes=len(contents))
+    return StoredProductVideo(
+        filename=filename,
+        url=url,
+        size_bytes=output_size,
+        duration_seconds=duration_seconds,
+    )
+
+
+def _probe_video_duration_seconds(ffprobe_bin: str, file_path: Path) -> int:
+    process = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(file_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if process.returncode != 0:
+        return 0
+    raw_value = (process.stdout or "").strip()
+    try:
+        return int(round(float(raw_value)))
+    except Exception:
+        return 0
 
 
 async def save_pos_logo(file: UploadFile) -> StoredLogo:
