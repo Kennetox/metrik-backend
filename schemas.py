@@ -60,6 +60,7 @@ class ProductBase(BaseModel):
     web_whatsapp_message: Optional[str] = None
     web_warranty_text: Optional[str] = None
     web_gallery_urls: List[str] = Field(default_factory=list)
+    web_video_url: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -108,6 +109,7 @@ class ProductUpdate(BaseModel):
     web_whatsapp_message: Optional[str] = None
     web_warranty_text: Optional[str] = None
     web_gallery_urls: Optional[List[str]] = None
+    web_video_url: Optional[str] = None
     tile_color: Optional[str] = Field(
         default=None,
         pattern=r"^#([0-9a-fA-F]{6})$",
@@ -138,7 +140,7 @@ class ProductUpdate(BaseModel):
             normalized = item.strip()
             if normalized and normalized not in clean:
                 clean.append(normalized)
-        return clean[:3]
+        return clean[:5]
 
 
 class ProductGroupBase(BaseModel):
@@ -209,7 +211,7 @@ class ProductRead(ProductBase):
             normalized = item.strip()
             if normalized and normalized not in clean:
                 clean.append(normalized)
-        return clean[:3]
+        return clean[:5]
 
     class Config:
         from_attributes = True
@@ -558,6 +560,7 @@ class WebCatalogProductCard(BaseModel):
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
     gallery: List[str] = Field(default_factory=list)
+    video_url: Optional[str] = None
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
     compare_price: Optional[float] = None
@@ -609,6 +612,7 @@ class WebCatalogProductDetail(BaseModel):
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
     gallery: List[str] = Field(default_factory=list)
+    video_url: Optional[str] = None
     price_mode: WebCatalogPriceMode
     price: Optional[float] = None
     compare_price: Optional[float] = None
@@ -2645,6 +2649,12 @@ class MonthlySalesPoint(BaseModel):
 class UploadProductImageResponse(BaseModel):
     url: str
     thumb_url: str
+
+
+class UploadProductVideoResponse(BaseModel):
+    url: str
+    duration_seconds: Optional[int] = None
+    size_bytes: int
 
 
 class UploadLogoResponse(BaseModel):

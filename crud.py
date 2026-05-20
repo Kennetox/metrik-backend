@@ -167,7 +167,7 @@ def _parse_product_gallery_urls(value: Any) -> list[str]:
         normalized = item.strip()
         if normalized and normalized not in clean:
             clean.append(normalized)
-    return clean[:3]
+    return clean[:5]
 
 
 def _build_product_gallery_urls(product: models.Product) -> list[str]:
@@ -177,7 +177,7 @@ def _build_product_gallery_urls(product: models.Product) -> list[str]:
             normalized = candidate.strip()
             if normalized and normalized not in urls:
                 urls.append(normalized)
-    return urls[:3]
+    return urls[:5]
 
 
 def _is_cables_group(group_name: Optional[str]) -> bool:
@@ -4120,6 +4120,7 @@ def create_product(
         web_price_mode=product_in.web_price_mode,
         web_whatsapp_message=product_in.web_whatsapp_message,
         web_warranty_text=product_in.web_warranty_text,
+        web_video_url=((product_in.web_video_url or "").strip() or None),
         web_gallery_urls=(
             json.dumps(_parse_product_gallery_urls(product_in.web_gallery_urls), ensure_ascii=False)
             if _parse_product_gallery_urls(product_in.web_gallery_urls)
@@ -4148,6 +4149,8 @@ def update_product(
         elif "image_url" not in data:
             data["image_url"] = None
             data["image_thumb_url"] = None
+    if "web_video_url" in data:
+        data["web_video_url"] = ((data.get("web_video_url") or "").strip() or None)
     if "web_slug" in data:
         data["web_slug"] = build_product_web_slug(
             data.get("web_slug") or data.get("web_name") or data.get("name") or db_product.name,
@@ -5089,6 +5092,7 @@ def get_web_catalog_products(
                 image_url=product.image_url,
                 image_thumb_url=product.image_thumb_url,
                 gallery=_build_product_gallery_urls(product),
+                video_url=product.web_video_url,
                 price_mode=price_mode,
                 price=price,
                 compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
@@ -5370,6 +5374,8 @@ def get_web_catalog_best_sellers(
         normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
         category_def = category_map.get(normalized_category_key)
         stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            continue
         price_mode = (product.web_price_mode or "visible").strip().lower()
         sale_price = resolve_web_product_sale_price(product)
         items.append(
@@ -5388,6 +5394,7 @@ def get_web_catalog_best_sellers(
                 image_url=product.image_url,
                 image_thumb_url=product.image_thumb_url,
                 gallery=_build_product_gallery_urls(product),
+                video_url=product.web_video_url,
                 price_mode=price_mode,
                 price=(sale_price if price_mode == "visible" else None),
                 compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
@@ -5433,6 +5440,8 @@ def get_web_catalog_best_sellers(
             if normalized_category_key and normalized_category_key in inactive_category_keys:
                 continue
             stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+                continue
             category_def = category_map.get(normalized_category_key)
             price_mode = (product.web_price_mode or "visible").strip().lower()
             sale_price = resolve_web_product_sale_price(product)
@@ -5452,6 +5461,7 @@ def get_web_catalog_best_sellers(
                     image_url=product.image_url,
                     image_thumb_url=product.image_thumb_url,
                     gallery=_build_product_gallery_urls(product),
+                    video_url=product.web_video_url,
                     price_mode=price_mode,
                     price=(sale_price if price_mode == "visible" else None),
                     compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
@@ -5547,6 +5557,7 @@ def get_web_catalog_product_by_slug(
             image_url=product.image_url,
             image_thumb_url=product.image_thumb_url,
             gallery=_build_product_gallery_urls(product),
+            video_url=product.web_video_url,
             price_mode=price_mode,
             price=(sale_price if price_mode == "visible" else None),
             compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),

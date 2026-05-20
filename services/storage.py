@@ -8,6 +8,8 @@ from fastapi import UploadFile
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_VIDEO_EXTENSIONS = {".mp4"}
+MAX_VIDEO_SIZE = 20 * 1024 * 1024  # 20MB
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -21,6 +23,13 @@ class StoredProductImage:
     filename: str
     url: str
     thumb_url: str
+
+
+@dataclass
+class StoredProductVideo:
+    filename: str
+    url: str
+    size_bytes: int
 
 
 @dataclass
@@ -79,6 +88,29 @@ def _build_public_url(filename: str, tenant_id: Optional[int] = None) -> str:
     if base_url:
         return f"{base_url.rstrip('/')}/{relative_path}"
     storage_path = os.getenv("PRODUCT_UPLOAD_PUBLIC_PATH", "/uploads/product-images")
+    return f"{storage_path.rstrip('/')}/{relative_path}"
+
+
+def _get_product_video_dir(tenant_id: Optional[int] = None) -> Path:
+    configured = os.getenv("PRODUCT_VIDEO_UPLOAD_DIR")
+    if configured:
+        base_dir = Path(configured)
+    else:
+        base_dir = _get_base_dir().parent / "product-videos"
+    if tenant_id is not None:
+        base_dir = base_dir / str(tenant_id)
+    return base_dir
+
+
+def _build_product_video_public_url(filename: str, tenant_id: Optional[int] = None) -> str:
+    relative_parts = [filename]
+    if tenant_id is not None:
+        relative_parts.insert(0, str(tenant_id))
+    relative_path = "/".join(relative_parts)
+    base_url = os.getenv("PRODUCT_VIDEO_UPLOAD_BASE_URL")
+    if base_url:
+        return f"{base_url.rstrip('/')}/{relative_path}"
+    storage_path = os.getenv("PRODUCT_VIDEO_UPLOAD_PUBLIC_PATH", "/uploads/product-videos")
     return f"{storage_path.rstrip('/')}/{relative_path}"
 
 
@@ -194,6 +226,31 @@ async def save_product_image(
 
     url = _build_public_url(filename, tenant_id)
     return StoredProductImage(filename=filename, url=url, thumb_url=url)
+
+
+async def save_product_video(
+    file: UploadFile,
+    tenant_id: Optional[int] = None,
+) -> StoredProductVideo:
+    original_name = file.filename or ""
+    extension = Path(original_name).suffix.lower()
+    if extension not in ALLOWED_VIDEO_EXTENSIONS:
+        raise ValueError("Formato no soportado. Usa MP4.")
+
+    contents = await file.read()
+    if len(contents) > MAX_VIDEO_SIZE:
+        raise ValueError("El video supera los 20MB permitidos")
+
+    filename = f"{uuid4().hex}{extension}"
+    base_dir = _get_product_video_dir(tenant_id)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    file_path = base_dir / filename
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    url = _build_product_video_public_url(filename, tenant_id)
+    return StoredProductVideo(filename=filename, url=url, size_bytes=len(contents))
 
 
 async def save_pos_logo(file: UploadFile) -> StoredLogo:

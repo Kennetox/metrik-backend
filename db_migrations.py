@@ -951,6 +951,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(
                     connection,
                     "products",
+                    "web_video_url",
+                    "VARCHAR(512)",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "products",
                     "web_category_key",
                     "VARCHAR(64)",
                 )
@@ -1769,6 +1775,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     _ensure_column(connection, "products", "web_whatsapp_message", "TEXT")
                     _ensure_column(connection, "products", "web_warranty_text", "TEXT")
                     _ensure_column(connection, "products", "web_gallery_urls", "TEXT")
+                    _ensure_column(connection, "products", "web_video_url", "TEXT")
                     _ensure_column(connection, "products", "web_category_key", "TEXT")
                     connection.execute(
                         text(

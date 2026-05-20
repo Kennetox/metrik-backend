@@ -138,6 +138,7 @@ class Product(Base):
     web_whatsapp_message = Column(Text, nullable=True)
     web_warranty_text = Column(String(160), nullable=True)
     web_gallery_urls = Column(Text, nullable=True)
+    web_video_url = Column(String(512), nullable=True)
 
     stock_min = Column(Integer, default=0)
     active = Column(Boolean, default=True)
