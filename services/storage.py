@@ -268,7 +268,7 @@ async def save_product_video(
             "if(gte(iw,ih),min(1280,iw),-2):"
             "if(lt(iw,ih),min(1280,ih),-2)"
         )
-        command = [
+        transcode_command = [
             ffmpeg_bin,
             "-y",
             "-i",
@@ -302,14 +302,40 @@ async def save_product_video(
             str(output_path),
         ]
         process = subprocess.run(
-            command,
+            transcode_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=False,
         )
         if process.returncode != 0 or not output_path.exists():
-            raise ValueError("No se pudo comprimir el video. Intenta con otro archivo MP4.")
+            # Fallback para MOV/MP4 ya codificados en H264/AAC: solo remux a MP4.
+            remux_command = [
+                ffmpeg_bin,
+                "-y",
+                "-i",
+                str(input_path),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            remux_process = subprocess.run(
+                remux_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if remux_process.returncode != 0 or not output_path.exists():
+                transcode_error = (process.stderr or "").strip().splitlines()[-4:]
+                remux_error = (remux_process.stderr or "").strip().splitlines()[-4:]
+                error_tail = "\n".join([*transcode_error, *remux_error]).strip()
+                raise ValueError(
+                    "No se pudo comprimir el video. Intenta con otro archivo MP4."
+                    + (f" ({error_tail})" if error_tail else "")
+                )
 
         output_size = output_path.stat().st_size
         if output_size <= 0:
