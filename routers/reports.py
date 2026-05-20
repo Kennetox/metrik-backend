@@ -585,22 +585,29 @@ def get_products_by_target(
     units_total = 0.0
     total_value = 0.0
     product_cost_by_sku: dict[str, float] = {}
+    product_price_by_sku: dict[str, float] = {}
 
-    product_cost_rows = (
-        db.query(models.Product.sku, models.Product.cost)
+    product_value_rows = (
+        db.query(models.Product.sku, models.Product.cost, models.Product.price)
         .filter(models.Product.tenant_id == tenant_id)
         .filter(models.Product.sku.isnot(None))
         .all()
     )
-    for product_cost_row in product_cost_rows:
-        sku_key = _normalize_sku_key(str(product_cost_row.sku or ""))
+    for product_value_row in product_value_rows:
+        sku_key = _normalize_sku_key(str(product_value_row.sku or ""))
         if not sku_key:
             continue
         try:
-            cost_value = float(product_cost_row.cost)
+            cost_value = float(product_value_row.cost)
         except (TypeError, ValueError):
             continue
         product_cost_by_sku[sku_key] = cost_value
+        try:
+            price_value = float(product_value_row.price)
+        except (TypeError, ValueError):
+            price_value = None
+        if price_value is not None:
+            product_price_by_sku[sku_key] = price_value
 
     def _matches_target_group(group_name: str) -> bool:
         normalized_group = _normalize_group_key(group_name)
@@ -660,6 +667,7 @@ def get_products_by_target(
                 models.SaleItem.product_name.label("product"),
                 group_expr.label("group_name"),
                 models.Product.cost.label("product_cost"),
+                models.Product.price.label("product_price"),
                 models.SaleItem.quantity.label("units"),
                 models.SaleItem.unit_price.label("unit_value"),
                 models.SaleItem.total.label("total_value"),
@@ -689,8 +697,17 @@ def get_products_by_target(
                     row_product_cost = float(row.product_cost)
             except (TypeError, ValueError):
                 row_product_cost = None
+            row_sku_key = _normalize_sku_key(row.sku)
             if row_product_cost is None:
-                row_product_cost = product_cost_by_sku.get(_normalize_sku_key(row.sku))
+                row_product_cost = product_cost_by_sku.get(row_sku_key)
+            row_product_price = None
+            try:
+                if row.product_price is not None:
+                    row_product_price = float(row.product_price)
+            except (TypeError, ValueError):
+                row_product_price = None
+            if row_product_price is None:
+                row_product_price = product_price_by_sku.get(row_sku_key)
             document = row.document_number or (f"#{int(row.sale_number):04d}" if row.sale_number else None)
             rows.append(
                 {
@@ -699,6 +716,7 @@ def get_products_by_target(
                     "group": group_name or "Sin grupo",
                     "units": units,
                     "product_cost": row_product_cost,
+                    "product_price": row_product_price,
                     "unit_value": unit_value,
                     "total_value": line_total,
                     "sale_at": row.sale_at,
@@ -837,6 +855,7 @@ def get_products_by_target(
             units = float(row.units or 0.0)
             line_total = float(row.total_value or (unit_value * units))
             row_product_cost = product_cost_by_sku.get(row_sku_key)
+            row_product_price = product_price_by_sku.get(row_sku_key)
             document = row.document_number or (f"#{int(row.sale_number):04d}" if row.sale_number else None)
             rows.append(
                 {
@@ -845,6 +864,7 @@ def get_products_by_target(
                     "group": group_name or "Sin grupo",
                     "units": units,
                     "product_cost": row_product_cost,
+                    "product_price": row_product_price,
                     "unit_value": unit_value,
                     "total_value": line_total,
                     "sale_at": row.sale_at,
@@ -876,6 +896,7 @@ def get_products_by_target(
                     "group": row["group"],
                     "units": 0.0,
                     "product_cost": row.get("product_cost"),
+                    "product_price": row.get("product_price"),
                     "total_value": 0.0,
                     "last_sale_at": None,
                 }
@@ -884,6 +905,8 @@ def get_products_by_target(
             acc["total_value"] += float(row["total_value"])
             if acc.get("product_cost") is None and row.get("product_cost") is not None:
                 acc["product_cost"] = row.get("product_cost")
+            if acc.get("product_price") is None and row.get("product_price") is not None:
+                acc["product_price"] = row.get("product_price")
             if acc["last_sale_at"] is None or row["sale_at"] > acc["last_sale_at"]:
                 acc["last_sale_at"] = row["sale_at"]
         out_rows = [
@@ -893,7 +916,8 @@ def get_products_by_target(
                 group=entry["group"] or "Sin grupo",
                 units=float(entry["units"]),
                 product_cost=float(entry["product_cost"]) if entry.get("product_cost") is not None else None,
-                unit_value=float(entry["total_value"] / entry["units"]) if entry["units"] > 0 else 0.0,
+                avg_unit_value=float(entry["total_value"] / entry["units"]) if entry["units"] > 0 else 0.0,
+                unit_value=float(entry["product_price"]) if entry.get("product_price") is not None else (float(entry["total_value"] / entry["units"]) if entry["units"] > 0 else 0.0),
                 total_value=float(entry["total_value"]),
                 last_sale_at=entry["last_sale_at"],
             )
