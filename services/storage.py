@@ -11,7 +11,7 @@ from fastapi import UploadFile
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_VIDEO_EXTENSIONS = {".mp4"}
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov"}
 MAX_VIDEO_SIZE = 80 * 1024 * 1024  # 80MB input before compression
 MAX_VIDEO_DURATION_SECONDS = 45
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
@@ -240,7 +240,7 @@ async def save_product_video(
     original_name = file.filename or ""
     extension = Path(original_name).suffix.lower()
     if extension not in ALLOWED_VIDEO_EXTENSIONS:
-        raise ValueError("Formato no soportado. Usa MP4.")
+        raise ValueError("Formato no soportado. Usa MP4 o MOV.")
 
     ffmpeg_bin = shutil.which("ffmpeg")
     ffprobe_bin = shutil.which("ffprobe")
