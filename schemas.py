@@ -1605,6 +1605,9 @@ class HREmployeeBase(BaseModel):
     payroll_next_due_at: Optional[date] = None
     payroll_reference: Optional[str] = None
     payroll_notes: Optional[str] = None
+    show_in_schedule: bool = True
+    active_from: Optional[date] = None
+    active_until: Optional[date] = None
 
 
 class HREmployeeCreate(HREmployeeBase):
@@ -1632,6 +1635,10 @@ class HREmployeeUpdate(BaseModel):
     payroll_next_due_at: Optional[date] = None
     payroll_reference: Optional[str] = None
     payroll_notes: Optional[str] = None
+    show_in_schedule: Optional[bool] = None
+    active_from: Optional[date] = None
+    active_until: Optional[date] = None
+    order_index: Optional[int] = None
 
 
 class HREmployeeSystemUserSummary(BaseModel):
@@ -1643,6 +1650,7 @@ class HREmployeeSystemUserSummary(BaseModel):
 
 class HREmployeeRead(HREmployeeBase):
     id: int
+    order_index: int = 0
     created_at: datetime
     updated_at: datetime
     system_user: Optional[HREmployeeSystemUserSummary] = None
@@ -1675,6 +1683,15 @@ class HREmployeeCreateSystemUserRequest(BaseModel):
 
 class HREmployeeLinkSystemUserRequest(BaseModel):
     user_id: int
+
+
+class HREmployeeReorderItem(BaseModel):
+    id: int
+    order_index: int
+
+
+class HREmployeeReorderRequest(BaseModel):
+    items: List[HREmployeeReorderItem]
 
 
 class HRSystemUserOption(BaseModel):

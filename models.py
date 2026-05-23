@@ -1229,6 +1229,10 @@ class HREmployee(Base):
     payroll_next_due_at = Column(Date, nullable=True)
     payroll_reference = Column(String, nullable=True)
     payroll_notes = Column(Text, nullable=True)
+    show_in_schedule = Column(Boolean, nullable=False, default=True)
+    active_from = Column(Date, nullable=True)
+    active_until = Column(Date, nullable=True)
+    order_index = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,

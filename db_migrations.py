@@ -1147,6 +1147,41 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "hr_employees", "payroll_notes", "TEXT")
                 _ensure_column_postgres(
                     connection,
+                    "hr_employees",
+                    "show_in_schedule",
+                    "BOOLEAN NOT NULL DEFAULT TRUE",
+                )
+                _ensure_column_postgres(connection, "hr_employees", "active_from", "DATE")
+                _ensure_column_postgres(connection, "hr_employees", "active_until", "DATE")
+                _ensure_column_postgres(
+                    connection,
+                    "hr_employees",
+                    "order_index",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE hr_employees
+                        SET active_from = COALESCE(active_from, DATE(created_at), CURRENT_DATE)
+                        WHERE active_from IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE hr_employees
+                        SET show_in_schedule = TRUE
+                        WHERE show_in_schedule = FALSE
+                          AND status = 'Activo'
+                          AND active_until IS NULL
+                          AND updated_at = created_at
+                        """
+                    )
+                )
+                _ensure_column_postgres(
+                    connection,
                     "pos_stations",
                     "station_email",
                     "TEXT",
@@ -2057,6 +2092,31 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "hr_employees", "payroll_next_due_at", "DATE")
                 _ensure_column(connection, "hr_employees", "payroll_reference", "TEXT")
                 _ensure_column(connection, "hr_employees", "payroll_notes", "TEXT")
+                _ensure_column(connection, "hr_employees", "show_in_schedule", "BOOLEAN NOT NULL DEFAULT 1")
+                _ensure_column(connection, "hr_employees", "active_from", "DATE")
+                _ensure_column(connection, "hr_employees", "active_until", "DATE")
+                _ensure_column(connection, "hr_employees", "order_index", "INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    text(
+                        """
+                        UPDATE hr_employees
+                        SET active_from = COALESCE(active_from, DATE(created_at), DATE('now'))
+                        WHERE active_from IS NULL
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        UPDATE hr_employees
+                        SET show_in_schedule = 1
+                        WHERE show_in_schedule = 0
+                          AND status = 'Activo'
+                          AND active_until IS NULL
+                          AND updated_at = created_at
+                        """
+                    )
+                )
                 if _table_exists(connection, "pos_closures"):
                     _ensure_column(
                         connection,
@@ -2794,11 +2854,15 @@ def _ensure_table_hr_employees(connection) -> None:
                     payroll_currency TEXT,
                     payroll_payment_method TEXT,
                     payroll_day_of_week TEXT,
-                    payroll_day_of_month INTEGER,
-                    payroll_last_paid_at DATE,
+                payroll_day_of_month INTEGER,
+                payroll_last_paid_at DATE,
                     payroll_next_due_at DATE,
                     payroll_reference TEXT,
                     payroll_notes TEXT,
+                    show_in_schedule BOOLEAN NOT NULL DEFAULT 1,
+                    active_from DATE,
+                    active_until DATE,
+                    order_index INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -2836,6 +2900,10 @@ def _ensure_table_hr_employees(connection) -> None:
         _ensure_column(connection, "hr_employees", "payroll_next_due_at", "DATE")
         _ensure_column(connection, "hr_employees", "payroll_reference", "TEXT")
         _ensure_column(connection, "hr_employees", "payroll_notes", "TEXT")
+        _ensure_column(connection, "hr_employees", "show_in_schedule", "BOOLEAN NOT NULL DEFAULT 1")
+        _ensure_column(connection, "hr_employees", "active_from", "DATE")
+        _ensure_column(connection, "hr_employees", "active_until", "DATE")
+        _ensure_column(connection, "hr_employees", "order_index", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "hr_employees", "created_at", "DATETIME")
         _ensure_column(connection, "hr_employees", "updated_at", "DATETIME")
 
@@ -4005,6 +4073,10 @@ def _ensure_table_hr_employees_postgres(connection) -> None:
                 payroll_next_due_at DATE,
                 payroll_reference TEXT,
                 payroll_notes TEXT,
+                show_in_schedule BOOLEAN NOT NULL DEFAULT TRUE,
+                active_from DATE,
+                active_until DATE,
+                order_index INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )

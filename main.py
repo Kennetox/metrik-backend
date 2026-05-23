@@ -54,8 +54,8 @@ app = FastAPI(
 # Carga variables desde `.env` para entorno local/dev.
 load_dotenv()
 
-# Kill switch del modulo de horarios (queda completamente apagado).
-ENABLE_SCHEDULE_MODULE = False
+# Kill switch del modulo de horarios.
+ENABLE_SCHEDULE_MODULE = True
 
 
 @app.get("/health")

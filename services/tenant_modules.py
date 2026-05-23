@@ -130,8 +130,8 @@ TENANT_MODULES: List[TenantModuleDef] = [
         "label": "Agenda",
         "description": "Horarios y turnos del personal.",
         "required": False,
-        "platform_visible": False,
-        "enabled_by_default": False,
+        "platform_visible": True,
+        "enabled_by_default": True,
     },
 ]
 

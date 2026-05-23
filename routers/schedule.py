@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date, timedelta
+from html import escape
 from io import StringIO
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -224,31 +225,184 @@ def export_schedule_pdf(
     shift_map = {(shift.employee_id, shift.shift_date): shift for shift in view.shifts}
     week_days = [view.week.week_start + timedelta(days=offset) for offset in range(7)]
 
-    lines: list[str] = [
-        f"Semana: {view.week.week_start.isoformat()} | Estado: {view.week.status}",
-        "",
-    ]
+    start_label = view.week.week_start.strftime("%d/%m/%Y")
+    end_label = (view.week.week_start + timedelta(days=6)).strftime("%d/%m/%Y")
+    generated_label = date.today().strftime("%d/%m/%Y")
+
+    def _to_ampm(time_str: str | None) -> str:
+        if not time_str:
+            return "--"
+        try:
+            hour_str, minute_str = time_str.split(":")
+            hour = int(hour_str)
+            minute = int(minute_str)
+            suffix = "pm" if hour >= 12 else "am"
+            hour12 = hour % 12 or 12
+            return f"{hour12}:{minute:02d}{suffix}"
+        except Exception:
+            return time_str
+
+    rows_html: list[str] = []
     for employee in view.employees:
-        chunks: list[str] = []
+        cells: list[str] = []
         for day in week_days:
             shift = shift_map.get((employee.id, day))
-            day_label = day.strftime("%a %d")
             if not shift:
-                chunks.append(f"{day_label}: -")
-            elif shift.is_time_off:
-                chunks.append(f"{day_label}: Libre")
-            else:
-                chunks.append(f"{day_label}: {shift.start_time}-{shift.end_time}")
-        lines.append(f"{employee.name}: " + " | ".join(chunks))
+                cells.append('<td class="cell empty">-</td>')
+                continue
+            if shift.is_time_off:
+                cells.append('<td class="cell off">Libre</td>')
+                continue
+            start = _to_ampm(shift.start_time)
+            end = _to_ampm(shift.end_time)
+            cells.append(
+                '<td class="cell">'
+                f'<div class="slot">{escape(start)} - {escape(end)}</div>'
+                "</td>"
+            )
+        status_class = "active" if employee.status == "Activo" else "inactive"
+        rows_html.append(
+            "<tr>"
+            f'<td class="employee"><div class="name">{escape(employee.name)}</div>'
+            f'<div class="status {status_class}">{escape(employee.status)}</div></td>'
+            + "".join(cells)
+            + "</tr>"
+        )
 
-    lines.append("")
-    lines.append("Totales por día:")
-    for day_total in view.day_totals:
-        lines.append(f"{day_total.shift_date.isoformat()}: {day_total.total_hours:.2f}h")
-    lines.append(f"Total semana: {view.week_total_hours:.2f}h")
+    headers_html = "".join(
+        f'<th>{escape(day.strftime("%a %d").upper())}</th>' for day in week_days
+    )
 
-    pdf_bytes = pdf_utils.build_simple_pdf("Horario semanal", lines)
-    filename = f"horario_{view.week.week_start.isoformat()}.pdf"
+    html_content = f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <style>
+          @page {{
+            size: A4 landscape;
+            margin: 14mm 10mm 12mm;
+          }}
+          body {{
+            font-family: Arial, sans-serif;
+            color: #0f172a;
+            margin: 0;
+          }}
+          .header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            border-bottom: 2px solid #0ea5a4;
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+          }}
+          .title {{
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: .02em;
+            margin: 0;
+          }}
+          .meta {{
+            margin-top: 3px;
+            font-size: 11px;
+            color: #334155;
+          }}
+          .meta-right {{
+            text-align: right;
+            font-size: 10px;
+            color: #64748b;
+          }}
+          table {{
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+          }}
+          thead th {{
+            background: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            padding: 7px 6px;
+            font-size: 11px;
+            letter-spacing: .03em;
+            text-transform: uppercase;
+            color: #334155;
+          }}
+          th:first-child {{
+            text-align: left;
+            width: 18%;
+          }}
+          td {{
+            border: 1px solid #cbd5e1;
+            vertical-align: middle;
+            text-align: center;
+            height: 34px;
+            padding: 4px;
+            font-size: 10px;
+          }}
+          .employee {{
+            text-align: left;
+            padding: 6px 8px;
+            background: #f8fafc;
+          }}
+          .name {{
+            font-weight: 700;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }}
+          .status {{
+            margin-top: 2px;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .02em;
+          }}
+          .status.active {{ color: #047857; }}
+          .status.inactive {{ color: #b91c1c; }}
+          .cell.empty {{ color: #94a3b8; }}
+          .cell.off {{
+            background: #fef3c7;
+            color: #92400e;
+            font-weight: 700;
+          }}
+          .slot {{
+            display: inline-block;
+            border-radius: 999px;
+            padding: 3px 8px;
+            background: #0ea5a4;
+            color: #f8fafc;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: .01em;
+            white-space: nowrap;
+          }}
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <h1 class="title">Horario Semanal</h1>
+            <div class="meta">Rango: {start_label} al {end_label}</div>
+          </div>
+          <div class="meta-right">Generado: {generated_label}</div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Empleado</th>
+              {headers_html}
+            </tr>
+          </thead>
+          <tbody>
+            {"".join(rows_html)}
+          </tbody>
+        </table>
+      </body>
+    </html>
+    """
+
+    pdf_bytes = pdf_utils.build_pdf_from_html("Horario semanal", html_content)
+    filename = f"horario_{view.week.week_start.isoformat()}_a_{(view.week.week_start + timedelta(days=6)).isoformat()}.pdf"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(
         iter([pdf_bytes]),

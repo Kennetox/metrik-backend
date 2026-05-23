@@ -38,6 +38,21 @@ def create_hr_employee(
     return crud.create_hr_employee(db, payload, tenant_id=tenant_id)
 
 
+@router.patch("/employees/reorder-list", response_model=List[schemas.HREmployeeRead])
+def reorder_hr_employees(
+    payload: schemas.HREmployeeReorderRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
+):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Debes enviar la nueva orden")
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    try:
+        return crud.reorder_hr_employees(db, payload.items, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/employees/{employee_id}", response_model=schemas.HREmployeeRead)
 def get_hr_employee(
     employee_id: int,

@@ -7869,7 +7869,11 @@ def list_hr_employees(
         query = query.filter(models.HREmployee.status == status)
     return (
         query.options(joinedload(models.HREmployee.system_user))
-        .order_by(models.HREmployee.created_at.desc())
+        .order_by(
+            models.HREmployee.order_index.asc(),
+            models.HREmployee.created_at.desc(),
+            models.HREmployee.id.desc(),
+        )
         .all()
     )
 
@@ -7901,9 +7905,25 @@ def create_hr_employee(
     tenant_id: Optional[int] = None,
 ) -> models.HREmployee:
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    payload_data = payload.model_dump()
+    if payload_data.get("status") == "Activo":
+        payload_data["active_from"] = payload_data.get("active_from") or date.today()
+        payload_data["active_until"] = None
+    elif payload_data.get("active_until") is None:
+        payload_data["active_until"] = date.today()
+    max_order_index = (
+        db.query(func.max(models.HREmployee.order_index))
+        .filter(
+            models.HREmployee.tenant_id == effective_tenant_id
+            if effective_tenant_id is not None
+            else true()
+        )
+        .scalar()
+    )
     employee = models.HREmployee(
         tenant_id=effective_tenant_id,
-        **payload.model_dump(),
+        order_index=int(max_order_index or 0) + 10,
+        **payload_data,
     )
     db.add(employee)
     db.commit()
@@ -7917,6 +7937,16 @@ def update_hr_employee(
     payload: schemas.HREmployeeUpdate,
 ) -> models.HREmployee:
     data = payload.model_dump(exclude_unset=True)
+    previous_status = employee.status
+    next_status = data.get("status", previous_status)
+
+    if next_status == "Inactivo" and previous_status != "Inactivo":
+        data["active_until"] = data.get("active_until") or date.today()
+    if next_status == "Activo":
+        data["active_until"] = None
+        if previous_status != "Activo":
+            data["active_from"] = data.get("active_from") or date.today()
+
     for field, value in data.items():
         setattr(employee, field, value)
     db.commit()
@@ -7935,6 +7965,26 @@ def update_hr_employee(
         db.commit()
         db.refresh(employee)
     return employee
+
+
+def reorder_hr_employees(
+    db: Session,
+    reorder_items: List[schemas.HREmployeeReorderItem],
+    tenant_id: Optional[int] = None,
+) -> List[models.HREmployee]:
+    ids = [item.id for item in reorder_items]
+    query = db.query(models.HREmployee).filter(models.HREmployee.id.in_(ids))
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if effective_tenant_id is not None:
+        query = query.filter(models.HREmployee.tenant_id == effective_tenant_id)
+    employees = query.all()
+    employees_map = {employee.id: employee for employee in employees}
+    if len(employees_map) != len(ids):
+        raise ValueError("Algún empleado no existe")
+    for item in reorder_items:
+        employees_map[item.id].order_index = int(item.order_index)
+    db.commit()
+    return list_hr_employees(db, tenant_id=effective_tenant_id)
 
 
 def list_hr_employee_documents(
@@ -8394,6 +8444,30 @@ def get_schedule_week_view(
         schemas.ScheduleDayTotal(shift_date=day, total_hours=day_totals_map.get(day, 0.0))
         for day in week_days
     ]
+    week_end = week.week_start + timedelta(days=6)
+    employees_with_shifts = {shift.employee_id for shift in shifts}
+
+    def _employee_in_week(employee: models.HREmployee) -> bool:
+        if not bool(getattr(employee, "show_in_schedule", True)):
+            return False
+        if employee.id in employees_with_shifts:
+            return True
+        start = employee.active_from or (employee.created_at.date() if employee.created_at else None)
+        end = employee.active_until
+        if end is None and employee.status == "Inactivo":
+            # Backward-compatible fallback for historical rows that became inactive
+            # before active_until existed in schema.
+            end = (
+                employee.updated_at.date()
+                if employee.updated_at
+                else (employee.created_at.date() if employee.created_at else None)
+            )
+        if start and start > week_end:
+            return False
+        if end and end < week.week_start:
+            return False
+        return True
+
     employee_rows = [
         schemas.ScheduleEmployeeRow(
             id=employee.id,
@@ -8402,7 +8476,8 @@ def get_schedule_week_view(
             position=employee.position,
             avatar_url=employee.avatar_url,
         )
-        for employee in sorted(employees, key=lambda row: (row.status != "Activo", row.name.lower()))
+        for employee in employees
+        if _employee_in_week(employee)
     ]
     return schemas.ScheduleWeekView(
         week=schemas.ScheduleWeekRead.model_validate(week),
