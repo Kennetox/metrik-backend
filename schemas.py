@@ -1606,6 +1606,11 @@ class HREmployeeBase(BaseModel):
     payroll_reference: Optional[str] = None
     payroll_notes: Optional[str] = None
     show_in_schedule: bool = True
+    row_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
     active_from: Optional[date] = None
     active_until: Optional[date] = None
 
@@ -1636,6 +1641,11 @@ class HREmployeeUpdate(BaseModel):
     payroll_reference: Optional[str] = None
     payroll_notes: Optional[str] = None
     show_in_schedule: Optional[bool] = None
+    row_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
     active_from: Optional[date] = None
     active_until: Optional[date] = None
     order_index: Optional[int] = None
@@ -1717,6 +1727,7 @@ class ScheduleTemplateBase(BaseModel):
     break_minutes: int = Field(default=0, ge=0, le=240)
     color: Optional[str] = None
     position: Optional[str] = None
+    is_time_off: bool = False
     is_active: bool = True
     order_index: int = 0
 
@@ -1732,6 +1743,7 @@ class ScheduleTemplateUpdate(BaseModel):
     break_minutes: Optional[int] = Field(default=None, ge=0, le=240)
     color: Optional[str] = None
     position: Optional[str] = None
+    is_time_off: Optional[bool] = None
     is_active: Optional[bool] = None
     order_index: Optional[int] = None
 
@@ -1814,6 +1826,7 @@ class ScheduleEmployeeRow(BaseModel):
     status: Literal["Activo", "Inactivo"]
     position: Optional[str] = None
     avatar_url: Optional[str] = None
+    row_color: Optional[str] = None
 
 
 class ScheduleDayTotal(BaseModel):

@@ -8475,6 +8475,7 @@ def get_schedule_week_view(
             status="Activo" if employee.status == "Activo" else "Inactivo",
             position=employee.position,
             avatar_url=employee.avatar_url,
+            row_color=employee.row_color,
         )
         for employee in employees
         if _employee_in_week(employee)

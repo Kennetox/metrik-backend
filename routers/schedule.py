@@ -189,7 +189,7 @@ def export_schedule_csv(
                 row.append("")
                 continue
             if shift.is_time_off:
-                row.append("Libre")
+                row.append("Día libre")
                 continue
             row.append(f"{shift.start_time or '--'}-{shift.end_time or '--'}")
             row_total += float(shift.total_hours or 0.0)
@@ -251,7 +251,7 @@ def export_schedule_pdf(
                 cells.append('<td class="cell empty">-</td>')
                 continue
             if shift.is_time_off:
-                cells.append('<td class="cell off">Libre</td>')
+                cells.append('<td class="cell off">Día libre</td>')
                 continue
             start = _to_ampm(shift.start_time)
             end = _to_ampm(shift.end_time)

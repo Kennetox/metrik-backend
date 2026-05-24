@@ -1153,6 +1153,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column_postgres(connection, "hr_employees", "active_from", "DATE")
                 _ensure_column_postgres(connection, "hr_employees", "active_until", "DATE")
+                _ensure_column_postgres(connection, "hr_employees", "row_color", "TEXT")
                 _ensure_column_postgres(
                     connection,
                     "hr_employees",
@@ -2095,6 +2096,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "hr_employees", "show_in_schedule", "BOOLEAN NOT NULL DEFAULT 1")
                 _ensure_column(connection, "hr_employees", "active_from", "DATE")
                 _ensure_column(connection, "hr_employees", "active_until", "DATE")
+                _ensure_column(connection, "hr_employees", "row_color", "TEXT")
                 _ensure_column(connection, "hr_employees", "order_index", "INTEGER NOT NULL DEFAULT 0")
                 connection.execute(
                     text(
@@ -2862,6 +2864,7 @@ def _ensure_table_hr_employees(connection) -> None:
                     show_in_schedule BOOLEAN NOT NULL DEFAULT 1,
                     active_from DATE,
                     active_until DATE,
+                    row_color TEXT,
                     order_index INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -2903,6 +2906,7 @@ def _ensure_table_hr_employees(connection) -> None:
         _ensure_column(connection, "hr_employees", "show_in_schedule", "BOOLEAN NOT NULL DEFAULT 1")
         _ensure_column(connection, "hr_employees", "active_from", "DATE")
         _ensure_column(connection, "hr_employees", "active_until", "DATE")
+        _ensure_column(connection, "hr_employees", "row_color", "TEXT")
         _ensure_column(connection, "hr_employees", "order_index", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "hr_employees", "created_at", "DATETIME")
         _ensure_column(connection, "hr_employees", "updated_at", "DATETIME")
@@ -2956,6 +2960,7 @@ def _ensure_table_schedule_templates(connection) -> None:
                     break_minutes INTEGER NOT NULL DEFAULT 0,
                     color TEXT,
                     position TEXT,
+                    is_time_off BOOLEAN NOT NULL DEFAULT 0,
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     order_index INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2976,6 +2981,7 @@ def _ensure_table_schedule_templates(connection) -> None:
         )
         _ensure_column(connection, "schedule_templates", "color", "TEXT")
         _ensure_column(connection, "schedule_templates", "position", "TEXT")
+        _ensure_column(connection, "schedule_templates", "is_time_off", "BOOLEAN NOT NULL DEFAULT 0")
         _ensure_column(
             connection,
             "schedule_templates",
@@ -4076,6 +4082,7 @@ def _ensure_table_hr_employees_postgres(connection) -> None:
                 show_in_schedule BOOLEAN NOT NULL DEFAULT TRUE,
                 active_from DATE,
                 active_until DATE,
+                row_color TEXT,
                 order_index INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -4133,6 +4140,7 @@ def _ensure_table_schedule_templates_postgres(connection) -> None:
                 break_minutes INTEGER NOT NULL DEFAULT 0,
                 color TEXT,
                 position TEXT,
+                is_time_off BOOLEAN NOT NULL DEFAULT FALSE,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 order_index INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -4141,6 +4149,7 @@ def _ensure_table_schedule_templates_postgres(connection) -> None:
             """
         )
     )
+    _ensure_column_postgres(connection, "schedule_templates", "is_time_off", "BOOLEAN NOT NULL DEFAULT FALSE")
 
 
 def _ensure_table_schedule_weeks_postgres(connection) -> None:
