@@ -7765,19 +7765,6 @@ def update_pos_user(
 
     db.commit()
     db.refresh(user)
-    if user.employee_id:
-        employee = get_hr_employee(db, user.employee_id, tenant_id=user.tenant_id)
-        if employee:
-            employee.name = user.name
-            employee.email = user.email
-            employee.phone = user.phone
-            employee.position = user.position
-            employee.notes = user.notes
-            employee.avatar_url = user.avatar_url
-            employee.birth_date = user.birth_date
-            employee.location = user.location
-            employee.bio = user.bio
-            db.commit()
     return user
 
 
@@ -7951,19 +7938,6 @@ def update_hr_employee(
         setattr(employee, field, value)
     db.commit()
     db.refresh(employee)
-    if employee.system_user:
-        user = employee.system_user
-        user.name = employee.name
-        user.email = employee.email or user.email
-        user.phone = employee.phone
-        user.position = employee.position
-        user.notes = employee.notes
-        user.avatar_url = employee.avatar_url
-        user.birth_date = employee.birth_date
-        user.location = employee.location
-        user.bio = employee.bio
-        db.commit()
-        db.refresh(employee)
     return employee
 
 

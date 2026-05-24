@@ -157,8 +157,35 @@ def link_system_user_to_employee(
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     if user.employee_id:
         raise HTTPException(status_code=400, detail="Ese usuario ya está vinculado a otro empleado")
+    if employee.email and user.email and employee.email.strip().lower() != user.email.strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "El correo del empleado y el del usuario no coinciden. "
+                "Para evitar cruces, usa un usuario con el mismo correo o actualiza el empleado antes de vincular."
+            ),
+        )
 
     user.employee_id = employee.id
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/employees/{employee_id}/system-user/unlink", response_model=schemas.PosUserRead)
+def unlink_system_user_from_employee(
+    employee_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("hr.manage")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    employee = crud.get_hr_employee(db, employee_id, tenant_id=tenant_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    user = employee.system_user
+    if not user:
+        raise HTTPException(status_code=404, detail="El empleado no tiene usuario vinculado")
+    user.employee_id = None
     db.commit()
     db.refresh(user)
     return user
