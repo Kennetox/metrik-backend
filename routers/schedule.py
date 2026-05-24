@@ -48,6 +48,22 @@ def _normalize_week_start(value: date | None) -> date:
     return base - timedelta(days=base.weekday())
 
 
+def _row_color_to_rgba(color: str | None, alpha: float = 0.30) -> str | None:
+    if not color:
+        return None
+    value = color.strip()
+    if len(value) != 7 or not value.startswith("#"):
+        return None
+    try:
+        r = int(value[1:3], 16)
+        g = int(value[3:5], 16)
+        b = int(value[5:7], 16)
+    except ValueError:
+        return None
+    safe_alpha = min(max(alpha, 0.0), 1.0)
+    return f"rgba({r}, {g}, {b}, {safe_alpha:.2f})"
+
+
 @router.get("/weeks", response_model=schemas.ScheduleWeekView)
 def get_schedule_week_view(
     week_start: date | None = Query(default=None),
@@ -244,26 +260,29 @@ def export_schedule_pdf(
 
     rows_html: list[str] = []
     for employee in view.employees:
+        row_bg = _row_color_to_rgba(employee.row_color, 0.30)
+        cell_style = f' style="background:{row_bg};"' if row_bg else ""
+        employee_style = f' style="background:{row_bg};"' if row_bg else ""
         cells: list[str] = []
         for day in week_days:
             shift = shift_map.get((employee.id, day))
             if not shift:
-                cells.append('<td class="cell empty">-</td>')
+                cells.append(f'<td class="cell empty"{cell_style}>-</td>')
                 continue
             if shift.is_time_off:
-                cells.append('<td class="cell off">Día libre</td>')
+                cells.append(f'<td class="cell off"{cell_style}>Día libre</td>')
                 continue
             start = _to_ampm(shift.start_time)
             end = _to_ampm(shift.end_time)
             cells.append(
-                '<td class="cell">'
+                f'<td class="cell"{cell_style}>'
                 f'<div class="slot">{escape(start)} - {escape(end)}</div>'
                 "</td>"
             )
         status_class = "active" if employee.status == "Activo" else "inactive"
         rows_html.append(
             "<tr>"
-            f'<td class="employee"><div class="name">{escape(employee.name)}</div>'
+            f'<td class="employee"{employee_style}><div class="name">{escape(employee.name)}</div>'
             f'<div class="status {status_class}">{escape(employee.status)}</div></td>'
             + "".join(cells)
             + "</tr>"
