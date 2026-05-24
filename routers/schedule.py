@@ -13,13 +13,14 @@ import crud
 import models
 import schemas
 from database import get_db
-from dependencies import require_permission
+from dependencies import require_module_access, require_permission
 from services import pdf_utils
 
 
 router = APIRouter(
     prefix="/schedule",
     tags=["schedule"],
+    dependencies=[Depends(require_module_access("schedule"))],
 )
 
 
