@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 from datetime import datetime, timedelta
+from sqlalchemy import text
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,6 +62,63 @@ ENABLE_SCHEDULE_MODULE = True
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+
+def _flag_enabled(raw: str | None, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _maintenance_enabled() -> bool:
+    return _flag_enabled(os.getenv("MAINTENANCE_MODE"), default=False)
+
+
+@app.get("/healthz")
+async def healthz():
+    # Liveness probe: solo confirma que el proceso HTTP está vivo.
+    return {
+        "status": "ok",
+        "service": "kensar-backend",
+        "maintenance": _maintenance_enabled(),
+    }
+
+
+@app.get("/readyz")
+async def readyz():
+    if _maintenance_enabled():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "maintenance",
+                "service": "kensar-backend",
+                "ready": False,
+                "maintenance": True,
+            },
+        )
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "service": "kensar-backend",
+                "ready": False,
+                "maintenance": False,
+            },
+        )
+    finally:
+        db.close()
+
+    return {
+        "status": "ok",
+        "service": "kensar-backend",
+        "ready": True,
+        "maintenance": False,
+    }
 
 
 cors_origins = [
