@@ -1827,6 +1827,7 @@ class ScheduleEmployeeRow(BaseModel):
     position: Optional[str] = None
     avatar_url: Optional[str] = None
     row_color: Optional[str] = None
+    birth_date: Optional[date] = None
 
 
 class ScheduleDayTotal(BaseModel):
@@ -1834,11 +1835,20 @@ class ScheduleDayTotal(BaseModel):
     total_hours: float
 
 
+class ScheduleDayEvent(BaseModel):
+    shift_date: date
+    kind: Literal["holiday", "birthday", "event"]
+    label: str
+    employee_id: Optional[int] = None
+    employee_name: Optional[str] = None
+
+
 class ScheduleWeekView(BaseModel):
     week: ScheduleWeekRead
     employees: List[ScheduleEmployeeRow]
     shifts: List[ScheduleShiftRead]
     day_totals: List[ScheduleDayTotal]
+    day_events: List[ScheduleDayEvent] = []
     week_total_hours: float
 
 

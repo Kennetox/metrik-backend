@@ -8376,6 +8376,65 @@ def delete_schedule_shift(
     db.commit()
 
 
+def _easter_sunday(year: int) -> date:
+    # Gregorian algorithm (Meeus/Jones/Butcher)
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _move_to_monday(value: date) -> date:
+    if value.weekday() == 0:
+        return value
+    return value + timedelta(days=(7 - value.weekday()))
+
+
+def _colombia_holidays(year: int) -> Dict[date, str]:
+    easter = _easter_sunday(year)
+    holidays: Dict[date, str] = {}
+
+    def add(day: date, label: str, *, emiliani: bool = False) -> None:
+        normalized = _move_to_monday(day) if emiliani else day
+        holidays[normalized] = label
+
+    # Fixed holidays
+    add(date(year, 1, 1), "Año Nuevo")
+    add(date(year, 5, 1), "Día del Trabajo")
+    add(date(year, 7, 20), "Día de la Independencia")
+    add(date(year, 8, 7), "Batalla de Boyacá")
+    add(date(year, 12, 8), "Inmaculada Concepción")
+    add(date(year, 12, 25), "Navidad")
+
+    # Emiliani holidays (move to monday)
+    add(date(year, 1, 6), "Reyes Magos", emiliani=True)
+    add(date(year, 3, 19), "San José", emiliani=True)
+    add(date(year, 6, 29), "San Pedro y San Pablo", emiliani=True)
+    add(date(year, 8, 15), "Asunción de la Virgen", emiliani=True)
+    add(date(year, 10, 12), "Día de la Raza", emiliani=True)
+    add(date(year, 11, 1), "Todos los Santos", emiliani=True)
+    add(date(year, 11, 11), "Independencia de Cartagena", emiliani=True)
+
+    # Relative to Easter
+    add(easter - timedelta(days=3), "Jueves Santo")
+    add(easter - timedelta(days=2), "Viernes Santo")
+    add(easter + timedelta(days=43), "Ascensión del Señor", emiliani=True)
+    add(easter + timedelta(days=64), "Corpus Christi", emiliani=True)
+    add(easter + timedelta(days=71), "Sagrado Corazón", emiliani=True)
+    return holidays
+
+
 def get_schedule_week_view(
     db: Session,
     week_start: date,
@@ -8450,15 +8509,47 @@ def get_schedule_week_view(
             position=employee.position,
             avatar_url=employee.avatar_url,
             row_color=employee.row_color,
+            birth_date=employee.birth_date,
         )
         for employee in employees
         if _employee_in_week(employee)
     ]
+
+    day_events: List[schemas.ScheduleDayEvent] = []
+    holiday_map = _colombia_holidays(week.week_start.year)
+    for day in week_days:
+        holiday_label = holiday_map.get(day)
+        if holiday_label:
+            day_events.append(
+                schemas.ScheduleDayEvent(
+                    shift_date=day,
+                    kind="holiday",
+                    label=holiday_label,
+                )
+            )
+
+    for employee in employee_rows:
+        birth = employee.birth_date
+        if not birth:
+            continue
+        for day in week_days:
+            if day.month == birth.month and day.day == birth.day:
+                day_events.append(
+                    schemas.ScheduleDayEvent(
+                        shift_date=day,
+                        kind="birthday",
+                        label=f"Cumpleaños: {employee.name}",
+                        employee_id=employee.id,
+                        employee_name=employee.name,
+                    )
+                )
+
     return schemas.ScheduleWeekView(
         week=schemas.ScheduleWeekRead.model_validate(week),
         employees=employee_rows,
         shifts=shift_payload,
         day_totals=day_totals,
+        day_events=day_events,
         week_total_hours=week_total_hours,
     )
 
