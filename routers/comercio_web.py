@@ -452,6 +452,31 @@ def update_comercio_web_home_slider(
 
 
 @router.get(
+    "/catalog/discount-codes/{discount_code_id}/usage",
+    response_model=schemas.ComercioWebDiscountCodeUsagePage,
+)
+def list_comercio_web_discount_code_usage(
+    discount_code_id: int,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.list_comercio_web_discount_code_usage_page(
+            db,
+            tenant_id=tenant_id,
+            discount_code_id=discount_code_id,
+            skip=skip,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
     "/catalog/description-templates",
     response_model=list[schemas.ComercioWebDescriptionTemplateRead],
 )

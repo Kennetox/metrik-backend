@@ -3818,6 +3818,42 @@ def reset_comercio_web_description_templates(
 def _normalize_discount_code(value: str) -> str:
     return (value or "").strip().upper()
 
+def _normalize_discount_code_type(value: Optional[str]) -> str:
+    normalized = (value or "percent").strip().lower()
+    return "fixed_amount" if normalized == "fixed_amount" else "percent"
+
+def _resolve_discount_code_snapshot_values(
+    *,
+    discount_type: Optional[str],
+    discount_value: Optional[float],
+    discount_percent: Optional[float],
+) -> tuple[str, float, float]:
+    normalized_type = _normalize_discount_code_type(discount_type)
+    if normalized_type == "fixed_amount":
+        fixed_value = max(0.0, float(discount_value or 0.0))
+        return normalized_type, fixed_value, 0.0
+    percent_value = min(100.0, max(0.0, float(discount_percent or discount_value or 0.0)))
+    return normalized_type, percent_value, percent_value
+
+def _compute_coupon_discount_amount(
+    subtotal_base: float,
+    *,
+    discount_type: Optional[str],
+    discount_value: Optional[float],
+    discount_percent: Optional[float],
+) -> float:
+    subtotal = max(0.0, float(subtotal_base or 0.0))
+    normalized_type, value, percent = _resolve_discount_code_snapshot_values(
+        discount_type=discount_type,
+        discount_value=discount_value,
+        discount_percent=discount_percent,
+    )
+    if subtotal <= 0:
+        return 0.0
+    if normalized_type == "fixed_amount":
+        return min(round(value, 2), subtotal)
+    return min(round(subtotal * (percent / 100.0), 2), subtotal)
+
 
 def list_comercio_web_discount_codes_page(
     db: Session,
@@ -3869,6 +3905,12 @@ def create_comercio_web_discount_code(
         raise ValueError("La fecha fin debe ser mayor o igual a la fecha inicio")
     if payload.max_uses is not None and int(payload.max_uses) < 1:
         raise ValueError("El uso máximo debe ser mayor a 0")
+    discount_type = _normalize_discount_code_type(payload.discount_type)
+    discount_value = float(payload.discount_value or 0.0)
+    if discount_value <= 0:
+        raise ValueError("El valor del descuento debe ser mayor a 0")
+    if discount_type == "percent" and discount_value > 100:
+        raise ValueError("El descuento porcentual no puede ser mayor a 100")
 
     existing = db.query(models.WebDiscountCode).filter(
         models.WebDiscountCode.tenant_id == tenant_id,
@@ -3880,7 +3922,13 @@ def create_comercio_web_discount_code(
     row = models.WebDiscountCode(
         tenant_id=tenant_id,
         code=code,
-        discount_percent=float(payload.discount_percent),
+        discount_type=discount_type,
+        discount_value=discount_value,
+        discount_percent=(
+            discount_value
+            if discount_type == "percent"
+            else 0.0
+        ),
         is_active=bool(payload.is_active),
         max_uses=int(payload.max_uses) if payload.max_uses is not None else None,
         uses_count=0,
@@ -3922,8 +3970,27 @@ def update_comercio_web_discount_code(
             raise ValueError("Ya existe un código con ese nombre")
         row.code = normalized_code
 
-    if "discount_percent" in data and data["discount_percent"] is not None:
-        row.discount_percent = float(data["discount_percent"])
+    if (
+        ("discount_type" in data and data["discount_type"] is not None)
+        or ("discount_value" in data and data["discount_value"] is not None)
+        or ("discount_percent" in data and data["discount_percent"] is not None)
+    ):
+        next_type = _normalize_discount_code_type(data.get("discount_type", row.discount_type))
+        if "discount_value" in data and data["discount_value"] is not None:
+            next_value = float(data["discount_value"])
+        elif "discount_percent" in data and data["discount_percent"] is not None:
+            next_value = float(data["discount_percent"])
+        else:
+            next_value = float(row.discount_value or row.discount_percent or 0.0)
+
+        if next_value <= 0:
+            raise ValueError("El valor del descuento debe ser mayor a 0")
+        if next_type == "percent" and next_value > 100:
+            raise ValueError("El descuento porcentual no puede ser mayor a 100")
+
+        row.discount_type = next_type
+        row.discount_value = next_value
+        row.discount_percent = next_value if next_type == "percent" else 0.0
     if "is_active" in data and data["is_active"] is not None:
         row.is_active = bool(data["is_active"])
     if "max_uses" in data:
@@ -3943,6 +4010,59 @@ def update_comercio_web_discount_code(
     db.commit()
     db.refresh(row)
     return row
+
+
+def list_comercio_web_discount_code_usage_page(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    discount_code_id: int,
+    skip: int = 0,
+    limit: int = 50,
+) -> schemas.ComercioWebDiscountCodeUsagePage:
+    discount_code = (
+        db.query(models.WebDiscountCode)
+        .filter(
+            models.WebDiscountCode.id == discount_code_id,
+            models.WebDiscountCode.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not discount_code:
+        raise ValueError("Código de descuento no encontrado")
+
+    query = db.query(models.WebOrder).filter(
+        models.WebOrder.tenant_id == tenant_id,
+        models.WebOrder.coupon_discount_code_id == discount_code_id,
+    )
+    total = query.count()
+    rows = (
+        query.order_by(
+            func.coalesce(models.WebOrder.coupon_consumed_at, models.WebOrder.created_at).desc(),
+            models.WebOrder.created_at.desc(),
+            models.WebOrder.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    items = [
+        schemas.ComercioWebDiscountCodeUsageRow(
+            order_id=int(row.id),
+            document_number=row.document_number,
+            customer_name=row.customer_name,
+            customer_email=row.customer_email,
+            total=float(row.total or 0.0),
+            currency=(row.currency or "COP"),
+            order_status=str(row.status or "pending_payment"),
+            payment_status=str(row.payment_status or "pending"),
+            used_at=row.coupon_consumed_at,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+    return schemas.ComercioWebDiscountCodeUsagePage(items=items, total=total, skip=skip, limit=limit)
 
 
 def get_catalog_version(
@@ -9847,12 +9967,11 @@ def _resolve_valid_discount_code(
 def _resolve_cart_coupon_snapshot(
     db: Session,
     cart: models.WebCart,
-) -> tuple[Optional[str], float, Optional[models.WebDiscountCode]]:
+) -> tuple[Optional[str], str, float, float, Optional[models.WebDiscountCode]]:
     saved_code = _normalize_discount_code(getattr(cart, "coupon_code", None) or "")
-    saved_percent = float(getattr(cart, "coupon_discount_percent", 0.0) or 0.0)
     saved_code_id = getattr(cart, "coupon_discount_code_id", None)
-    if not saved_code or saved_percent <= 0:
-        return None, 0.0, None
+    if not saved_code:
+        return None, "percent", 0.0, 0.0, None
 
     valid_row = _resolve_valid_discount_code(
         db,
@@ -9861,8 +9980,15 @@ def _resolve_cart_coupon_snapshot(
         discount_code_id=saved_code_id,
     )
     if not valid_row:
-        return None, 0.0, None
-    return saved_code, min(100.0, max(0.0, saved_percent)), valid_row
+        return None, "percent", 0.0, 0.0, None
+    discount_type, discount_value, discount_percent = _resolve_discount_code_snapshot_values(
+        discount_type=getattr(valid_row, "discount_type", None),
+        discount_value=getattr(valid_row, "discount_value", None),
+        discount_percent=getattr(valid_row, "discount_percent", None),
+    )
+    if discount_value <= 0:
+        return None, "percent", 0.0, 0.0, None
+    return saved_code, discount_type, discount_value, discount_percent, valid_row
 
 
 def _serialize_web_cart(
@@ -9900,11 +10026,15 @@ def _serialize_web_cart(
             )
         )
 
-    coupon_code, coupon_discount_percent, _ = _resolve_cart_coupon_snapshot(db, cart)
+    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, _ = _resolve_cart_coupon_snapshot(db, cart)
     discount_amount = 0.0
-    if coupon_code and coupon_discount_percent > 0:
-        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
-        discount_amount = min(discount_amount, subtotal_base)
+    if coupon_code:
+        discount_amount = _compute_coupon_discount_amount(
+            subtotal_base,
+            discount_type=coupon_discount_type,
+            discount_value=coupon_discount_value,
+            discount_percent=coupon_discount_percent,
+        )
     total = max(0.0, subtotal_base - discount_amount)
 
     return schemas.WebCartRead(
@@ -9919,6 +10049,8 @@ def _serialize_web_cart(
         total=total,
         coupon_code=coupon_code,
         coupon_discount_percent=coupon_discount_percent,
+        coupon_discount_type=(coupon_discount_type if coupon_code else None),
+        coupon_discount_value=(coupon_discount_value if coupon_code else 0.0),
         updated_at=cart.updated_at,
     )
 
@@ -10058,6 +10190,75 @@ def clear_coupon_from_web_cart(
     db.commit()
     db.refresh(cart)
     return get_web_cart(db, account)
+
+
+def _consume_discount_code_use(
+    db: Session,
+    *,
+    discount_code_id: int,
+    tenant_id: Optional[int],
+) -> bool:
+    updated = (
+        db.query(models.WebDiscountCode)
+        .filter(
+            models.WebDiscountCode.id == discount_code_id,
+            models.WebDiscountCode.tenant_id == tenant_id,
+            models.WebDiscountCode.is_active.is_(True),
+            or_(
+                models.WebDiscountCode.max_uses.is_(None),
+                models.WebDiscountCode.uses_count < models.WebDiscountCode.max_uses,
+            ),
+        )
+        .update(
+            {
+                models.WebDiscountCode.uses_count: models.WebDiscountCode.uses_count + 1,
+                models.WebDiscountCode.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    return bool(updated)
+
+
+def _consume_web_order_coupon_if_needed(
+    db: Session,
+    *,
+    order: models.WebOrder,
+) -> None:
+    if order.coupon_consumed_at is not None:
+        return
+    if int(order.coupon_discount_code_id or 0) <= 0:
+        return
+
+    consumed = _consume_discount_code_use(
+        db,
+        discount_code_id=int(order.coupon_discount_code_id),
+        tenant_id=order.tenant_id,
+    )
+    if not consumed:
+        # Si el cupón cambió de estado luego de crear la orden, no bloqueamos
+        # la confirmación del pago ya recibido. De todas formas incrementamos
+        # el contador para mantener trazabilidad de uso real.
+        fallback = (
+            db.query(models.WebDiscountCode)
+            .filter(
+                models.WebDiscountCode.id == int(order.coupon_discount_code_id),
+                models.WebDiscountCode.tenant_id == order.tenant_id,
+            )
+            .update(
+                {
+                    models.WebDiscountCode.uses_count: models.WebDiscountCode.uses_count + 1,
+                    models.WebDiscountCode.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        if not fallback:
+            return
+
+    order.coupon_consumed_at = datetime.utcnow()
+    order.updated_at = datetime.utcnow()
+    db.add(order)
 
 
 def get_next_web_order_number(
@@ -10599,6 +10800,7 @@ def record_web_order_payment(
     if payment_status == "approved":
         order.payment_status = "approved"
         order.paid_at = order.paid_at or datetime.utcnow()
+        _consume_web_order_coupon_if_needed(db, order=order)
         if order.status in {"pending_payment", "payment_failed"}:
             _transition_web_order_status(
                 db,
@@ -10888,11 +11090,15 @@ def create_web_order_from_cart(
     if subtotal_base <= 0 or not line_items_payload:
         raise ValueError("El carrito no tiene productos válidos para crear la orden")
 
-    coupon_code, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
+    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
     discount_amount = 0.0
-    if coupon_code and coupon_discount_percent > 0:
-        discount_amount = round(subtotal_base * (coupon_discount_percent / 100.0), 2)
-        discount_amount = min(discount_amount, subtotal_base)
+    if coupon_code:
+        discount_amount = _compute_coupon_discount_amount(
+            subtotal_base,
+            discount_type=coupon_discount_type,
+            discount_value=coupon_discount_value,
+            discount_percent=coupon_discount_percent,
+        )
     total_amount = max(0.0, subtotal_base - discount_amount)
     currency = (cart.currency or "COP").strip().upper()
 
@@ -10964,6 +11170,10 @@ def create_web_order_from_cart(
         customer_address=(account.customer.address if account.customer else None),
         subtotal=0.0,
         discount_amount=0.0,
+        coupon_code=coupon_code,
+        coupon_discount_percent=coupon_discount_percent,
+        coupon_discount_code_id=(int(valid_coupon.id) if valid_coupon is not None else None),
+        coupon_consumed_at=None,
         shipping_amount=0.0,
         total=0.0,
         currency=currency,
@@ -11001,9 +11211,6 @@ def create_web_order_from_cart(
     )
 
     cart.status = "converted"
-    if valid_coupon is not None:
-        valid_coupon.uses_count = int(valid_coupon.uses_count or 0) + 1
-        db.add(valid_coupon)
     cart.coupon_code = None
     cart.coupon_discount_percent = 0.0
     cart.coupon_discount_code_id = None

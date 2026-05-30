@@ -1632,6 +1632,33 @@ def _create_guest_order(
     customer_tax_id = (payload.customer_tax_id or "").strip() or None
     customer_address = (payload.customer_address or "").strip() or None
     subtotal_amount = round(subtotal_base, 2)
+    normalized_coupon_code = (payload.coupon_code or "").strip().upper()
+    coupon_discount_percent = 0.0
+    coupon_discount_code_id: int | None = None
+    discount_amount = 0.0
+    total_amount = subtotal_amount
+    if normalized_coupon_code:
+        valid_coupon = crud._resolve_valid_discount_code(
+            db,
+            tenant_id=tenant_id,
+            code=normalized_coupon_code,
+        )
+        if not valid_coupon:
+            raise HTTPException(status_code=400, detail="El código no está disponible o ya venció")
+        _, coupon_discount_value, coupon_discount_percent = crud._resolve_discount_code_snapshot_values(
+            discount_type=getattr(valid_coupon, "discount_type", None),
+            discount_value=getattr(valid_coupon, "discount_value", None),
+            discount_percent=getattr(valid_coupon, "discount_percent", None),
+        )
+        coupon_discount_code_id = int(valid_coupon.id)
+        if coupon_discount_value > 0:
+            discount_amount = crud._compute_coupon_discount_amount(
+                subtotal_amount,
+                discount_type=getattr(valid_coupon, "discount_type", None),
+                discount_value=coupon_discount_value,
+                discount_percent=coupon_discount_percent,
+            )
+            total_amount = max(0.0, subtotal_amount - discount_amount)
     currency = "COP"
 
     crud.expire_stale_web_orders(db, tenant_id=tenant_id)
@@ -1643,8 +1670,8 @@ def _create_guest_order(
             customer_email=customer_email,
             currency=currency,
             subtotal=subtotal_amount,
-            discount_amount=0.0,
-            total=subtotal_amount,
+            discount_amount=discount_amount,
+            total=total_amount,
             item_signature=crud.build_web_order_item_signature(line_items_payload),
         )
         if reusable:
@@ -1661,6 +1688,12 @@ def _create_guest_order(
             reusable.customer_phone = customer_phone
             reusable.customer_tax_id = customer_tax_id
             reusable.customer_address = customer_address
+            reusable.coupon_code = normalized_coupon_code or None
+            reusable.coupon_discount_percent = coupon_discount_percent
+            reusable.coupon_discount_code_id = coupon_discount_code_id
+            reusable.coupon_consumed_at = None
+            reusable.discount_amount = discount_amount
+            reusable.total = total_amount
             checkout_context = _normalize_checkout_context_dict(
                 payload.checkout_context if isinstance(payload.checkout_context, dict) else None
             )
@@ -1705,9 +1738,13 @@ def _create_guest_order(
         customer_tax_id=customer_tax_id,
         customer_address=customer_address,
         subtotal=subtotal_amount,
-        discount_amount=0.0,
+        discount_amount=discount_amount,
+        coupon_code=normalized_coupon_code or None,
+        coupon_discount_percent=coupon_discount_percent,
+        coupon_discount_code_id=coupon_discount_code_id,
+        coupon_consumed_at=None,
         shipping_amount=0.0,
-        total=subtotal_amount,
+        total=total_amount,
         currency=currency,
         notes=_merge_order_notes_with_checkout_context(
             ((payload.notes or "").strip() or None),

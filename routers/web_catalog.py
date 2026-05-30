@@ -132,3 +132,76 @@ def get_web_personalization_service_by_sku(
         raise HTTPException(status_code=400, detail="El SKU vinculado no corresponde a un servicio")
 
     return crud.get_product(db, product.id, tenant_id=tenant_id)
+
+
+@router.post("/coupon/preview", response_model=schemas.WebGuestCouponPreviewResponse)
+def preview_web_coupon(
+    payload: schemas.WebGuestCouponPreviewRequest,
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    normalized_code = (payload.code or "").strip().upper()
+    if not normalized_code:
+        raise HTTPException(status_code=400, detail="Ingresa un código válido")
+
+    valid_coupon = crud._resolve_valid_discount_code(
+        db,
+        tenant_id=tenant_id,
+        code=normalized_code,
+    )
+    if not valid_coupon:
+        raise HTTPException(status_code=400, detail="El código no está disponible o ya venció")
+
+    item_inputs = [item for item in (payload.items or []) if float(item.quantity or 0) > 0]
+    if not item_inputs:
+        raise HTTPException(status_code=400, detail="El checkout no tiene items válidos.")
+
+    product_ids = list({int(item.product_id) for item in item_inputs})
+    qty_by_product = crud._get_web_cart_stock_snapshot(db, tenant_id, product_ids)
+
+    subtotal_base = 0.0
+    for item_input in item_inputs:
+        product = crud.get_product(db, int(item_input.product_id), tenant_id=tenant_id)
+        if not product or not product.active or not product.web_published:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Producto {item_input.product_id} no disponible para checkout web.",
+            )
+        stock_status = crud.resolve_web_product_stock_status(
+            product,
+            qty_by_product.get(product.id, 0.0),
+        )
+        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Producto {product.name} no disponible por stock.",
+            )
+        quantity = float(item_input.quantity or 0.0)
+        unit_price = float(crud.resolve_web_product_sale_price(product) or 0.0)
+        subtotal_base += unit_price * quantity
+
+    if subtotal_base <= 0:
+        raise HTTPException(status_code=400, detail="No se pudo calcular el subtotal del checkout.")
+
+    discount_type, discount_value, discount_percent = crud._resolve_discount_code_snapshot_values(
+        discount_type=getattr(valid_coupon, "discount_type", None),
+        discount_value=getattr(valid_coupon, "discount_value", None),
+        discount_percent=getattr(valid_coupon, "discount_percent", None),
+    )
+    discount_amount = crud._compute_coupon_discount_amount(
+        subtotal_base,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        discount_percent=discount_percent,
+    )
+    total = max(0.0, subtotal_base - discount_amount)
+
+    return schemas.WebGuestCouponPreviewResponse(
+        code=normalized_code,
+        discount_type=discount_type, 
+        discount_value=discount_value,
+        discount_percent=discount_percent,
+        subtotal_base=round(subtotal_base, 2),
+        discount_amount=discount_amount,
+        total=total,
+    )

@@ -973,6 +973,8 @@ class WebDiscountCode(Base):
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     code = Column(String(64), nullable=False, index=True)
+    discount_type = Column(String(16), nullable=False, default="percent")
+    discount_value = Column(Float, nullable=False, default=0)
     discount_percent = Column(Float, nullable=False, default=0)
     is_active = Column(Boolean, nullable=False, default=True)
     max_uses = Column(Integer, nullable=True)
@@ -1103,6 +1105,10 @@ class WebOrder(Base):
     customer_address = Column(String, nullable=True)
     subtotal = Column(Float, nullable=False, default=0)
     discount_amount = Column(Float, nullable=False, default=0)
+    coupon_code = Column(String(64), nullable=True)
+    coupon_discount_percent = Column(Float, nullable=False, default=0)
+    coupon_discount_code_id = Column(Integer, ForeignKey("web_discount_codes.id"), nullable=True, index=True)
+    coupon_consumed_at = Column(DateTime, nullable=True)
     shipping_amount = Column(Float, nullable=False, default=0)
     total = Column(Float, nullable=False, default=0)
     currency = Column(String(8), nullable=False, default="COP")
@@ -1128,6 +1134,7 @@ class WebOrder(Base):
 
     account = relationship("WebCustomerAccount")
     customer = relationship("PosCustomer")
+    coupon = relationship("WebDiscountCode")
     sale = relationship("Sale")
     items = relationship(
         "WebOrderItem",

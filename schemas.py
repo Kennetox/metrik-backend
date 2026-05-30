@@ -263,7 +263,9 @@ class ComercioWebCatalogPublicationPage(BaseModel):
 
 class ComercioWebDiscountCodeBase(BaseModel):
     code: str = Field(min_length=3, max_length=64)
-    discount_percent: float = Field(gt=0, le=100)
+    discount_type: Literal["percent", "fixed_amount"] = "percent"
+    discount_value: float = Field(ge=0)
+    discount_percent: float = Field(default=0, ge=0, le=100)
     is_active: bool = True
     max_uses: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
@@ -276,7 +278,9 @@ class ComercioWebDiscountCodeCreate(ComercioWebDiscountCodeBase):
 
 class ComercioWebDiscountCodeUpdate(BaseModel):
     code: Optional[str] = Field(default=None, min_length=3, max_length=64)
-    discount_percent: Optional[float] = Field(default=None, gt=0, le=100)
+    discount_type: Optional[Literal["percent", "fixed_amount"]] = None
+    discount_value: Optional[float] = Field(default=None, gt=0)
+    discount_percent: Optional[float] = Field(default=None, ge=0, le=100)
     is_active: Optional[bool] = None
     max_uses: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
@@ -296,6 +300,26 @@ class ComercioWebDiscountCodeRead(ComercioWebDiscountCodeBase):
 
 class ComercioWebDiscountCodePage(BaseModel):
     items: List[ComercioWebDiscountCodeRead] = Field(default_factory=list)
+    total: int
+    skip: int
+    limit: int
+
+
+class ComercioWebDiscountCodeUsageRow(BaseModel):
+    order_id: int
+    document_number: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    total: float = 0
+    currency: str = "COP"
+    order_status: str
+    payment_status: str
+    used_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class ComercioWebDiscountCodeUsagePage(BaseModel):
+    items: List[ComercioWebDiscountCodeUsageRow] = Field(default_factory=list)
     total: int
     skip: int
     limit: int
@@ -2108,6 +2132,8 @@ class WebCartRead(BaseModel):
     total: float
     coupon_code: Optional[str] = None
     coupon_discount_percent: float = 0
+    coupon_discount_type: Optional[Literal["percent", "fixed_amount"]] = None
+    coupon_discount_value: float = 0
     updated_at: datetime
 
 
@@ -2268,6 +2294,21 @@ class WebGuestCheckoutItemInput(BaseModel):
     quantity: float = Field(gt=0)
 
 
+class WebGuestCouponPreviewRequest(BaseModel):
+    code: str = Field(min_length=3, max_length=64)
+    items: List[WebGuestCheckoutItemInput]
+
+
+class WebGuestCouponPreviewResponse(BaseModel):
+    code: str
+    discount_type: Literal["percent", "fixed_amount"] = "percent"
+    discount_value: float = 0
+    discount_percent: float
+    subtotal_base: float
+    discount_amount: float
+    total: float
+
+
 class WebGuestMercadoPagoCheckoutCreateRequest(BaseModel):
     items: List[WebGuestCheckoutItemInput]
     customer_email: EmailStr
@@ -2275,6 +2316,7 @@ class WebGuestMercadoPagoCheckoutCreateRequest(BaseModel):
     customer_phone: Optional[str] = None
     customer_tax_id: Optional[str] = None
     customer_address: Optional[str] = None
+    coupon_code: Optional[str] = Field(default=None, min_length=3, max_length=64)
     notes: Optional[str] = None
     payer: Optional[MercadoPagoPayerInput] = None
     checkout_context: Optional[Dict[str, object]] = None

@@ -61,12 +61,16 @@ def _ensure_web_discount_code_schema(connection, backend: str) -> None:
     if backend == "postgresql":
         if not _table_exists_postgres(connection, table):
             return
+        _ensure_column_postgres(connection, table, "discount_type", "VARCHAR(16) NOT NULL DEFAULT 'percent'")
+        _ensure_column_postgres(connection, table, "discount_value", "FLOAT NOT NULL DEFAULT 0")
         _ensure_column_postgres(connection, table, "max_uses", "INTEGER")
         _ensure_column_postgres(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
         return
 
     if not _table_exists(connection, table):
         return
+    _ensure_column(connection, table, "discount_type", "TEXT NOT NULL DEFAULT 'percent'")
+    _ensure_column(connection, table, "discount_value", "FLOAT NOT NULL DEFAULT 0")
     _ensure_column(connection, table, "max_uses", "INTEGER")
     _ensure_column(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
 
@@ -86,6 +90,25 @@ def _ensure_web_cart_coupon_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "coupon_code", "TEXT")
     _ensure_column(connection, table, "coupon_discount_percent", "FLOAT NOT NULL DEFAULT 0")
     _ensure_column(connection, table, "coupon_discount_code_id", "INTEGER")
+
+
+def _ensure_web_order_coupon_schema(connection, backend: str) -> None:
+    table = "web_orders"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        _ensure_column_postgres(connection, table, "coupon_code", "VARCHAR(64)")
+        _ensure_column_postgres(connection, table, "coupon_discount_percent", "FLOAT NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "coupon_discount_code_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "coupon_consumed_at", "TIMESTAMP")
+        return
+
+    if not _table_exists(connection, table):
+        return
+    _ensure_column(connection, table, "coupon_code", "TEXT")
+    _ensure_column(connection, table, "coupon_discount_percent", "FLOAT NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "coupon_discount_code_id", "INTEGER")
+    _ensure_column(connection, table, "coupon_consumed_at", "DATETIME")
 
 
 def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
@@ -1544,6 +1567,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _backfill_company_name_from_tenant_postgres(connection)
                 _ensure_web_discount_code_schema(connection, backend="postgresql")
                 _ensure_web_cart_coupon_schema(connection, backend="postgresql")
+                _ensure_web_order_coupon_schema(connection, backend="postgresql")
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
                 _ensure_web_description_template_schema(connection, backend="postgresql")
                 _ensure_web_catalog_home_slider_schema(connection, backend="postgresql")
@@ -2678,6 +2702,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _backfill_legacy_users_to_default_tenant_sqlite(connection)
                 _ensure_web_discount_code_schema(connection, backend="sqlite")
                 _ensure_web_cart_coupon_schema(connection, backend="sqlite")
+                _ensure_web_order_coupon_schema(connection, backend="sqlite")
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
                 _ensure_web_description_template_schema(connection, backend="sqlite")
                 _ensure_web_catalog_home_slider_schema(connection, backend="sqlite")
