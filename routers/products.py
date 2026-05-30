@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from sqlalchemy.orm import Session
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
 import io
@@ -106,6 +106,141 @@ def _parse_boolish(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n"}:
         return False
     return bool(text)
+
+
+_DUPLICATE_STOPWORDS: Set[str] = {
+    "de", "del", "la", "el", "los", "las", "para", "con", "sin", "por", "en", "y", "a"
+}
+
+
+def _normalize_text(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _tokenize_text(value: Optional[str]) -> List[str]:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return []
+    return [
+        token
+        for token in normalized.split(" ")
+        if token and token not in _DUPLICATE_STOPWORDS
+    ]
+
+
+def _spec_tokens(tokens: List[str]) -> Set[str]:
+    return {token for token in tokens if any(ch.isdigit() for ch in token)}
+
+
+def _jaccard_similarity(left_tokens: List[str], right_tokens: List[str]) -> float:
+    left = set(left_tokens)
+    right = set(right_tokens)
+    if not left or not right:
+        return 0.0
+    intersection = len(left.intersection(right))
+    union = len(left.union(right))
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+
+def _build_duplicate_candidate(
+    payload: schemas.ProductDuplicateCandidatesRequest,
+    candidate: models.Product,
+) -> Optional[schemas.ProductDuplicateCandidate]:
+    reasons: List[str] = []
+    score = 0.0
+
+    input_name_norm = _normalize_text(payload.name)
+    candidate_name_norm = _normalize_text(candidate.name)
+    if input_name_norm and candidate_name_norm and input_name_norm == candidate_name_norm:
+        score += 0.55
+        reasons.append("Nombre prácticamente idéntico.")
+    elif input_name_norm and candidate_name_norm:
+        if input_name_norm in candidate_name_norm or candidate_name_norm in input_name_norm:
+            score += 0.22
+            reasons.append("Nombre contenido casi completo (variación menor).")
+
+    input_tokens = _tokenize_text(payload.name)
+    candidate_tokens = _tokenize_text(candidate.name)
+    token_similarity = _jaccard_similarity(input_tokens, candidate_tokens)
+    if token_similarity > 0:
+        score += 0.35 * token_similarity
+        if token_similarity >= 0.7:
+            reasons.append("Alta similitud en palabras clave del nombre.")
+        elif token_similarity >= 0.45:
+            reasons.append("Similitud media en palabras del nombre.")
+
+    input_spec_tokens = _spec_tokens(input_tokens)
+    candidate_spec_tokens = _spec_tokens(candidate_tokens)
+    if input_spec_tokens and candidate_spec_tokens:
+        shared_specs = input_spec_tokens.intersection(candidate_spec_tokens)
+        spec_ratio = len(shared_specs) / max(len(input_spec_tokens), len(candidate_spec_tokens))
+        if spec_ratio > 0:
+            score += 0.18 * spec_ratio
+            reasons.append("Coinciden especificaciones numéricas relevantes.")
+        else:
+            score -= 0.18
+            reasons.append("Las especificaciones numéricas difieren.")
+
+    payload_brand = _normalize_text(payload.brand)
+    payload_group = _normalize_text(payload.group_name)
+    payload_supplier = _normalize_text(payload.supplier)
+    candidate_brand = _normalize_text(candidate.brand)
+    candidate_group = _normalize_text(candidate.group_name)
+    candidate_supplier = _normalize_text(candidate.supplier)
+
+    if payload_brand and payload_brand == candidate_brand:
+        score += 0.15
+        reasons.append("Misma marca.")
+    if payload_group and payload_group == candidate_group:
+        score += 0.12
+        reasons.append("Mismo grupo.")
+    if payload_supplier and payload_supplier == candidate_supplier:
+        score += 0.07
+        reasons.append("Mismo proveedor.")
+
+    payload_sku = (payload.sku or "").strip()
+    payload_barcode = (payload.barcode or "").strip()
+    candidate_sku = (candidate.sku or "").strip()
+    candidate_barcode = (candidate.barcode or "").strip()
+
+    if payload_sku and candidate_sku and payload_sku == candidate_sku:
+        score = max(score, 1.0)
+        reasons.append("SKU idéntico.")
+    if payload_barcode and candidate_barcode and payload_barcode == candidate_barcode:
+        score = max(score, 1.0)
+        reasons.append("Código de barras idéntico.")
+
+    score = max(0.0, min(1.0, score))
+    if score < 0.45:
+        return None
+
+    risk_level: str
+    if score >= 0.9:
+        risk_level = "alto"
+    elif score >= 0.78:
+        risk_level = "medio"
+    else:
+        risk_level = "bajo"
+
+    return schemas.ProductDuplicateCandidate(
+        product_id=candidate.id,
+        name=candidate.name,
+        sku=candidate.sku,
+        barcode=candidate.barcode,
+        group_name=candidate.group_name,
+        brand=candidate.brand,
+        supplier=candidate.supplier,
+        similarity_score=round(score, 4),
+        risk_level=risk_level,
+        match_reasons=reasons[:4],
+    )
 
 
 def _filter_products(products: List[models.Product], payload: ExportProductsRequest):
@@ -321,6 +456,70 @@ def get_product_cost_suggestion(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/duplicate-candidates",
+    response_model=schemas.ProductDuplicateCandidatesResponse,
+)
+def get_product_duplicate_candidates(
+    payload: schemas.ProductDuplicateCandidatesRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("products.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    name_tokens = _tokenize_text(payload.name)
+    if not name_tokens and not (payload.sku or "").strip() and not (payload.barcode or "").strip():
+        return schemas.ProductDuplicateCandidatesResponse(candidates=[], has_high_risk=False)
+
+    base_query = db.query(models.Product)
+    if tenant_id is not None:
+        base_query = base_query.filter(models.Product.tenant_id == tenant_id)
+
+    coarse_conditions = []
+    payload_sku = (payload.sku or "").strip()
+    payload_barcode = (payload.barcode or "").strip()
+    if payload_sku:
+        coarse_conditions.append(models.Product.sku == payload_sku)
+    if payload_barcode:
+        coarse_conditions.append(models.Product.barcode == payload_barcode)
+    for token in name_tokens[:6]:
+        if len(token) < 2:
+            continue
+        coarse_conditions.append(models.Product.name.ilike(f"%{token}%"))
+
+    if coarse_conditions:
+        # Priorizamos recall sobre agresividad para no perder coincidencias antiguas.
+        # Con catálogos de miles de filas, 300 recientes puede dejar fuera productos relevantes.
+        candidates_rows = (
+            base_query.filter(or_(*coarse_conditions))
+            .order_by(models.Product.id.desc())
+            .limit(5000)
+            .all()
+        )
+    else:
+        candidates_rows = base_query.order_by(models.Product.id.desc()).limit(1200).all()
+
+    scored: List[schemas.ProductDuplicateCandidate] = []
+    for row in candidates_rows:
+        candidate = _build_duplicate_candidate(payload, row)
+        if candidate:
+            scored.append(candidate)
+
+    scored.sort(
+        key=lambda item: (
+            item.similarity_score,
+            1 if item.risk_level == "alto" else 0,
+            item.product_id,
+        ),
+        reverse=True,
+    )
+    limited = scored[: payload.limit]
+    has_high_risk = any(item.risk_level == "alto" for item in limited)
+    return schemas.ProductDuplicateCandidatesResponse(
+        candidates=limited,
+        has_high_risk=has_high_risk,
+    )
 
 
 @router.post("/", response_model=schemas.ProductRead)

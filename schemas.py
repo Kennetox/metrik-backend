@@ -242,6 +242,34 @@ class ProductCostSuggestionResponse(BaseModel):
     notes: Optional[str] = None
 
 
+class ProductDuplicateCandidatesRequest(BaseModel):
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    name: str = Field(min_length=1)
+    group_name: Optional[str] = None
+    brand: Optional[str] = None
+    supplier: Optional[str] = None
+    limit: int = Field(default=8, ge=1, le=20)
+
+
+class ProductDuplicateCandidate(BaseModel):
+    product_id: int
+    name: str
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    group_name: Optional[str] = None
+    brand: Optional[str] = None
+    supplier: Optional[str] = None
+    similarity_score: float = Field(ge=0, le=1)
+    risk_level: Literal["alto", "medio", "bajo"]
+    match_reasons: List[str] = Field(default_factory=list)
+
+
+class ProductDuplicateCandidatesResponse(BaseModel):
+    candidates: List[ProductDuplicateCandidate] = Field(default_factory=list)
+    has_high_risk: bool = False
+
+
 class ComercioWebCatalogPublicationStats(BaseModel):
     configured: int
     published: int
