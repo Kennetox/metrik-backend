@@ -320,6 +320,75 @@ def test_closure_accumulates_surcharge(client: TestClient):
     assert data["total_surcharge"] == 25.0
 
 
+def test_closure_separated_clarification_totals(client: TestClient):
+    headers = _auth_headers(client)
+    db = TestingSessionLocal()
+    product = models.Product(
+        name="Producto separado cierre",
+        sku="SEP-CLOSE-001",
+        price=50000.0,
+        cost=20000.0,
+        barcode="SEP-CLOSE-001",
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    db.close()
+
+    separated_payload = {
+        "payment_method": "cash",
+        "total": 10000.0,
+        "paid_amount": 10000.0,
+        "change_amount": 0.0,
+        "cart_discount_value": 0.0,
+        "cart_discount_percent": 0.0,
+        "customer_name": "Cliente Separado Cierre",
+        "notes": "Caso de prueba cierre separado",
+        "pos_name": "POS 1",
+        "vendor_name": "Tester",
+        "items": [
+            {
+                "product_id": product.id,
+                "quantity": 1,
+                "unit_price": 50000.0,
+                "product_sku": product.sku,
+                "product_name": product.name,
+                "product_barcode": product.barcode,
+                "discount": 0.0,
+            }
+        ],
+        "payments": [{"method": "cash", "amount": 10000.0}],
+        "due_date": datetime.utcnow().isoformat(),
+    }
+    separated_resp = client.post("/separated-orders", json=separated_payload, headers=headers)
+    assert separated_resp.status_code == 201
+    separated_data = separated_resp.json()
+    assert separated_data["total_amount"] == 50000.0
+    assert separated_data["initial_payment"] == 10000.0
+    assert separated_data["balance"] == 40000.0
+
+    closure_resp = client.post("/pos/closures", json=_closure_payload(), headers=headers)
+    assert closure_resp.status_code == 201
+    closure_data = closure_resp.json()
+    assert closure_data["net_amount"] == 50000.0
+    assert closure_data["separated_summary"] is not None
+    assert closure_data["separated_summary"]["tickets"] == 1
+    assert closure_data["separated_summary"]["payments_total"] == 10000.0
+    assert closure_data["separated_summary"]["reserved_total"] == 50000.0
+    assert closure_data["separated_summary"]["pending_total"] == 40000.0
+    assert closure_data["separated_summary"]["day_collected_total"] == 10000.0
+    assert closure_data["separated_summary"]["day_with_pending_total"] == 50000.0
+
+
 def test_customer_crud_and_sales_association(client: TestClient):
     headers = _auth_headers(client)
     payload = {
