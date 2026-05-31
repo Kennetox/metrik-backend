@@ -11945,8 +11945,8 @@ def _build_pos_closure_snapshot(
             "payments_total": round(payments_total, 2),
             "reserved_total": round(reserved_total, 2),
             "pending_total": round(max(pending_total, 0.0), 2),
-            "day_collected_total": round(net_amount, 2),
-            "day_with_pending_total": round(net_amount + max(pending_total, 0.0), 2),
+            "day_collected_total": round(max(net_amount - max(pending_total, 0.0), 0.0), 2),
+            "day_with_pending_total": round(net_amount, 2),
         }
 
     net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
