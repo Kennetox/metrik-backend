@@ -11984,21 +11984,37 @@ def _build_pos_closure_snapshot(
 
     difference = float(closure_in.counted_cash or 0.0) - payment_totals["cash"]
     total_surcharge = sum(float(sale.surcharge_amount or 0.0) for sale in pending_sales)
-    methods_breakdown = sorted(
-        [
+    standard_rows = []
+    for std_key, std_label in method_labels.items():
+        std_net = round(float(payment_totals.get(std_key, 0.0) or 0.0), 2)
+        if abs(std_net) <= 0.0001:
+            continue
+        standard_rows.append(
             {
-                "key": key,
-                "label": str(value.get("label") or key),
-                "gross": round(float(value.get("gross") or 0.0), 2),
-                "refunds": round(float(value.get("refunds") or 0.0), 2),
-                "net": round(float(value.get("net") or 0.0), 2),
-                "is_standard": bool(value.get("is_standard")),
+                "key": std_key,
+                "label": std_label,
+                "gross": std_net,
+                "refunds": 0.0,
+                "net": std_net,
+                "is_standard": True,
             }
-            for key, value in methods_breakdown_map.items()
-            if abs(float(value.get("gross") or 0.0)) > 0.0001
-            or abs(float(value.get("refunds") or 0.0)) > 0.0001
-            or abs(float(value.get("net") or 0.0)) > 0.0001
-        ],
+        )
+
+    extra_rows = [
+        {
+            "key": key,
+            "label": str(value.get("label") or key),
+            "gross": round(float(value.get("net") or 0.0), 2),
+            "refunds": 0.0,
+            "net": round(float(value.get("net") or 0.0), 2),
+            "is_standard": False,
+        }
+        for key, value in methods_breakdown_map.items()
+        if key not in standard_method_keys
+        and abs(float(value.get("net") or 0.0)) > 0.0001
+    ]
+    methods_breakdown = sorted(
+        standard_rows + extra_rows,
         key=lambda row: (0 if row["is_standard"] else 1, row["label"].lower()),
     )
     user_breakdown = sorted(
