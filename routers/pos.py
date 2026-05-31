@@ -2470,6 +2470,24 @@ def delete_pos_customer(
 
 
 @router.post(
+    "/closures/preview",
+    response_model=schemas.PosClosurePreviewRead,
+)
+def preview_pos_closure(
+    closure_in: schemas.PosClosureCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_permission("pos.closures")
+    ),
+):
+    try:
+        preview = crud.preview_pos_closure(db, closure_in, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return preview
+
+
+@router.post(
     "/closures",
     response_model=schemas.PosClosureRead,
     status_code=201,
@@ -2484,7 +2502,10 @@ def create_pos_closure(
     try:
         closure = crud.create_pos_closure(db, closure_in, current_user)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        if detail == "No hay movimientos pendientes por cerrar":
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
     return closure
 
 

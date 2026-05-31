@@ -11312,6 +11312,139 @@ def create_pos_closure(
     closure_in: schemas.PosClosureCreate,
     user: models.PosUser,
 ) -> models.PosClosure:
+    _acquire_pos_closure_lock(db, user)
+    snapshot = _build_pos_closure_snapshot(
+        db,
+        closure_in,
+        user,
+        apply_admin_fallback=True,
+        lock_pending_rows=True,
+    )
+
+    closure = models.PosClosure(
+        tenant_id=snapshot["tenant_id"],
+        pos_name=snapshot["pos_name"],
+        pos_identifier=closure_in.pos_identifier,
+        station_id=snapshot["station_id"],
+        closed_by_user_id=user.id,
+        closed_by_user_name=user.name,
+        opened_at=snapshot["opened_at"],
+        closed_at=snapshot["closed_at"],
+        total_amount=snapshot["total_amount"],
+        total_cash=snapshot["total_cash"],
+        total_card=snapshot["total_card"],
+        total_qr=snapshot["total_qr"],
+        total_nequi=snapshot["total_nequi"],
+        total_daviplata=snapshot["total_daviplata"],
+        total_credit=snapshot["total_credit"],
+        total_refunds=snapshot["total_refunds"],
+        net_amount=snapshot["net_amount"],
+        counted_cash=float(closure_in.counted_cash or 0.0),
+        difference=snapshot["difference"],
+        notes=closure_in.notes,
+        sales_count=snapshot["sales_count"],
+        change_extra_total=snapshot["change_extra_total"],
+        change_refund_total=snapshot["change_refund_total"],
+        change_count=snapshot["change_count"],
+        total_surcharge=snapshot["total_surcharge"],
+        station_breakdown=snapshot["station_breakdown"],
+        methods_breakdown=snapshot["methods_breakdown"],
+        separated_summary=snapshot["separated_summary"],
+        user_breakdown=snapshot["user_breakdown"],
+    )
+    db.add(closure)
+    db.flush()
+    if not closure.consecutive:
+        closure.consecutive = f"CL-{closure.id:06d}"
+
+    for sale in snapshot["pending_sales"]:
+        sale.closure_id = closure.id
+
+    pending_returns = snapshot["pending_returns"]
+    if pending_returns:
+        (
+            db.query(models.SaleReturn)
+            .filter(models.SaleReturn.id.in_([ret.id for ret in pending_returns]))
+            .update({"closure_id": closure.id}, synchronize_session=False)
+        )
+
+    sep_payment_ids = snapshot["sep_payment_ids"]
+    if sep_payment_ids:
+        (
+            db.query(models.SeparatedOrderPayment)
+            .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
+            .update({"closure_id": closure.id}, synchronize_session=False)
+        )
+
+    pending_changes = snapshot["pending_changes"]
+    if pending_changes:
+        (
+            db.query(models.SaleChange)
+            .filter(models.SaleChange.id.in_([change.id for change in pending_changes]))
+            .update({"closure_id": closure.id}, synchronize_session=False)
+        )
+        if snapshot["admin_fallback_used"] and snapshot["station_id"]:
+            (
+                db.query(models.SeparatedOrderPayment)
+                .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
+                .filter(models.SeparatedOrderPayment.station_id.is_(None))
+                .update({"station_id": snapshot["station_id"]}, synchronize_session=False)
+            )
+
+    db.commit()
+    db.refresh(closure)
+    return closure
+
+
+def preview_pos_closure(
+    db: Session,
+    closure_in: schemas.PosClosureCreate,
+    user: models.PosUser,
+) -> dict[str, Any]:
+    snapshot = _build_pos_closure_snapshot(
+        db,
+        closure_in,
+        user,
+        apply_admin_fallback=False,
+    )
+    return {
+        "pos_name": snapshot["pos_name"],
+        "pos_identifier": closure_in.pos_identifier,
+        "station_id": snapshot["station_id"],
+        "opened_at": snapshot["opened_at"],
+        "closed_at": snapshot["closed_at"],
+        "total_amount": snapshot["total_amount"],
+        "total_cash": snapshot["total_cash"],
+        "total_card": snapshot["total_card"],
+        "total_qr": snapshot["total_qr"],
+        "total_nequi": snapshot["total_nequi"],
+        "total_daviplata": snapshot["total_daviplata"],
+        "total_credit": snapshot["total_credit"],
+        "total_refunds": snapshot["total_refunds"],
+        "net_amount": snapshot["net_amount"],
+        "counted_cash": float(closure_in.counted_cash or 0.0),
+        "difference": snapshot["difference"],
+        "change_extra_total": snapshot["change_extra_total"],
+        "change_refund_total": snapshot["change_refund_total"],
+        "change_count": snapshot["change_count"],
+        "notes": closure_in.notes,
+        "total_surcharge": snapshot["total_surcharge"],
+        "sales_count": snapshot["sales_count"],
+        "station_breakdown": snapshot["station_breakdown"],
+        "methods_breakdown": snapshot["methods_breakdown"],
+        "separated_summary": snapshot["separated_summary"],
+        "user_breakdown": snapshot["user_breakdown"],
+    }
+
+
+def _build_pos_closure_snapshot(
+    db: Session,
+    closure_in: schemas.PosClosureCreate,
+    user: models.PosUser,
+    *,
+    apply_admin_fallback: bool,
+    lock_pending_rows: bool = False,
+) -> dict[str, Any]:
     effective_tenant_id = resolve_user_tenant_id(db, user)
     pos_name = closure_in.pos_name.strip() if closure_in.pos_name else None
     station_id = _resolve_station_id(db, closure_in.station_id, tenant_id=effective_tenant_id)
@@ -11345,10 +11478,17 @@ def create_pos_closure(
             pos_name,
         )
 
+    if lock_pending_rows:
+        pending_sales_query = pending_sales_query.with_for_update()
     pending_sales = pending_sales_query.order_by(models.Sale.created_at.asc()).all()
     admin_fallback_used = False
 
-    if not pending_sales and station_id and user.role == "Administrador":
+    if (
+        apply_admin_fallback
+        and not pending_sales
+        and station_id
+        and user.role == "Administrador"
+    ):
         fallback_query = db.query(models.Sale).filter(
             models.Sale.tenant_id == effective_tenant_id,
             models.Sale.closure_id.is_(None),
@@ -11390,6 +11530,8 @@ def create_pos_closure(
             pos_name,
         )
 
+    if lock_pending_rows:
+        pending_returns_query = pending_returns_query.with_for_update()
     pending_returns = pending_returns_query.order_by(models.SaleReturn.created_at.asc()).all()
 
     pending_changes_base = (
@@ -11411,6 +11553,8 @@ def create_pos_closure(
             pos_name,
         )
 
+    if lock_pending_rows:
+        pending_changes_base = pending_changes_base.with_for_update()
     pending_changes_all = pending_changes_base.order_by(models.SaleChange.created_at.asc()).all()
 
     sep_paid_at = (
@@ -11509,6 +11653,48 @@ def create_pos_closure(
         "daviplata": "daviplata",
         "credit": "credit",
     }
+    method_labels = {
+        "cash": "Efectivo",
+        "card": "Tarjeta Datáfono",
+        "qr": "Transferencias / QR",
+        "nequi": "Nequi",
+        "daviplata": "Daviplata",
+        "credit": "Crédito / separado",
+    }
+    standard_method_keys = set(method_map.values())
+    methods_breakdown_map: dict[str, dict[str, Any]] = {}
+    user_totals: dict[str, float] = defaultdict(float)
+
+    def _method_key(raw: Optional[str]) -> str:
+        normalized = re.sub(r"\s+", " ", (raw or "").strip().lower())
+        return normalized or "other"
+
+    def _method_label(raw: Optional[str], key: str) -> str:
+        if key in method_labels:
+            return method_labels[key]
+        value = (raw or "").strip()
+        return value if value else "Otro método"
+
+    def _add_method_amount(raw_method: Optional[str], amount: float, *, refund: bool = False) -> None:
+        if abs(float(amount or 0.0)) <= 0.0001:
+            return
+        key = _method_key(raw_method)
+        entry = methods_breakdown_map.get(key)
+        if entry is None:
+            entry = {
+                "key": key,
+                "label": _method_label(raw_method, key),
+                "gross": 0.0,
+                "refunds": 0.0,
+                "net": 0.0,
+                "is_standard": key in standard_method_keys,
+            }
+            methods_breakdown_map[key] = entry
+        if refund:
+            entry["refunds"] += float(abs(amount))
+        else:
+            entry["gross"] += float(amount)
+        entry["net"] = float(entry["gross"] or 0.0) - float(entry["refunds"] or 0.0)
     station_totals: dict[str, dict[str, Any]] = {}
 
     def _station_bucket(station_ref: Optional[str]) -> dict[str, Any]:
@@ -11562,9 +11748,11 @@ def create_pos_closure(
                 payment_entries = [(fallback_method, fallback_amount)]
         for method, amount in payment_entries:
             key = method_map.get((method or "").lower())
+            amount_float = float(amount or 0.0)
             if key:
-                payment_totals[key] += float(amount or 0.0)
-                station_bucket[f"total_{key}"] += float(amount or 0.0)
+                payment_totals[key] += amount_float
+                station_bucket[f"total_{key}"] += amount_float
+            _add_method_amount(method, amount_float, refund=False)
 
         # El cambio de la venta (vuelto) siempre sale de caja en efectivo.
         # Se descuenta del total de efectivo para no inflar cifras en cierre.
@@ -11572,6 +11760,13 @@ def create_pos_closure(
         if sale_change_amount > 0:
             payment_totals["cash"] -= sale_change_amount
             station_bucket["total_cash"] -= sale_change_amount
+            _add_method_amount("cash", sale_change_amount, refund=True)
+
+        vendor_name = (sale.vendor_name or "").strip()
+        if vendor_name and not bool(sale.is_separated):
+            user_totals[vendor_name] += float(sale.total or 0.0) + float(
+                total_delta_by_sale.get(sale.id, 0.0)
+            )
 
     if pending_returns:
         for ret in pending_returns:
@@ -11592,10 +11787,12 @@ def create_pos_closure(
         )
         for ret_station_id, method, amount in return_rows:
             key = method_map.get((method or "").lower())
+            amount_float = float(amount or 0.0)
             if key:
-                payment_totals[key] -= float(amount or 0.0)
+                payment_totals[key] -= amount_float
                 station_bucket = _station_bucket(ret_station_id)
-                station_bucket[f"total_{key}"] -= float(amount or 0.0)
+                station_bucket[f"total_{key}"] -= amount_float
+            _add_method_amount(method, amount_float, refund=True)
 
     sep_payment_filter = (
         db.query(
@@ -11655,6 +11852,9 @@ def create_pos_closure(
             pos_name,
         )
 
+    if lock_pending_rows:
+        sep_ids_query = sep_ids_query.with_for_update()
+
     sep_rows = sep_payment_filter.group_by(
         "resolved_station_id",
         models.SeparatedOrderPayment.method,
@@ -11663,10 +11863,12 @@ def create_pos_closure(
 
     for sep_station_id, method, amount in sep_rows:
         key = method_map.get((method or "").lower())
+        amount_float = float(amount or 0.0)
         if key:
-            payment_totals[key] += float(amount or 0.0)
+            payment_totals[key] += amount_float
             station_bucket = _station_bucket(sep_station_id)
-            station_bucket[f"total_{key}"] += float(amount or 0.0)
+            station_bucket[f"total_{key}"] += amount_float
+        _add_method_amount(method, amount_float, refund=False)
 
     pending_changes = [
         change
@@ -11683,12 +11885,69 @@ def create_pos_closure(
         station_bucket["change_refund_total"] += float(change.refund_due or 0.0)
         for payment in change.payments:
             key = method_map.get((payment.method or "").lower())
+            payment_amount = float(payment.amount or 0.0)
             if key:
-                payment_totals[key] += float(payment.amount or 0.0)
-                station_bucket[f"total_{key}"] += float(payment.amount or 0.0)
+                payment_totals[key] += payment_amount
+                station_bucket[f"total_{key}"] += payment_amount
+            _add_method_amount(payment.method, payment_amount, refund=False)
         if float(change.refund_due or 0.0) > 0:
             payment_totals["cash"] -= float(change.refund_due or 0.0)
             station_bucket["total_cash"] -= float(change.refund_due or 0.0)
+            _add_method_amount("cash", float(change.refund_due or 0.0), refund=True)
+
+    separated_orders = (
+        db.query(models.SeparatedOrder)
+        .filter(
+            models.SeparatedOrder.tenant_id == effective_tenant_id,
+            models.SeparatedOrder.sale_id.in_(sale_ids) if sale_ids else false(),
+        )
+        .all()
+    )
+    separated_summary: Optional[dict[str, Any]] = None
+    if separated_orders:
+        sale_map = {sale.id: sale for sale in pending_sales}
+        sep_by_sale = {row.sale_id: row for row in separated_orders}
+        tickets = 0
+        reserved_total = 0.0
+        pending_total = 0.0
+        payments_total = 0.0
+        for sale in pending_sales:
+            separated = sep_by_sale.get(sale.id)
+            if not separated and not bool(sale.is_separated):
+                continue
+            tickets += 1
+            reserved_total += float(
+                (separated.total_amount if separated else None) or sale.total or 0.0
+            )
+            pending_total += max(
+                float((separated.balance if separated else None) or sale.balance or 0.0),
+                0.0,
+            )
+            payments_total += max(
+                float(
+                    (sale.initial_payment_amount or 0.0)
+                    or ((separated.initial_payment if separated else None) or 0.0)
+                ),
+                0.0,
+            )
+            vendor_name = (sale.vendor_name or "").strip()
+            if vendor_name:
+                user_totals[vendor_name] += max(
+                    float(
+                        (sale.initial_payment_amount or 0.0)
+                        or ((separated.initial_payment if separated else None) or 0.0)
+                    ),
+                    0.0,
+                )
+        payments_total += sum(float(amount or 0.0) for _, _, amount in sep_rows)
+        separated_summary = {
+            "tickets": tickets,
+            "payments_total": round(payments_total, 2),
+            "reserved_total": round(reserved_total, 2),
+            "pending_total": round(max(pending_total, 0.0), 2),
+            "day_collected_total": round(net_amount, 2),
+            "day_with_pending_total": round(net_amount + max(pending_total, 0.0), 2),
+        }
 
     net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
     station_breakdown: list[dict[str, Any]] = []
@@ -11725,73 +11984,74 @@ def create_pos_closure(
 
     difference = float(closure_in.counted_cash or 0.0) - payment_totals["cash"]
     total_surcharge = sum(float(sale.surcharge_amount or 0.0) for sale in pending_sales)
-
-    closure = models.PosClosure(
-        tenant_id=effective_tenant_id,
-        pos_name=pos_name,
-        pos_identifier=closure_in.pos_identifier,
-        station_id=station_id,
-        closed_by_user_id=user.id,
-        closed_by_user_name=user.name,
-        opened_at=range_start,
-        closed_at=closed_at,
-        total_amount=total_amount,
-        total_cash=payment_totals["cash"],
-        total_card=payment_totals["card"],
-        total_qr=payment_totals["qr"],
-        total_nequi=payment_totals["nequi"],
-        total_daviplata=payment_totals["daviplata"],
-        total_credit=payment_totals["credit"],
-        total_refunds=total_refunds,
-        net_amount=net_amount,
-        counted_cash=closure_in.counted_cash,
-        difference=difference,
-        notes=closure_in.notes,
-        sales_count=sales_count,
-        change_extra_total=change_extra_total,
-        change_refund_total=change_refund_total,
-        change_count=change_count,
-        total_surcharge=total_surcharge,
-        station_breakdown=station_breakdown,
+    methods_breakdown = sorted(
+        [
+            {
+                "key": key,
+                "label": str(value.get("label") or key),
+                "gross": round(float(value.get("gross") or 0.0), 2),
+                "refunds": round(float(value.get("refunds") or 0.0), 2),
+                "net": round(float(value.get("net") or 0.0), 2),
+                "is_standard": bool(value.get("is_standard")),
+            }
+            for key, value in methods_breakdown_map.items()
+            if abs(float(value.get("gross") or 0.0)) > 0.0001
+            or abs(float(value.get("refunds") or 0.0)) > 0.0001
+            or abs(float(value.get("net") or 0.0)) > 0.0001
+        ],
+        key=lambda row: (0 if row["is_standard"] else 1, row["label"].lower()),
     )
-    db.add(closure)
-    db.flush()
-    if not closure.consecutive:
-        closure.consecutive = f"CL-{closure.id:06d}"
+    user_breakdown = sorted(
+        [
+            {"name": name, "total": round(float(total), 2)}
+            for name, total in user_totals.items()
+            if name and abs(float(total or 0.0)) > 0.0001
+        ],
+        key=lambda row: row["total"],
+        reverse=True,
+    )
+    return {
+        "tenant_id": effective_tenant_id,
+        "pos_name": pos_name,
+        "station_id": station_id,
+        "opened_at": range_start,
+        "closed_at": closed_at,
+        "total_amount": total_amount,
+        "total_cash": payment_totals["cash"],
+        "total_card": payment_totals["card"],
+        "total_qr": payment_totals["qr"],
+        "total_nequi": payment_totals["nequi"],
+        "total_daviplata": payment_totals["daviplata"],
+        "total_credit": payment_totals["credit"],
+        "total_refunds": total_refunds,
+        "net_amount": net_amount,
+        "difference": difference,
+        "sales_count": sales_count,
+        "change_extra_total": change_extra_total,
+        "change_refund_total": change_refund_total,
+        "change_count": change_count,
+        "total_surcharge": total_surcharge,
+        "station_breakdown": station_breakdown,
+        "methods_breakdown": methods_breakdown,
+        "separated_summary": separated_summary,
+        "user_breakdown": user_breakdown,
+        "pending_sales": pending_sales,
+        "pending_returns": pending_returns,
+        "pending_changes": pending_changes,
+        "sep_payment_ids": sep_payment_ids,
+        "admin_fallback_used": admin_fallback_used,
+    }
 
-    for sale in pending_sales:
-        sale.closure_id = closure.id
 
-    if pending_returns:
+def _acquire_pos_closure_lock(db: Session, user: models.PosUser) -> None:
+    tenant_id = resolve_user_tenant_id(db, user)
+    if tenant_id is not None:
         (
-            db.query(models.SaleReturn)
-            .filter(models.SaleReturn.id.in_([ret.id for ret in pending_returns]))
-            .update({"closure_id": closure.id}, synchronize_session=False)
+            db.query(models.Tenant.id)
+            .filter(models.Tenant.id == tenant_id)
+            .with_for_update()
+            .first()
         )
-
-    if sep_payment_ids:
-        (
-            db.query(models.SeparatedOrderPayment)
-                .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
-                .update({"closure_id": closure.id}, synchronize_session=False)
-        )
-    if pending_changes:
-        (
-            db.query(models.SaleChange)
-            .filter(models.SaleChange.id.in_([change.id for change in pending_changes]))
-            .update({"closure_id": closure.id}, synchronize_session=False)
-        )
-        if admin_fallback_used and station_id:
-            (
-                db.query(models.SeparatedOrderPayment)
-                .filter(models.SeparatedOrderPayment.id.in_(sep_payment_ids))
-                .filter(models.SeparatedOrderPayment.station_id.is_(None))
-                .update({"station_id": station_id}, synchronize_session=False)
-            )
-
-    db.commit()
-    db.refresh(closure)
-    return closure
 
 
 def get_pos_closure(

@@ -824,6 +824,14 @@ def run_schema_upgrades(engine: Engine) -> None:
     with engine.connect() as connection:
         with connection.begin():
             if backend == "postgresql":
+                _ensure_column_postgres(connection, "pos_closures", "methods_breakdown", "JSONB")
+                _ensure_column_postgres(connection, "pos_closures", "separated_summary", "JSONB")
+                _ensure_column_postgres(connection, "pos_closures", "user_breakdown", "JSONB")
+            else:
+                _ensure_column(connection, "pos_closures", "methods_breakdown", "TEXT")
+                _ensure_column(connection, "pos_closures", "separated_summary", "TEXT")
+                _ensure_column(connection, "pos_closures", "user_breakdown", "TEXT")
+            if backend == "postgresql":
                 _ensure_table_tenants_postgres(connection)
                 _seed_default_tenant_postgres(connection)
                 _ensure_pos_settings_id_sequence_postgres(connection)

@@ -264,7 +264,7 @@ def _update_settings(client: TestClient, headers, **overrides):
 def test_closure_requires_pending_sales(client: TestClient):
     headers = _auth_headers(client)
     resp = client.post("/pos/closures", json=_closure_payload(), headers=headers)
-    assert resp.status_code == 400
+    assert resp.status_code == 409
     assert "pendientes" in resp.json()["detail"]
 
 
@@ -283,7 +283,7 @@ def test_closure_marks_sales_and_prevents_duplicates(client: TestClient):
     assert sale_resp.json()["closure_id"] == data["id"]
 
     resp_again = client.post("/pos/closures", json=_closure_payload(), headers=headers)
-    assert resp_again.status_code == 400
+    assert resp_again.status_code == 409
 
 
 def test_sale_with_surcharge_fields(client: TestClient):

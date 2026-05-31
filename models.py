@@ -1690,6 +1690,9 @@ class PosClosure(Base):
     notes = Column(Text, nullable=True)
     total_surcharge = Column(Float, nullable=False, default=0)
     station_breakdown = Column(JSON, nullable=True)
+    methods_breakdown = Column(JSON, nullable=True)
+    separated_summary = Column(JSON, nullable=True)
+    user_breakdown = Column(JSON, nullable=True)
 
     closed_by_user = relationship("PosUser")
     station = relationship("PosStation")

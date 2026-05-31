@@ -3504,6 +3504,29 @@ class PosClosureStationBreakdown(BaseModel):
     net_amount: float = 0.0
 
 
+class PosClosureMethodBreakdown(BaseModel):
+    key: str
+    label: str
+    gross: float = 0.0
+    refunds: float = 0.0
+    net: float = 0.0
+    is_standard: bool = False
+
+
+class PosClosureSeparatedSummary(BaseModel):
+    tickets: int = 0
+    payments_total: float = 0.0
+    reserved_total: float = 0.0
+    pending_total: float = 0.0
+    day_collected_total: float = 0.0
+    day_with_pending_total: float = 0.0
+
+
+class PosClosureUserBreakdown(BaseModel):
+    name: str
+    total: float = 0.0
+
+
 class PosClosureRead(PosClosureBase):
     id: int
     consecutive: Optional[str] = None
@@ -3511,10 +3534,27 @@ class PosClosureRead(PosClosureBase):
     closed_by_user_name: str
     sales_count: int
     station_breakdown: List[PosClosureStationBreakdown] = Field(default_factory=list)
+    methods_breakdown: List[PosClosureMethodBreakdown] = Field(default_factory=list)
+    separated_summary: Optional[PosClosureSeparatedSummary] = None
+    user_breakdown: List[PosClosureUserBreakdown] = Field(default_factory=list)
 
     @field_validator("station_breakdown", mode="before")
     @classmethod
     def _normalize_station_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
+
+    @field_validator("methods_breakdown", mode="before")
+    @classmethod
+    def _normalize_methods_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
+
+    @field_validator("user_breakdown", mode="before")
+    @classmethod
+    def _normalize_user_breakdown(cls, value):
         if value is None:
             return []
         return value
@@ -3525,3 +3565,32 @@ class PosClosureRead(PosClosureBase):
 
 class PosClosureList(PosClosureRead):
     pass
+
+
+class PosClosurePreviewRead(PosClosureBase):
+    sales_count: int = 0
+    station_breakdown: List[PosClosureStationBreakdown] = Field(default_factory=list)
+    methods_breakdown: List[PosClosureMethodBreakdown] = Field(default_factory=list)
+    separated_summary: Optional[PosClosureSeparatedSummary] = None
+    user_breakdown: List[PosClosureUserBreakdown] = Field(default_factory=list)
+
+    @field_validator("station_breakdown", mode="before")
+    @classmethod
+    def _normalize_station_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
+
+    @field_validator("methods_breakdown", mode="before")
+    @classmethod
+    def _normalize_methods_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
+
+    @field_validator("user_breakdown", mode="before")
+    @classmethod
+    def _normalize_user_breakdown(cls, value):
+        if value is None:
+            return []
+        return value
