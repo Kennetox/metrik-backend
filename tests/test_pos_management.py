@@ -387,6 +387,9 @@ def test_closure_separated_clarification_totals(client: TestClient):
     assert closure_data["separated_summary"]["pending_total"] == 40000.0
     assert closure_data["separated_summary"]["day_collected_total"] == 10000.0
     assert closure_data["separated_summary"]["day_with_pending_total"] == 50000.0
+    assert closure_data["user_breakdown"]
+    assert closure_data["user_breakdown"][0]["name"] == "Tester"
+    assert closure_data["user_breakdown"][0]["total"] == 10000.0
 
 
 def test_customer_crud_and_sales_association(client: TestClient):

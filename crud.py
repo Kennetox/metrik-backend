@@ -11895,6 +11895,8 @@ def _build_pos_closure_snapshot(
             station_bucket["total_cash"] -= float(change.refund_due or 0.0)
             _add_method_amount("cash", float(change.refund_due or 0.0), refund=True)
 
+    net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
+
     separated_orders = (
         db.query(models.SeparatedOrder)
         .filter(
@@ -11939,6 +11941,33 @@ def _build_pos_closure_snapshot(
                     ),
                     0.0,
                 )
+        sep_user_rows = (
+            db.query(
+                models.Sale.vendor_name,
+                func.sum(models.SeparatedOrderPayment.amount),
+            )
+            .join(
+                models.SeparatedOrder,
+                models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+            )
+            .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+            .filter(
+                models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
+                models.SeparatedOrderPayment.closure_id.is_(None),
+                or_(
+                    models.SeparatedOrderPayment.status.is_(None),
+                    models.SeparatedOrderPayment.status != "voided",
+                ),
+                models.Sale.id.in_(sale_ids) if sale_ids else false(),
+            )
+            .group_by(models.Sale.vendor_name)
+            .all()
+        )
+        for vendor_name_raw, vendor_amount in sep_user_rows:
+            vendor_name = (vendor_name_raw or "").strip()
+            if not vendor_name:
+                continue
+            user_totals[vendor_name] += float(vendor_amount or 0.0)
         payments_total += sum(float(amount or 0.0) for _, _, amount in sep_rows)
         separated_summary = {
             "tickets": tickets,
@@ -11949,7 +11978,6 @@ def _build_pos_closure_snapshot(
             "day_with_pending_total": round(net_amount, 2),
         }
 
-    net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
     station_breakdown: list[dict[str, Any]] = []
     for row in station_totals.values():
         row["net_amount"] = (
