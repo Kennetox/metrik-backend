@@ -11597,6 +11597,7 @@ def _build_pos_closure_snapshot(
         .filter(
             models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
+            models.SeparatedOrder.status != "cancelado",
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
                 models.SeparatedOrderPayment.status != "voided",
@@ -11841,6 +11842,7 @@ def _build_pos_closure_snapshot(
         .filter(
             models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
+            models.SeparatedOrder.status != "cancelado",
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
                 models.SeparatedOrderPayment.status != "voided",
@@ -11854,6 +11856,7 @@ def _build_pos_closure_snapshot(
         .filter(
             models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
+            models.SeparatedOrder.status != "cancelado",
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
                 models.SeparatedOrderPayment.status != "voided",
@@ -11934,6 +11937,7 @@ def _build_pos_closure_snapshot(
         db.query(models.SeparatedOrder)
         .filter(
             models.SeparatedOrder.tenant_id == effective_tenant_id,
+            models.SeparatedOrder.status != "cancelado",
             models.SeparatedOrder.sale_id.in_(sale_ids) if sale_ids else false(),
         )
         .all()
@@ -11987,6 +11991,7 @@ def _build_pos_closure_snapshot(
             .filter(
                 models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
                 models.SeparatedOrderPayment.closure_id.is_(None),
+                models.SeparatedOrder.status != "cancelado",
                 or_(
                     models.SeparatedOrderPayment.status.is_(None),
                     models.SeparatedOrderPayment.status != "voided",

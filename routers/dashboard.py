@@ -271,6 +271,10 @@ def get_payment_methods_summary(
     )
     separated_payments = (
         db.query(models.SeparatedOrderPayment)
+        .join(
+            models.SeparatedOrder,
+            models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+        )
         .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
@@ -278,6 +282,7 @@ def get_payment_methods_summary(
                 models.SeparatedOrderPayment.status != "voided",
             )
         )
+        .filter(models.SeparatedOrder.status != "cancelado")
         .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
         .filter(models.SeparatedOrderPayment.paid_at <= end_utc)
         .all()
@@ -457,6 +462,10 @@ def get_dashboard_summary(
     ) if include_metrik else []
     separated_payments_month = (
         db.query(models.SeparatedOrderPayment)
+        .join(
+            models.SeparatedOrder,
+            models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+        )
         .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
@@ -464,6 +473,7 @@ def get_dashboard_summary(
                 models.SeparatedOrderPayment.status != "voided",
             )
         )
+        .filter(models.SeparatedOrder.status != "cancelado")
         .filter(models.SeparatedOrderPayment.paid_at >= month_start_utc)
         .all()
     ) if include_metrik else []
@@ -515,6 +525,10 @@ def get_dashboard_summary(
     ) if include_metrik else []
     separated_payments_trend = (
         db.query(models.SeparatedOrderPayment)
+        .join(
+            models.SeparatedOrder,
+            models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+        )
         .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
         .filter(
             or_(
@@ -522,6 +536,7 @@ def get_dashboard_summary(
                 models.SeparatedOrderPayment.status != "voided",
             )
         )
+        .filter(models.SeparatedOrder.status != "cancelado")
         .filter(models.SeparatedOrderPayment.paid_at >= trend_start_utc)
         .all()
     ) if include_metrik else []
