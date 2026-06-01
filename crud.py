@@ -5445,13 +5445,25 @@ def get_web_catalog_best_sellers(
             + featured_bonus * 0.05
         )
 
-    candidates: list[tuple[float, Any]] = []
+    candidates_sold: list[tuple[float, Any]] = []
+    candidates_representative: list[tuple[float, Any]] = []
     for product, qty_on_hand, category_name in pool_rows:
         normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
         if normalized_category_key and normalized_category_key in inactive_category_keys:
             continue
-        candidates.append((_compute_score(product), (product, qty_on_hand, category_name)))
-    candidates.sort(key=lambda entry: (-entry[0], int(entry[1][0].web_sort_order or 999999), -int(entry[1][0].id or 0)))
+        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+        if stock_status == "out_of_stock":
+            continue
+        metrics = metrics_by_product.get(int(product.id), {})
+        qty_sold = float(metrics.get("qty_sold", 0.0) or 0.0)
+        payload = (_compute_score(product), (product, qty_on_hand, category_name))
+        if qty_sold > 0:
+            candidates_sold.append(payload)
+        elif bool(product.web_featured) or int(product.web_sort_order or 999999) <= 40:
+            candidates_representative.append(payload)
+
+    candidates_sold.sort(key=lambda entry: (-entry[0], int(entry[1][0].web_sort_order or 999999), -int(entry[1][0].id or 0)))
+    candidates_representative.sort(key=lambda entry: (-entry[0], int(entry[1][0].web_sort_order or 999999), -int(entry[1][0].id or 0)))
 
     brand_cap = max(2, int(math.ceil(safe_limit * 0.35)))
     category_cap = max(2, int(math.ceil(safe_limit * 0.40)))
@@ -5460,7 +5472,10 @@ def get_web_catalog_best_sellers(
     selected_rows: list[Any] = []
     selected_ids: set[int] = set()
 
-    for _, row in candidates:
+    sold_target = min(len(candidates_sold), max(1, int(math.floor(safe_limit * 0.7))))
+    representative_target = max(0, safe_limit - sold_target)
+
+    for _, row in candidates_sold:
         product = row[0]
         pid = int(product.id)
         if pid in selected_ids:
@@ -5475,11 +5490,29 @@ def get_web_catalog_best_sellers(
         selected_ids.add(pid)
         brand_counts[brand_key] += 1
         category_counts[category_key] += 1
-        if len(selected_rows) >= safe_limit:
+        if len(selected_rows) >= sold_target:
             break
 
+    for _, row in candidates_representative:
+        if len(selected_rows) >= sold_target + representative_target:
+            break
+        product = row[0]
+        pid = int(product.id)
+        if pid in selected_ids:
+            continue
+        brand_key = (product.brand or "__none__").strip().lower()
+        category_key = (_normalize_web_catalog_category_key(product.web_category_key) or (product.group_name or "__none__")).strip().lower()
+        if brand_counts[brand_key] >= brand_cap:
+            continue
+        if category_counts[category_key] >= category_cap:
+            continue
+        selected_rows.append(row)
+        selected_ids.add(pid)
+        brand_counts[brand_key] += 1
+        category_counts[category_key] += 1
+
     if len(selected_rows) < safe_limit:
-        for _, row in candidates:
+        for _, row in candidates_sold + candidates_representative:
             product = row[0]
             pid = int(product.id)
             if pid in selected_ids:
@@ -5494,7 +5527,7 @@ def get_web_catalog_best_sellers(
         normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
         category_def = category_map.get(normalized_category_key)
         stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+        if stock_status == "out_of_stock":
             continue
         price_mode = (product.web_price_mode or "visible").strip().lower()
         sale_price = resolve_web_product_sale_price(product)
@@ -5560,7 +5593,7 @@ def get_web_catalog_best_sellers(
             if normalized_category_key and normalized_category_key in inactive_category_keys:
                 continue
             stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+            if stock_status == "out_of_stock":
                 continue
             category_def = category_map.get(normalized_category_key)
             price_mode = (product.web_price_mode or "visible").strip().lower()
