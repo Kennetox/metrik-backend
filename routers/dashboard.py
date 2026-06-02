@@ -1,5 +1,6 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+import re
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
@@ -49,6 +50,49 @@ def _is_cash_method(method: str | None) -> bool:
         or "cash" in normalized
         or "efectivo" in normalized
     )
+
+
+def _normalize_payment_method_token(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", value.strip().lower())
+
+
+def _build_payment_method_alias_map(
+    db: Session,
+    tenant_id: int,
+) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    methods = (
+        db.query(models.PaymentMethod.slug, models.PaymentMethod.name)
+        .filter(models.PaymentMethod.tenant_id == tenant_id)
+        .filter(models.PaymentMethod.deleted_at.is_(None))
+        .all()
+    )
+    for slug, name in methods:
+        canonical_slug = (slug or "").strip().lower()
+        if not canonical_slug:
+            continue
+        slug_key = _normalize_payment_method_token(slug)
+        if slug_key:
+            aliases[slug_key] = canonical_slug
+        name_key = _normalize_payment_method_token(name)
+        if name_key:
+            aliases[name_key] = canonical_slug
+
+    aliases[_normalize_payment_method_token("cash")] = "cash"
+    aliases[_normalize_payment_method_token("efectivo")] = "cash"
+    return aliases
+
+
+def _normalize_payment_method_for_summary(
+    method: str | None,
+    aliases: dict[str, str],
+) -> str:
+    normalized = _normalize_payment_method_token(method)
+    if not normalized:
+        return "DESCONOCIDO"
+    return aliases.get(normalized, normalized)
 
 
 def _parse_adjustment_payments(payload: object) -> list[tuple[str, float]]:
@@ -214,6 +258,7 @@ def get_payment_methods_summary(
     start_dt, end_dt = _resolve_range_bounds(range_key, bogota_tz, parsed_start)
     start_utc = start_dt.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = end_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    payment_method_aliases = _build_payment_method_alias_map(db, tenant_id)
 
     sales = (
         db.query(models.Sale)
@@ -316,7 +361,10 @@ def get_payment_methods_summary(
             else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
         )
         for method, payment_amount in payment_iter:
-            method = method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                method,
+                payment_method_aliases,
+            )
             if payment_amount <= 0:
                 continue
             if change_remaining > 0 and _is_cash_method(method):
@@ -329,17 +377,26 @@ def get_payment_methods_summary(
             payment_ticket_sets[method].add(sale.id)
 
     for payment in separated_payments:
-        method = payment.method or "DESCONOCIDO"
+        method = _normalize_payment_method_for_summary(
+            payment.method,
+            payment_method_aliases,
+        )
         payment_totals[method] += float(payment.amount or 0.0)
 
     for ret in returns:
         for payment in ret.payments:
-            method = payment.method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                payment.method,
+                payment_method_aliases,
+            )
             payment_totals[method] -= float(payment.amount or 0.0)
 
     for change in changes:
         for payment in change.payments:
-            method = payment.method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                payment.method,
+                payment_method_aliases,
+            )
             payment_totals[method] += float(payment.amount or 0.0)
         if float(change.refund_due or 0.0) > 0:
             payment_totals["cash"] -= float(change.refund_due or 0.0)
@@ -549,6 +606,7 @@ def get_dashboard_summary(
     payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales_month], tenant_id
     ) if sales_month else ({}, {})
+    payment_method_aliases = _build_payment_method_alias_map(db, tenant_id)
 
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
@@ -701,7 +759,10 @@ def get_dashboard_summary(
             else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
         )
         for method, payment_amount in payment_iter:
-            method = method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                method,
+                payment_method_aliases,
+            )
             if payment_amount <= 0:
                 continue
             if change_remaining > 0 and _is_cash_method(method):
@@ -714,17 +775,26 @@ def get_dashboard_summary(
             payment_ticket_sets[method].add(sale.id)
 
     for payment in separated_payments_month:
-        method = payment.method or "DESCONOCIDO"
+        method = _normalize_payment_method_for_summary(
+            payment.method,
+            payment_method_aliases,
+        )
         payment_totals[method] += float(payment.amount or 0.0)
 
     for ret in returns_month:
         for payment in ret.payments:
-            method = payment.method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                payment.method,
+                payment_method_aliases,
+            )
             payment_totals[method] -= float(payment.amount or 0.0)
 
     for change in changes_month:
         for payment in change.payments:
-            method = payment.method or "DESCONOCIDO"
+            method = _normalize_payment_method_for_summary(
+                payment.method,
+                payment_method_aliases,
+            )
             payment_totals[method] += float(payment.amount or 0.0)
         if float(change.refund_due or 0.0) > 0:
             payment_totals["cash"] -= float(change.refund_due or 0.0)
