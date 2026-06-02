@@ -120,6 +120,8 @@ def list_separated_orders(
     status_filter: Optional[str] = Query(default=None, alias="status"),
     date_from: Optional[datetime] = Query(default=None),
     date_to: Optional[datetime] = Query(default=None),
+    paid_from: Optional[datetime] = Query(default=None),
+    paid_to: Optional[datetime] = Query(default=None),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -138,6 +140,8 @@ def list_separated_orders(
         status=status_filter,
         date_from=date_from,
         date_to=date_to,
+        paid_from=paid_from,
+        paid_to=paid_to,
         tenant_id=tenant_id,
     )
 

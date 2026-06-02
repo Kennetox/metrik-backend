@@ -6247,9 +6247,13 @@ def list_separated_orders(
     status: Optional[str] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    paid_from: Optional[datetime] = None,
+    paid_to: Optional[datetime] = None,
     tenant_id: Optional[int] = None,
 ) -> List[models.SeparatedOrder]:
-    query = db.query(models.SeparatedOrder)
+    query = db.query(models.SeparatedOrder).options(
+        selectinload(models.SeparatedOrder.payments)
+    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.SeparatedOrder.tenant_id == effective_tenant_id)
@@ -6277,10 +6281,38 @@ def list_separated_orders(
         )
     if status:
         query = query.filter(models.SeparatedOrder.status == status)
+    created_filters = []
     if date_from is not None:
-        query = query.filter(models.SeparatedOrder.created_at >= date_from)
+        created_filters.append(models.SeparatedOrder.created_at >= date_from)
     if date_to is not None:
-        query = query.filter(models.SeparatedOrder.created_at < date_to)
+        created_filters.append(models.SeparatedOrder.created_at < date_to)
+
+    payment_filters = []
+    if paid_from is not None or paid_to is not None:
+        payment_filters.append(
+            or_(
+                models.SeparatedOrderPayment.status.is_(None),
+                models.SeparatedOrderPayment.status != "voided",
+            )
+        )
+        if paid_from is not None:
+            payment_filters.append(models.SeparatedOrderPayment.paid_at >= paid_from)
+        if paid_to is not None:
+            payment_filters.append(models.SeparatedOrderPayment.paid_at < paid_to)
+
+    created_clause = and_(*created_filters) if created_filters else None
+    payment_clause = (
+        models.SeparatedOrder.payments.any(and_(*payment_filters))
+        if payment_filters
+        else None
+    )
+
+    if created_clause is not None and payment_clause is not None:
+        query = query.filter(or_(created_clause, payment_clause))
+    elif created_clause is not None:
+        query = query.filter(created_clause)
+    elif payment_clause is not None:
+        query = query.filter(payment_clause)
     return (
         query.order_by(models.SeparatedOrder.created_at.desc())
         .offset(skip)
