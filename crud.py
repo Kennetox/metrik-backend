@@ -6827,10 +6827,39 @@ def get_sale_change(
     return query.first()
 
 
+def _create_inventory_movement(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    product_id: int,
+    qty_delta: float,
+    reason: str,
+    notes: Optional[str],
+    reference_type: str,
+    reference_id: int,
+    created_by_user_id: Optional[int],
+) -> None:
+    if qty_delta == 0:
+        return
+    db.add(
+        models.InventoryMovement(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            qty_delta=qty_delta,
+            reason=reason,
+            notes=notes,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            created_by_user_id=created_by_user_id,
+        )
+    )
+
+
 def create_return(
     db: Session,
     return_in: schemas.SaleReturnCreate,
     tenant_id: Optional[int] = None,
+    created_by_user_id: Optional[int] = None,
 ) -> models.SaleReturn:
     if not return_in.items or len(return_in.items) == 0:
         raise ValueError("La devolución debe incluir al menos un ítem")
@@ -6854,6 +6883,15 @@ def create_return(
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
         raise ValueError("La venta seleccionada no tiene ítems registrados")
+    sale_product_ids = [int(item.product_id) for item in sale.items if item.product_id is not None]
+    sale_product_flags: dict[int, bool] = {}
+    if sale_product_ids:
+        product_rows = (
+            db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(sale_product_ids))
+            .all()
+        )
+        sale_product_flags = {int(row.id): bool(row.service) for row in product_rows}
 
     confirmed_statuses = {"confirmed"}
     refunded_qty = defaultdict(float)
@@ -7036,6 +7074,14 @@ def create_return(
     if not sale_return.document_number:
         sale_return.document_number = f"DV-{sale_return.id:06d}"
 
+    movement_note_parts = [
+        f"Documento:{sale_return.document_number or sale_return.id}",
+        f"Venta:{sale.document_number or sale.id}",
+    ]
+    if sale_return.notes:
+        movement_note_parts.append(sale_return.notes)
+    movement_note = " | ".join(part for part in movement_note_parts if part)
+
     for item_data in items_data:
         sale_item = item_data["sale_item"]
         db_return_item = models.SaleReturnItem(
@@ -7055,6 +7101,18 @@ def create_return(
             total_refund=item_data["total_refund"],
         )
         db.add(db_return_item)
+        if status == "confirmed" and not sale_product_flags.get(int(sale_item.product_id or 0), False):
+            _create_inventory_movement(
+                db,
+                tenant_id=sale_return.tenant_id,
+                product_id=int(sale_item.product_id),
+                qty_delta=abs(float(item_data["quantity"] or 0.0)),
+                reason="transfer_in",
+                notes=movement_note,
+                reference_type="sale_return",
+                reference_id=sale_return.id,
+                created_by_user_id=created_by_user_id,
+            )
 
     for idx, payment in enumerate(payments_payload):
         db_payment = models.SaleReturnPayment(
@@ -7078,6 +7136,7 @@ def create_change(
     db: Session,
     change_in: schemas.SaleChangeCreate,
     tenant_id: Optional[int] = None,
+    created_by_user_id: Optional[int] = None,
 ) -> models.SaleChange:
     if not change_in.return_items or len(change_in.return_items) == 0:
         raise ValueError("El cambio debe incluir al menos un ítem devuelto")
@@ -7103,6 +7162,15 @@ def create_change(
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
         raise ValueError("La venta seleccionada no tiene ítems registrados")
+    sale_product_ids = [int(item.product_id) for item in sale.items if item.product_id is not None]
+    sale_product_flags: dict[int, bool] = {}
+    if sale_product_ids:
+        product_rows = (
+            db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(sale_product_ids))
+            .all()
+        )
+        sale_product_flags = {int(row.id): bool(row.service) for row in product_rows}
 
     confirmed_statuses = {"confirmed"}
     refunded_qty = defaultdict(float)
@@ -7271,6 +7339,14 @@ def create_change(
     if not sale_change.document_number:
         sale_change.document_number = f"CB-{sale_change.id:06d}"
 
+    movement_note_parts = [
+        f"Documento:{sale_change.document_number or sale_change.id}",
+        f"Venta:{sale.document_number or sale.id}",
+    ]
+    if sale_change.notes:
+        movement_note_parts.append(sale_change.notes)
+    movement_note = " | ".join(part for part in movement_note_parts if part)
+
     for item_data in returned_items_data:
         sale_item = item_data["sale_item"]
         db_return_item = models.SaleChangeReturnItem(
@@ -7290,6 +7366,18 @@ def create_change(
             total_credit=item_data["total_credit"],
         )
         db.add(db_return_item)
+        if status == "confirmed" and not sale_product_flags.get(int(sale_item.product_id or 0), False):
+            _create_inventory_movement(
+                db,
+                tenant_id=sale_change.tenant_id,
+                product_id=int(sale_item.product_id),
+                qty_delta=abs(float(item_data["quantity"] or 0.0)),
+                reason="transfer_in",
+                notes=movement_note,
+                reference_type="sale_change",
+                reference_id=sale_change.id,
+                created_by_user_id=created_by_user_id,
+            )
 
     for item_data in new_items_data:
         product = item_data["product"]
@@ -7305,6 +7393,18 @@ def create_change(
             total=item_data["total"],
         )
         db.add(db_new_item)
+        if status == "confirmed" and not bool(product.service):
+            _create_inventory_movement(
+                db,
+                tenant_id=sale_change.tenant_id,
+                product_id=product.id,
+                qty_delta=-abs(float(item_data["quantity"] or 0.0)),
+                reason="transfer_out",
+                notes=movement_note,
+                reference_type="sale_change",
+                reference_id=sale_change.id,
+                created_by_user_id=created_by_user_id,
+            )
 
     for payment in payments_payload:
         db_payment = models.SaleChangePayment(
@@ -7417,6 +7517,44 @@ def void_return(
     sale_return.void_reason = reason
     sale_return.adjustment_reference = sale.document_number if sale else None
 
+    movement_note_parts = [
+        f"Anulación devolución:{sale_return.document_number or sale_return.id}",
+    ]
+    if sale and sale.document_number:
+        movement_note_parts.append(f"Venta:{sale.document_number}")
+    if reason and reason.strip():
+        movement_note_parts.append(reason.strip())
+    movement_note = " | ".join(movement_note_parts)
+
+    return_product_ids = [
+        int(item.product_id)
+        for item in sale_return.items
+        if item.product_id is not None
+    ]
+    return_product_flags: dict[int, bool] = {}
+    if return_product_ids:
+        product_rows = (
+            db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(return_product_ids))
+            .all()
+        )
+        return_product_flags = {int(row.id): bool(row.service) for row in product_rows}
+
+    for item in sale_return.items:
+        if return_product_flags.get(int(item.product_id or 0), False):
+            continue
+        _create_inventory_movement(
+            db,
+            tenant_id=sale_return.tenant_id,
+            product_id=int(item.product_id),
+            qty_delta=-abs(float(item.quantity or 0.0)),
+            reason="transfer_out",
+            notes=movement_note,
+            reference_type="sale_return",
+            reference_id=sale_return.id,
+            created_by_user_id=user.id,
+        )
+
     db.commit()
     db.refresh(sale_return)
     return sale_return
@@ -7442,6 +7580,62 @@ def void_change(
     sale_change.adjustment_reference = (
         sale_change.sale.document_number if sale_change.sale else None
     )
+
+    movement_note_parts = [
+        f"Anulación cambio:{sale_change.document_number or sale_change.id}",
+    ]
+    if sale_change.sale and sale_change.sale.document_number:
+        movement_note_parts.append(f"Venta:{sale_change.sale.document_number}")
+    if reason and reason.strip():
+        movement_note_parts.append(reason.strip())
+    movement_note = " | ".join(movement_note_parts)
+
+    returned_product_ids = [
+        int(item.product_id)
+        for item in sale_change.items_returned
+        if item.product_id is not None
+    ]
+    returned_product_flags: dict[int, bool] = {}
+    if returned_product_ids:
+        product_rows = (
+            db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(returned_product_ids))
+            .all()
+        )
+        returned_product_flags = {int(row.id): bool(row.service) for row in product_rows}
+
+    for item in sale_change.items_returned:
+        if returned_product_flags.get(int(item.product_id or 0), False):
+            continue
+        _create_inventory_movement(
+            db,
+            tenant_id=sale_change.tenant_id,
+            product_id=int(item.product_id),
+            qty_delta=-abs(float(item.quantity or 0.0)),
+            reason="transfer_out",
+            notes=movement_note,
+            reference_type="sale_change",
+            reference_id=sale_change.id,
+            created_by_user_id=user.id,
+        )
+
+    for item in sale_change.items_new:
+        if item.product_id is None:
+            continue
+        product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+        if product and product.service:
+            continue
+        _create_inventory_movement(
+            db,
+            tenant_id=sale_change.tenant_id,
+            product_id=int(item.product_id),
+            qty_delta=abs(float(item.quantity or 0.0)),
+            reason="transfer_in",
+            notes=movement_note,
+            reference_type="sale_change",
+            reference_id=sale_change.id,
+            created_by_user_id=user.id,
+        )
 
     db.commit()
     db.refresh(sale_change)

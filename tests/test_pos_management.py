@@ -603,3 +603,179 @@ def test_dashboard_monthly_sales_endpoint(client: TestClient):
     january = next(item for item in data if item["month"] == 1)
     assert january["total"] > 0
     assert january["tickets"] == 1
+
+
+def _create_change_test_sale(
+    *,
+    sale_name: str,
+    sale_price: float,
+    new_name: str,
+    new_price: float,
+):
+    db = TestingSessionLocal()
+    sale_product = models.Product(
+        name=sale_name,
+        price=sale_price,
+        cost=sale_price / 2,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    new_product = models.Product(
+        name=new_name,
+        price=new_price,
+        cost=new_price / 2,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add_all([sale_product, new_product])
+    db.commit()
+    db.refresh(sale_product)
+    db.refresh(new_product)
+
+    sale_in = schemas.SaleCreate(
+        payment_method="cash",
+        total=sale_price,
+        paid_amount=sale_price,
+        change_amount=0.0,
+        cart_discount_value=0.0,
+        cart_discount_percent=0.0,
+        customer_name="Cliente prueba",
+        notes=None,
+        pos_name="POS 1",
+        vendor_name="Tester",
+        items=[
+            schemas.SaleItemCreate(
+                product_id=sale_product.id,
+                quantity=1,
+                unit_price=sale_price,
+                product_sku=sale_product.sku,
+                product_name=sale_product.name,
+                product_barcode=sale_product.barcode,
+                discount=0.0,
+            )
+        ],
+        payments=[schemas.SalePaymentCreate(method="cash", amount=sale_price)],
+    )
+    sale = crud.create_sale(db, sale_in)
+    sale_item_id = (
+        db.query(models.SaleItem.id)
+        .filter(models.SaleItem.sale_id == sale.id)
+        .scalar()
+    )
+    db.close()
+    return sale.id, sale_item_id, sale_product.id, new_product.id
+
+
+def test_return_creates_inventory_entry(client: TestClient):
+    headers = _auth_headers(client)
+    sale_id, sale_item_id, sale_product_id, _ = _create_change_test_sale(
+        sale_name="Producto devolución",
+        sale_price=15000.0,
+        new_name="Nuevo no usado",
+        new_price=15000.0,
+    )
+
+    resp = client.post(
+        "/pos/returns",
+        json={
+            "sale_id": sale_id,
+            "items": [
+                {"sale_item_id": sale_item_id, "quantity": 1, "reason": "cambio"},
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    return_id = resp.json()["id"]
+
+    db = TestingSessionLocal()
+    movements = (
+        db.query(models.InventoryMovement)
+        .filter(models.InventoryMovement.reference_type == "sale_return")
+        .filter(models.InventoryMovement.reference_id == return_id)
+        .all()
+    )
+    db.close()
+
+    assert len(movements) == 1
+    assert movements[0].product_id == sale_product_id
+    assert movements[0].qty_delta == 1
+    assert movements[0].reason == "transfer_in"
+
+
+def test_change_creates_and_voids_inventory_movements(client: TestClient):
+    headers = _auth_headers(client)
+    sale_id, sale_item_id, sale_product_id, new_product_id = _create_change_test_sale(
+        sale_name="Producto cambio",
+        sale_price=20000.0,
+        new_name="Producto nuevo cambio",
+        new_price=20000.0,
+    )
+
+    resp = client.post(
+        "/pos/changes",
+        json={
+            "sale_id": sale_id,
+            "return_items": [
+                {"sale_item_id": sale_item_id, "quantity": 1, "reason": "cambio"},
+            ],
+            "new_items": [
+                {"product_id": new_product_id, "quantity": 1},
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    change_id = resp.json()["id"]
+
+    db = TestingSessionLocal()
+    movements = (
+        db.query(models.InventoryMovement)
+        .filter(models.InventoryMovement.reference_type == "sale_change")
+        .filter(models.InventoryMovement.reference_id == change_id)
+        .order_by(models.InventoryMovement.id.asc())
+        .all()
+    )
+    assert len(movements) == 2
+    assert {movement.product_id for movement in movements} == {sale_product_id, new_product_id}
+    assert any(movement.product_id == sale_product_id and movement.qty_delta == 1 for movement in movements)
+    assert any(
+        movement.product_id == new_product_id and movement.qty_delta == -1
+        for movement in movements
+    )
+
+    void_resp = client.post(
+        f"/pos/changes/{change_id}/void",
+        json={"reason": "Corrección"},
+        headers=headers,
+    )
+    assert void_resp.status_code == 200
+
+    all_movements = (
+        db.query(models.InventoryMovement)
+        .filter(models.InventoryMovement.reference_type == "sale_change")
+        .filter(models.InventoryMovement.reference_id == change_id)
+        .order_by(models.InventoryMovement.id.asc())
+        .all()
+    )
+    db.close()
+
+    assert len(all_movements) == 4
+    assert sum(m.qty_delta for m in all_movements if m.product_id == sale_product_id) == 0
+    assert sum(m.qty_delta for m in all_movements if m.product_id == new_product_id) == 0

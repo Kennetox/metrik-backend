@@ -1377,7 +1377,12 @@ def create_return(
 
     try:
         tenant_id = crud.resolve_user_tenant_id(db, current_user)
-        sale_return = crud.create_return(db, return_in, tenant_id=tenant_id)
+        sale_return = crud.create_return(
+            db,
+            return_in,
+            tenant_id=tenant_id,
+            created_by_user_id=current_user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1394,7 +1399,12 @@ def create_change(
 
     try:
         tenant_id = crud.resolve_user_tenant_id(db, current_user)
-        sale_change = crud.create_change(db, change_in, tenant_id=tenant_id)
+        sale_change = crud.create_change(
+            db,
+            change_in,
+            tenant_id=tenant_id,
+            created_by_user_id=current_user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
