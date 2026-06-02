@@ -3536,7 +3536,9 @@ class PosClosureStationBreakdown(BaseModel):
     total_credit: float = 0.0
     change_extra_total: float = 0.0
     change_refund_total: float = 0.0
+    pending_total: float = 0.0
     net_amount: float = 0.0
+    net_amount_without_separated_pending: float = 0.0
 
 
 class PosClosureMethodBreakdown(BaseModel):

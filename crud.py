@@ -11956,6 +11956,7 @@ def _build_pos_closure_snapshot(
         .all()
     )
     separated_summary: Optional[dict[str, Any]] = None
+    station_separated_pending_totals: dict[str, float] = defaultdict(float)
     if separated_orders:
         sale_map = {sale.id: sale for sale in pending_sales}
         sep_by_sale = {row.sale_id: row for row in separated_orders}
@@ -11972,6 +11973,11 @@ def _build_pos_closure_snapshot(
                 (separated.total_amount if separated else None) or sale.total or 0.0
             )
             pending_total += max(
+                float((separated.balance if separated else None) or sale.balance or 0.0),
+                0.0,
+            )
+            station_key = sale.station_id or "__unassigned__"
+            station_separated_pending_totals[station_key] += max(
                 float((separated.balance if separated else None) or sale.balance or 0.0),
                 0.0,
             )
@@ -12031,11 +12037,20 @@ def _build_pos_closure_snapshot(
 
     station_breakdown: list[dict[str, Any]] = []
     for row in station_totals.values():
+        station_key = row.get("station_id") or "__unassigned__"
+        pending_separated_total = round(
+            max(float(station_separated_pending_totals.get(station_key, 0.0)), 0.0), 2
+        )
         row["net_amount"] = (
             float(row["total_amount"] or 0.0)
             - float(row["total_refunds"] or 0.0)
             + float(row["change_extra_total"] or 0.0)
             - float(row["change_refund_total"] or 0.0)
+        )
+        row["pending_total"] = pending_separated_total
+        row["net_amount_without_separated_pending"] = round(
+            max(float(row["net_amount"] or 0.0) - pending_separated_total, 0.0),
+            2,
         )
         has_movement = (
             int(row["sales_count"] or 0) > 0
@@ -12043,6 +12058,7 @@ def _build_pos_closure_snapshot(
             or abs(float(row["total_refunds"] or 0.0)) > 0.009
             or abs(float(row["change_extra_total"] or 0.0)) > 0.009
             or abs(float(row["change_refund_total"] or 0.0)) > 0.009
+            or abs(float(row["pending_total"] or 0.0)) > 0.009
             or abs(float(row["total_cash"] or 0.0)) > 0.009
             or abs(float(row["total_card"] or 0.0)) > 0.009
             or abs(float(row["total_qr"] or 0.0)) > 0.009
