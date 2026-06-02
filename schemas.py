@@ -2589,6 +2589,7 @@ class SaleChangePaymentRead(BaseModel):
 class SaleChangeRead(BaseModel):
     id: int
     sale_id: int
+    sale_document_number: Optional[str] = None
     closure_id: Optional[int] = None
     document_number: Optional[str] = None
     status: str

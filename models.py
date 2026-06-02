@@ -1911,6 +1911,10 @@ class SaleChange(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def sale_document_number(self) -> str | None:
+        return self.sale.document_number if self.sale else None
+
 
 class SaleChangeReturnItem(Base):
     __tablename__ = "sale_change_return_items"
