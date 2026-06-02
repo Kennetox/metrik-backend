@@ -651,6 +651,11 @@ def get_dashboard_summary(
     today_avg_ticket = (
         today_sales_total / today_tickets if today_tickets > 0 else 0.0
     )
+    today_change_count = sum(
+        1 for change in changes_month if _to_bogota_date(change.created_at, bogota_tz) == today_date
+    )
+    today_change_extra_total = change_extra_by_day[today_date]
+    today_change_refund_total = change_refund_by_day[today_date]
 
     month_sales_total = 0.0
     month_tickets = 0
@@ -666,6 +671,9 @@ def get_dashboard_summary(
     month_avg_ticket = (
         month_sales_total / month_tickets if month_tickets > 0 else 0.0
     )
+    month_change_count = len(changes_month)
+    month_change_extra_total = sum(change_extra_by_day.values())
+    month_change_refund_total = sum(change_refund_by_day.values())
 
     # --- Métodos de pago (mes actual, flujo real de caja) ---
     payment_totals = defaultdict(float)
@@ -763,9 +771,15 @@ def get_dashboard_summary(
         today_sales_total=today_sales_total,
         today_tickets=today_tickets,
         today_avg_ticket=today_avg_ticket,
+        today_change_count=today_change_count,
+        today_change_extra_total=today_change_extra_total,
+        today_change_refund_total=today_change_refund_total,
         month_sales_total=month_sales_total,
         month_tickets=month_tickets,
         month_avg_ticket=month_avg_ticket,
+        month_change_count=month_change_count,
+        month_change_extra_total=month_change_extra_total,
+        month_change_refund_total=month_change_refund_total,
         payment_methods=payment_methods,
         last_7_days=last_7_days,
         trend_days=trend_days,

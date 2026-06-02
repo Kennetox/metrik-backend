@@ -3003,10 +3003,16 @@ class DashboardSummary(BaseModel):
     today_sales_total: float
     today_tickets: int
     today_avg_ticket: float
+    today_change_count: int = 0
+    today_change_extra_total: float = 0.0
+    today_change_refund_total: float = 0.0
 
     month_sales_total: float
     month_tickets: int
     month_avg_ticket: float
+    month_change_count: int = 0
+    month_change_extra_total: float = 0.0
+    month_change_refund_total: float = 0.0
 
     payment_methods: List[PaymentMethodSummary]
     last_7_days: List[SalesTrendPoint]
