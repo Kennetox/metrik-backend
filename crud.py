@@ -6253,6 +6253,14 @@ def list_separated_orders(
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.SeparatedOrder.tenant_id == effective_tenant_id)
+    query = query.filter(
+        models.SeparatedOrder.sale.has(
+            or_(
+                models.Sale.status.is_(None),
+                models.Sale.status != "voided",
+            )
+        )
+    )
     if barcode:
         normalized = barcode.strip()
         query = query.filter(
@@ -7300,6 +7308,11 @@ def void_sale(
     sale.voided_at = datetime.utcnow()
     sale.voided_by_user_id = user.id
     sale.void_reason = reason
+
+    separated_order = sale.separated_order
+    if separated_order and separated_order.status != "cancelado":
+        separated_order.status = "cancelado"
+        separated_order.cancelled_at = datetime.utcnow()
 
     sale_items = list(sale.items or [])
     product_ids = [int(item.product_id) for item in sale_items if item.product_id is not None]

@@ -2878,6 +2878,41 @@ class ReportProductsByTargetResponse(BaseModel):
     rows: List[ReportProductsByTargetRow] = Field(default_factory=list)
 
 
+class ReportProductsSoldRequest(BaseModel):
+    date_from: date
+    date_to: date
+    source: str = "metrik"
+    pos_filter: str = "todos"
+    method_filter: str = "todos"
+    seller_filter: str = "todos"
+
+
+class ReportProductsSoldRow(BaseModel):
+    date: datetime
+    product: str
+    sku: str
+    unit_price: float
+    quantity: float
+    line_total: float
+    document: str
+    sale_id: int
+    pos_name: Optional[str] = None
+    seller_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    is_separated: bool = False
+
+
+class ReportProductsSoldResponse(BaseModel):
+    units: float = 0.0
+    unique_products: int = 0
+    product_value: float = 0.0
+    separated_pending: float = 0.0
+    collected_value: float = 0.0
+    documents: int = 0
+    rows_count: int = 0
+    rows: List[ReportProductsSoldRow] = Field(default_factory=list)
+
+
 class ReportFavoritesUpdateRequest(BaseModel):
     preset_ids: List[str] = Field(default_factory=list)
     expected_version: Optional[str] = None

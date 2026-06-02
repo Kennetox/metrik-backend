@@ -20,7 +20,7 @@ from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import and_
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 import crud
 import models
@@ -152,6 +152,88 @@ def _month_utc_bounds(year: int, month: int) -> tuple[datetime, datetime]:
         start_bogota.astimezone(timezone.utc).replace(tzinfo=None),
         end_bogota.astimezone(timezone.utc).replace(tzinfo=None),
     )
+
+
+def _date_range_utc_bounds(date_from, date_to) -> tuple[datetime, datetime]:
+    bogota_tz = ZoneInfo("America/Bogota")
+    start_bogota = datetime(
+        date_from.year, date_from.month, date_from.day, tzinfo=bogota_tz
+    )
+    end_bogota = datetime(
+        date_to.year, date_to.month, date_to.day, tzinfo=bogota_tz
+    ) + timedelta(days=1)
+    return (
+        start_bogota.astimezone(timezone.utc).replace(tzinfo=None),
+        end_bogota.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def _normalize_report_filter(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _matches_report_filter(raw_value: Optional[str], filter_value: Optional[str]) -> bool:
+    normalized_filter = _normalize_report_filter(filter_value)
+    if not normalized_filter or normalized_filter == "todos":
+        return True
+    return _normalize_report_filter(raw_value) == normalized_filter
+
+
+def _sale_document_label(sale: models.Sale) -> str:
+    if sale.document_number:
+        return sale.document_number
+    if sale.sale_number is not None:
+        return f"#{int(sale.sale_number):04d}"
+    return "—"
+
+
+def _item_key_from_values(
+    item_id: Optional[int],
+    product_id: Optional[int],
+    sku: Optional[str],
+    name: Optional[str],
+) -> str:
+    if item_id is not None:
+        return f"item:{item_id}"
+    if product_id is not None:
+        return f"product:{product_id}"
+    sku_key = (sku or "").strip().lower()
+    if sku_key:
+        return f"sku:{sku_key}"
+    return f"name:{(name or '').strip().lower()}"
+
+
+def _apply_cart_discount_to_report_items(
+    sale: models.Sale,
+    items: list[dict],
+) -> list[dict]:
+    cart_discount = max(0.0, float(sale.cart_discount_value or 0.0))
+    if cart_discount <= 0 or not items:
+        return items
+    subtotal = sum(max(0.0, float(item["line_total"] or 0.0)) for item in items)
+    if subtotal <= 0:
+        return items
+
+    remaining = min(cart_discount, subtotal)
+    adjusted: list[dict] = []
+    for index, item in enumerate(items):
+        line_total = max(0.0, float(item["line_total"] or 0.0))
+        quantity = max(0.0, float(item["quantity"] or 0.0))
+        if line_total <= 0 or quantity <= 0:
+            adjusted.append(item)
+            continue
+        raw_share = remaining if index == len(items) - 1 else (line_total / subtotal) * cart_discount
+        discount_share = max(0.0, min(raw_share, remaining))
+        remaining -= discount_share
+        net_total = max(0.0, line_total - discount_share)
+        adjusted.append(
+            {
+                **item,
+                "unit_price": net_total / quantity if quantity > 0 else 0.0,
+                "line_total": net_total,
+            }
+        )
+    return adjusted
 
 
 def _normalize_group_key(value: Optional[str]) -> str:
@@ -535,6 +617,261 @@ def get_products_last_sales(
             for row in rows
             if row.product_id is not None and row.last_sale_at is not None
         ]
+    )
+
+
+@router.post(
+    "/products/sold",
+    response_model=schemas.ReportProductsSoldResponse,
+)
+def get_products_sold_report(
+    payload: schemas.ReportProductsSoldRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_any_permission("reports.view", "sales_history.view", "pos.sales")
+    ),
+):
+    if payload.date_from > payload.date_to:
+        raise HTTPException(status_code=400, detail="Rango de fechas inválido")
+    if (payload.date_to - payload.date_from).days > 400:
+        raise HTTPException(status_code=400, detail="Rango máximo permitido: 400 días")
+
+    normalized_source = (payload.source or "metrik").strip().lower()
+    include_metrik = normalized_source in {"all", "metrik"}
+    include_legacy = normalized_source in {"all", "aronium", "legacy"}
+    if normalized_source not in {"all", "metrik", "aronium", "legacy"}:
+        raise HTTPException(status_code=400, detail="Filtro source inválido")
+
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    start_utc, end_utc = _date_range_utc_bounds(payload.date_from, payload.date_to)
+    method_filter = _normalize_report_filter(payload.method_filter)
+    rows: list[schemas.ReportProductsSoldRow] = []
+    unique_products: set[str] = set()
+    document_keys: set[str] = set()
+    units = 0.0
+    product_value = 0.0
+    separated_pending = 0.0
+
+    if include_metrik:
+        sales_query = (
+            db.query(models.Sale)
+            .options(
+                selectinload(models.Sale.items),
+                selectinload(models.Sale.payments),
+                selectinload(models.Sale.separated_order),
+                selectinload(models.Sale.returns).selectinload(models.SaleReturn.items),
+                selectinload(models.Sale.changes).selectinload(models.SaleChange.items_returned),
+                selectinload(models.Sale.changes).selectinload(models.SaleChange.items_new),
+            )
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+        )
+        if not _matches_report_filter(None, payload.pos_filter):
+            sales_query = sales_query.filter(func.lower(models.Sale.pos_name) == _normalize_report_filter(payload.pos_filter))
+        if not _matches_report_filter(None, payload.seller_filter):
+            sales_query = sales_query.filter(func.lower(models.Sale.vendor_name) == _normalize_report_filter(payload.seller_filter))
+        if method_filter and method_filter != "todos":
+            sales_query = sales_query.filter(
+                or_(
+                    func.lower(models.Sale.payment_method) == method_filter,
+                    models.Sale.payments.any(func.lower(models.SalePayment.method) == method_filter),
+                )
+            )
+
+        for sale in sales_query.order_by(models.Sale.created_at.asc(), models.Sale.id.asc()).all():
+            item_map: dict[str, dict] = {}
+            for item in sale.items or []:
+                quantity = float(item.quantity or 0.0)
+                if quantity <= 0:
+                    continue
+                key = _item_key_from_values(
+                    item.id,
+                    item.product_id,
+                    item.product_sku,
+                    item.product_name,
+                )
+                item_map[key] = {
+                    "product_id": item.product_id,
+                    "product": item.product_name or "Producto sin nombre",
+                    "sku": item.product_sku or "—",
+                    "quantity": quantity,
+                    "unit_price": float(item.unit_price or 0.0),
+                    "line_total": float(item.total or (float(item.unit_price or 0.0) * quantity)),
+                }
+
+            for ret in sale.returns or []:
+                if (ret.status or "").strip().lower() != "confirmed" or ret.voided_at:
+                    continue
+                for returned in ret.items or []:
+                    quantity = float(returned.quantity or 0.0)
+                    if quantity <= 0:
+                        continue
+                    key = _item_key_from_values(
+                        returned.sale_item_id,
+                        returned.product_id,
+                        returned.product_sku,
+                        returned.product_name,
+                    )
+                    existing = item_map.get(key)
+                    if not existing:
+                        continue
+                    existing_quantity = float(existing["quantity"] or 0.0)
+                    next_quantity = max(0.0, existing_quantity - quantity)
+                    if next_quantity <= 0:
+                        item_map.pop(key, None)
+                        continue
+                    unit_price = float(existing["unit_price"] or 0.0)
+                    existing["quantity"] = next_quantity
+                    existing["line_total"] = unit_price * next_quantity
+
+            for change in sale.changes or []:
+                if (change.status or "").strip().lower() != "confirmed" or change.voided_at:
+                    continue
+                for returned in change.items_returned or []:
+                    quantity = float(returned.quantity or 0.0)
+                    if quantity <= 0:
+                        continue
+                    key = _item_key_from_values(
+                        returned.sale_item_id,
+                        returned.product_id,
+                        returned.product_sku,
+                        returned.product_name,
+                    )
+                    existing = item_map.get(key)
+                    if not existing:
+                        continue
+                    existing_quantity = float(existing["quantity"] or 0.0)
+                    next_quantity = max(0.0, existing_quantity - quantity)
+                    if next_quantity <= 0:
+                        item_map.pop(key, None)
+                        continue
+                    unit_price = float(existing["unit_price"] or 0.0)
+                    existing["quantity"] = next_quantity
+                    existing["line_total"] = unit_price * next_quantity
+                for new_item in change.items_new or []:
+                    quantity = float(new_item.quantity or 0.0)
+                    if quantity <= 0:
+                        continue
+                    key = _item_key_from_values(
+                        None,
+                        new_item.product_id,
+                        new_item.product_sku,
+                        new_item.product_name,
+                    )
+                    existing = item_map.get(key)
+                    unit_price = float(new_item.unit_price or 0.0)
+                    if existing:
+                        existing_quantity = float(existing["quantity"] or 0.0) + quantity
+                        existing["quantity"] = existing_quantity
+                        existing["line_total"] = float(existing["line_total"] or 0.0) + float(new_item.total or (unit_price * quantity))
+                        existing["unit_price"] = (
+                            float(existing["line_total"] or 0.0) / existing_quantity
+                            if existing_quantity > 0
+                            else unit_price
+                        )
+                    else:
+                        item_map[key] = {
+                            "product_id": new_item.product_id,
+                            "product": new_item.product_name or "Producto sin nombre",
+                            "sku": new_item.product_sku or "—",
+                            "quantity": quantity,
+                            "unit_price": unit_price,
+                            "line_total": float(new_item.total or (unit_price * quantity)),
+                        }
+
+            sale_items = _apply_cart_discount_to_report_items(sale, list(item_map.values()))
+            sale_line_total = sum(float(item["line_total"] or 0.0) for item in sale_items)
+            if sale.separated_order:
+                separated_pending += min(
+                    max(0.0, float(sale.separated_order.balance or 0.0)),
+                    sale_line_total,
+                )
+
+            for item in sale_items:
+                quantity = float(item["quantity"] or 0.0)
+                line_total = float(item["line_total"] or 0.0)
+                if quantity <= 0 or line_total <= 0:
+                    continue
+                product_name = str(item["product"] or "Producto sin nombre")
+                unique_products.add(product_name)
+                document_keys.add(f"metrik:{sale.id}")
+                units += quantity
+                product_value += line_total
+                rows.append(
+                    schemas.ReportProductsSoldRow(
+                        date=sale.created_at,
+                        product=product_name,
+                        sku=str(item["sku"] or "—"),
+                        unit_price=float(item["unit_price"] or 0.0),
+                        quantity=quantity,
+                        line_total=line_total,
+                        document=_sale_document_label(sale),
+                        sale_id=int(sale.id),
+                        pos_name=sale.pos_name,
+                        seller_name=sale.vendor_name,
+                        payment_method=sale.payment_method,
+                        is_separated=bool(sale.separated_order),
+                    )
+                )
+
+    if include_legacy:
+        legacy_query = (
+            db.query(models.LegacySale, models.LegacySaleItem)
+            .join(models.LegacySaleItem, models.LegacySaleItem.legacy_sale_id == models.LegacySale.id)
+            .join(models.LegacyImportBatch, models.LegacyImportBatch.id == models.LegacySale.import_batch_id)
+            .filter(models.LegacySale.tenant_id == tenant_id)
+            .filter(models.LegacySale.status == "completed")
+            .filter(models.LegacyImportBatch.status == "published")
+            .filter(models.LegacySale.created_at >= start_utc)
+            .filter(models.LegacySale.created_at < end_utc)
+            .filter(models.LegacySaleItem.quantity > 0)
+        )
+        if not _matches_report_filter(None, payload.pos_filter):
+            legacy_query = legacy_query.filter(func.lower(models.LegacySale.pos_name) == _normalize_report_filter(payload.pos_filter))
+        if not _matches_report_filter(None, payload.seller_filter):
+            legacy_query = legacy_query.filter(func.lower(models.LegacySale.vendor_name) == _normalize_report_filter(payload.seller_filter))
+        if method_filter and method_filter != "todos":
+            legacy_query = legacy_query.filter(func.lower(models.LegacySale.payment_method) == method_filter)
+
+        for sale, item in legacy_query.order_by(models.LegacySale.created_at.asc(), models.LegacySale.id.asc()).all():
+            quantity = float(item.quantity or 0.0)
+            line_total = float(item.total or (float(item.unit_price or 0.0) * quantity))
+            if quantity <= 0 or line_total <= 0:
+                continue
+            product_name = item.product_name or "Producto sin nombre"
+            unique_products.add(product_name)
+            document_keys.add(f"legacy:{sale.id}")
+            units += quantity
+            product_value += line_total
+            rows.append(
+                schemas.ReportProductsSoldRow(
+                    date=sale.created_at,
+                    product=product_name,
+                    sku=item.product_sku or "—",
+                    unit_price=float(item.unit_price or 0.0),
+                    quantity=quantity,
+                    line_total=line_total,
+                    document=sale.display_document_number or sale.source_document_number or "—",
+                    sale_id=int(sale.id),
+                    pos_name=sale.pos_name,
+                    seller_name=sale.vendor_name,
+                    payment_method=sale.payment_method,
+                    is_separated=False,
+                )
+            )
+
+    rows.sort(key=lambda row: (row.date, row.sale_id), reverse=True)
+    return schemas.ReportProductsSoldResponse(
+        units=units,
+        unique_products=len(unique_products),
+        product_value=product_value,
+        separated_pending=separated_pending,
+        collected_value=max(0.0, product_value - separated_pending),
+        documents=len(document_keys),
+        rows_count=len(rows),
+        rows=rows,
     )
 
 

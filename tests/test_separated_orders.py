@@ -129,3 +129,58 @@ def test_create_and_pay_separated_order(client: TestClient):
     )
     assert complete_resp.status_code == 200
     assert complete_resp.json()["completed_at"] is not None
+
+
+def test_voiding_sale_cancels_linked_separated_order(client: TestClient):
+    headers = _auth_headers(client)
+    product = _create_product()
+    payload = {
+        "payment_method": "cash",
+        "total": 50000.0,
+        "paid_amount": 10000.0,
+        "change_amount": 0.0,
+        "cart_discount_value": 0.0,
+        "cart_discount_percent": 0.0,
+        "customer_name": "Cliente Anulación",
+        "notes": "Separado a corregir",
+        "pos_name": "POS Principal",
+        "vendor_name": "Vendedor 1",
+        "items": [
+            {
+                "product_id": product.id,
+                "quantity": 1,
+                "unit_price": 50000.0,
+                "product_sku": product.sku,
+                "product_name": product.name,
+                "product_barcode": product.barcode,
+                "discount": 0.0,
+            }
+        ],
+        "payments": [
+            {"method": "cash", "amount": 10000.0},
+        ],
+        "due_date": datetime.utcnow().isoformat(),
+    }
+
+    resp = client.post("/separated-orders", json=payload, headers=headers)
+    assert resp.status_code == 201
+    data = resp.json()
+    order_id = data["id"]
+    sale_id = data["sale_id"]
+    barcode = data["sale_document_number"]
+
+    void_resp = client.post(
+        f"/pos/sales/{sale_id}/void",
+        json={"reason": "Venta corregida"},
+        headers=headers,
+    )
+    assert void_resp.status_code == 200
+
+    order_resp = client.get(f"/separated-orders/{order_id}", headers=headers)
+    assert order_resp.status_code == 200
+    assert order_resp.json()["status"] == "cancelado"
+    assert order_resp.json()["cancelled_at"] is not None
+
+    list_resp = client.get(f"/separated-orders?barcode={barcode}", headers=headers)
+    assert list_resp.status_code == 200
+    assert list_resp.json() == []
