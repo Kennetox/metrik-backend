@@ -12067,34 +12067,34 @@ def _build_pos_closure_snapshot(
                 station_bucket[f"total_{key}"] -= amount_float
             _add_method_amount(method, amount_float, refund=True)
 
-    sep_payment_filter = (
+    sep_payment_rows = (
         db.query(
+            models.SeparatedOrderPayment.id.label("payment_id"),
+            models.SeparatedOrderPayment.separated_order_id,
+            models.SeparatedOrderPayment.method,
+            models.SeparatedOrderPayment.amount,
+            models.SeparatedOrderPayment.paid_at,
             func.coalesce(
                 models.SeparatedOrderPayment.station_id,
                 models.Sale.station_id,
             ).label("resolved_station_id"),
-            models.SeparatedOrderPayment.method,
-            func.sum(models.SeparatedOrderPayment.amount),
+            models.Sale.id.label("sale_id"),
+            models.Sale.vendor_name,
+            models.Sale.station_id.label("sale_station_id"),
+            models.Sale.pos_name.label("sale_pos_name"),
+            models.SeparatedOrder.total_amount.label("order_total_amount"),
+            models.SeparatedOrder.initial_payment.label("order_initial_payment"),
+            models.SeparatedOrder.balance.label("order_balance"),
         )
-        .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
+        .join(
+            models.SeparatedOrder,
+            models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+        )
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
             models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
-            models.SeparatedOrder.status != "cancelado",
-            or_(
-                models.SeparatedOrderPayment.status.is_(None),
-                models.SeparatedOrderPayment.status != "voided",
-            ),
-        )
-    )
-    sep_ids_query = (
-        db.query(models.SeparatedOrderPayment.id)
-        .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
-        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-        .filter(
-            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
-            models.SeparatedOrderPayment.closure_id.is_(None),
+            models.SeparatedOrderPayment.paid_at <= range_end,
             models.SeparatedOrder.status != "cancelado",
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -12103,47 +12103,56 @@ def _build_pos_closure_snapshot(
         )
     )
     if scoped_station_ids:
-        sep_payment_filter = sep_payment_filter.filter(
-            or_(
-                models.SeparatedOrderPayment.station_id.in_(scoped_station_ids),
-                models.Sale.station_id.in_(scoped_station_ids),
-            )
-        )
-        sep_ids_query = sep_ids_query.filter(
+        sep_payment_rows = sep_payment_rows.filter(
             or_(
                 models.SeparatedOrderPayment.station_id.in_(scoped_station_ids),
                 models.Sale.station_id.in_(scoped_station_ids),
             )
         )
     elif pos_name:
-        sep_payment_filter = _filter_pos_name(
-            sep_payment_filter,
-            models.Sale.pos_name,
-            pos_name,
-        )
-        sep_ids_query = _filter_pos_name(
-            sep_ids_query,
+        sep_payment_rows = _filter_pos_name(
+            sep_payment_rows,
             models.Sale.pos_name,
             pos_name,
         )
 
     if lock_pending_rows:
-        sep_ids_query = sep_ids_query.with_for_update()
+        sep_payment_rows = sep_payment_rows.with_for_update()
 
-    sep_rows = sep_payment_filter.group_by(
-        "resolved_station_id",
-        models.SeparatedOrderPayment.method,
-    ).all()
-    sep_payment_ids = [row[0] for row in sep_ids_query.all()]
+    sep_payment_rows = sep_payment_rows.order_by(models.SeparatedOrderPayment.paid_at.asc()).all()
+    sep_payment_ids = [row.payment_id for row in sep_payment_rows]
 
-    for sep_station_id, method, amount in sep_rows:
-        key = method_map.get((method or "").lower())
-        amount_float = float(amount or 0.0)
+    separated_orders_map: dict[int, dict[str, Any]] = {}
+    for row in sep_payment_rows:
+        amount_float = float(row.amount or 0.0)
+        if amount_float <= 0:
+            continue
+        key = method_map.get((row.method or "").lower())
         if key:
             payment_totals[key] += amount_float
-            station_bucket = _station_bucket(sep_station_id)
+            station_bucket = _station_bucket(row.resolved_station_id)
             station_bucket[f"total_{key}"] += amount_float
-        _add_method_amount(method, amount_float, refund=False)
+        _add_method_amount(row.method, amount_float, refund=False)
+
+        vendor_name = (row.vendor_name or "").strip()
+        if vendor_name:
+            user_totals[vendor_name] += amount_float
+
+        order_state = separated_orders_map.get(row.separated_order_id)
+        if order_state is None:
+            order_state = {
+                "sale_id": row.sale_id,
+                "sale_station_id": row.sale_station_id,
+                "sale_pos_name": row.sale_pos_name,
+                "vendor_name": vendor_name,
+                "resolved_station_id": row.resolved_station_id,
+                "order_total_amount": float(row.order_total_amount or 0.0),
+                "order_initial_payment": float(row.order_initial_payment or 0.0),
+                "order_balance": float(row.order_balance or 0.0),
+                "payments_total": 0.0,
+            }
+            separated_orders_map[row.separated_order_id] = order_state
+        order_state["payments_total"] += amount_float
 
     pending_changes = [
         change
@@ -12172,86 +12181,57 @@ def _build_pos_closure_snapshot(
 
     net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
 
-    separated_orders = (
-        db.query(models.SeparatedOrder)
-        .filter(
-            models.SeparatedOrder.tenant_id == effective_tenant_id,
-            models.SeparatedOrder.status != "cancelado",
-            models.SeparatedOrder.sale_id.in_(sale_ids) if sale_ids else false(),
-        )
-        .all()
-    )
     separated_summary: Optional[dict[str, Any]] = None
     station_separated_pending_totals: dict[str, float] = defaultdict(float)
-    if separated_orders:
-        sale_map = {sale.id: sale for sale in pending_sales}
-        sep_by_sale = {row.sale_id: row for row in separated_orders}
+    if pending_sales or separated_orders_map:
         tickets = 0
         reserved_total = 0.0
         pending_total = 0.0
         payments_total = 0.0
+        pending_separated_sale_ids = {
+            sale.id for sale in pending_sales if bool(sale.is_separated)
+        }
         for sale in pending_sales:
-            separated = sep_by_sale.get(sale.id)
-            if not separated and not bool(sale.is_separated):
+            if not bool(sale.is_separated):
+                continue
+            order_state = separated_orders_map.get(sale.id)
+            order_total = float(
+                (order_state["order_total_amount"] if order_state else None)
+                or sale.total
+                or 0.0
+            )
+            order_balance = max(
+                float(
+                    (order_state["order_balance"] if order_state else None)
+                    or sale.balance
+                    or 0.0
+                ),
+                0.0,
+            )
+            tickets += 1
+            reserved_total += order_total
+            pending_total += order_balance
+            payments_total += max(float(sale.initial_payment_amount or 0.0), 0.0)
+            if order_state:
+                payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
+            station_key = sale.station_id or "__unassigned__"
+            station_separated_pending_totals[station_key] += order_balance
+
+        for order_id, order_state in separated_orders_map.items():
+            if order_id in pending_separated_sale_ids:
                 continue
             tickets += 1
-            reserved_total += float(
-                (separated.total_amount if separated else None) or sale.total or 0.0
+            reserved_total += max(float(order_state["order_total_amount"] or 0.0), 0.0)
+            order_balance = max(float(order_state["order_balance"] or 0.0), 0.0)
+            pending_total += order_balance
+            payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
+            station_key = (
+                order_state["sale_station_id"]
+                or order_state["resolved_station_id"]
+                or "__unassigned__"
             )
-            pending_total += max(
-                float((separated.balance if separated else None) or sale.balance or 0.0),
-                0.0,
-            )
-            station_key = sale.station_id or "__unassigned__"
-            station_separated_pending_totals[station_key] += max(
-                float((separated.balance if separated else None) or sale.balance or 0.0),
-                0.0,
-            )
-            payments_total += max(
-                float(
-                    (sale.initial_payment_amount or 0.0)
-                    or ((separated.initial_payment if separated else None) or 0.0)
-                ),
-                0.0,
-            )
-            vendor_name = (sale.vendor_name or "").strip()
-            if vendor_name:
-                user_totals[vendor_name] += max(
-                    float(
-                        (sale.initial_payment_amount or 0.0)
-                        or ((separated.initial_payment if separated else None) or 0.0)
-                    ),
-                    0.0,
-                )
-        sep_user_rows = (
-            db.query(
-                models.Sale.vendor_name,
-                func.sum(models.SeparatedOrderPayment.amount),
-            )
-            .join(
-                models.SeparatedOrder,
-                models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
-            )
-            .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-            .filter(
-                models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
-                models.SeparatedOrderPayment.closure_id.is_(None),
-                models.SeparatedOrder.status != "cancelado",
-                or_(
-                    models.SeparatedOrderPayment.status.is_(None),
-                    models.SeparatedOrderPayment.status != "voided",
-                ),
-                models.Sale.id.in_(sale_ids) if sale_ids else false(),
-            )
-            .group_by(models.Sale.vendor_name)
-            .all()
-        )
-        for vendor_name_raw, vendor_amount in sep_user_rows:
-            vendor_name = (vendor_name_raw or "").strip()
-            if not vendor_name:
-                continue
-            user_totals[vendor_name] += float(vendor_amount or 0.0)
-        payments_total += sum(float(amount or 0.0) for _, _, amount in sep_rows)
+            station_separated_pending_totals[station_key] += order_balance
+
         separated_summary = {
             "tickets": tickets,
             "payments_total": round(payments_total, 2),
