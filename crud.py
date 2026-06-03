@@ -6362,6 +6362,7 @@ def add_separated_order_payment(
         raise ValueError("Debe seleccionar una estación para registrar el abono")
 
     payment = models.SeparatedOrderPayment(
+        tenant_id=effective_tenant_id,
         separated_order_id=order.id,
         method=payment_in.method,
         amount=amount,
@@ -11834,7 +11835,7 @@ def _build_pos_closure_snapshot(
         .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
-            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
+            models.Sale.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             models.SeparatedOrder.status != "cancelado",
             or_(
@@ -12092,7 +12093,7 @@ def _build_pos_closure_snapshot(
         )
         .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
         .filter(
-            models.SeparatedOrderPayment.tenant_id == effective_tenant_id,
+            models.Sale.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             models.SeparatedOrderPayment.paid_at <= range_end,
             models.SeparatedOrder.status != "cancelado",
