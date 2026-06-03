@@ -320,7 +320,8 @@ def get_payment_methods_summary(
             models.SeparatedOrder,
             models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
         )
-        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -523,7 +524,8 @@ def get_dashboard_summary(
             models.SeparatedOrder,
             models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
         )
-        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -586,7 +588,8 @@ def get_dashboard_summary(
             models.SeparatedOrder,
             models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
         )
-        .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+        .filter(models.Sale.tenant_id == tenant_id)
         .filter(
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -965,7 +968,9 @@ def get_monthly_sales(
                 func.date_trunc("month", _bogota_date_expr(models.SeparatedOrderPayment.paid_at)).label("bucket"),
                 func.coalesce(func.sum(models.SeparatedOrderPayment.amount), 0.0).label("total"),
             )
-            .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+            .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
+            .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+            .filter(models.Sale.tenant_id == tenant_id)
             .filter(
                 or_(
                     models.SeparatedOrderPayment.status.is_(None),
@@ -1118,7 +1123,9 @@ def get_daily_sales(
                 _bogota_date_expr(models.SeparatedOrderPayment.paid_at).label("bucket"),
                 func.coalesce(func.sum(models.SeparatedOrderPayment.amount), 0.0).label("total"),
             )
-            .filter(models.SeparatedOrderPayment.tenant_id == tenant_id)
+            .join(models.SeparatedOrder, models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id)
+            .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+            .filter(models.Sale.tenant_id == tenant_id)
             .filter(
                 or_(
                     models.SeparatedOrderPayment.status.is_(None),
