@@ -1737,6 +1737,17 @@ def render_closure_html(
     closure: models.PosClosure,
     settings: Optional[models.PosSettings] = None,
 ) -> str:
+    separated_summary = closure.separated_summary if isinstance(closure.separated_summary, dict) else None
+    display_day_total = float(
+        (
+            separated_summary.get("day_collected_total")
+            if separated_summary
+            else None
+        )
+        or closure.net_amount
+        or closure.total_amount
+        or 0.0
+    )
     formatted_date = _format_ticket_datetime(closure.closed_at) or html_escape(
         str(closure.closed_at)
     )
@@ -1755,7 +1766,7 @@ def render_closure_html(
     closure_label = html_escape(closure.consecutive or f"CL-{closure.id:06d}")
     sales_count = int(closure.sales_count or 0)
     totals = [
-        ("Total ventas", closure.total_amount),
+        ("Total ventas", display_day_total),
         ("Total efectivo", closure.total_cash),
         ("Total tarjeta", closure.total_card),
         ("Total QR", closure.total_qr),
@@ -1763,7 +1774,7 @@ def render_closure_html(
         ("Total Daviplata", closure.total_daviplata),
         ("Total crédito", closure.total_credit),
         ("Total devoluciones", closure.total_refunds),
-        ("Neto", closure.net_amount),
+        ("Neto", display_day_total),
         ("Diferencia caja", closure.difference),
     ]
     totals_lines = "\n".join(
@@ -1804,7 +1815,7 @@ def render_closure_html(
     return f"""
     <div style="font-family: Arial, sans-serif; color:#111827;">
       <p style="margin:0 0 16px;">
-        <strong>Total ventas del dia:</strong> {_format_currency(closure.total_amount)}<br/>
+        <strong>Total ventas del dia:</strong> {_format_currency(display_day_total)}<br/>
         <strong>Ventas incluidas:</strong> {sales_count}<br/>
         <strong>POS:</strong> {pos_name}<br/>
         <strong>Cerrado por:</strong> {closed_by}<br/>
@@ -1824,6 +1835,17 @@ def render_closure_pdf(
     closure: models.PosClosure,
     settings: Optional[models.PosSettings] = None,
 ) -> bytes:
+    separated_summary = closure.separated_summary if isinstance(closure.separated_summary, dict) else None
+    display_day_total = float(
+        (
+            separated_summary.get("day_collected_total")
+            if separated_summary
+            else None
+        )
+        or closure.net_amount
+        or closure.total_amount
+        or 0.0
+    )
     profile = _company_profile(settings)
     logo_url = profile.get("logo_url") or ""
     company_name = html_escape(profile.get("name") or "Metrik POS")
@@ -1866,9 +1888,9 @@ def render_closure_pdf(
         f"<td style=\"padding:4px 0; text-align:right;\">{_format_currency(value)}</td>"
         "</tr>"
         for label, value in [
-            ("Total ventas", closure.total_amount),
+            ("Total ventas", display_day_total),
             ("Devoluciones", closure.total_refunds),
-            ("Neto", closure.net_amount),
+            ("Neto", display_day_total),
             ("Diferencia", closure.difference),
         ]
     )

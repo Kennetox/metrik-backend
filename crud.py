@@ -12122,16 +12122,19 @@ def _build_pos_closure_snapshot(
 
     sep_payment_rows = sep_payment_rows.order_by(models.SeparatedOrderPayment.paid_at.asc()).all()
     sep_payment_ids = [row.payment_id for row in sep_payment_rows]
+    separated_collected_total = 0.0
 
     separated_orders_map: dict[int, dict[str, Any]] = {}
     for row in sep_payment_rows:
         amount_float = float(row.amount or 0.0)
         if amount_float <= 0:
             continue
+        separated_collected_total += amount_float
         key = method_map.get((row.method or "").lower())
         if key:
             payment_totals[key] += amount_float
             station_bucket = _station_bucket(row.resolved_station_id)
+            station_bucket["total_amount"] += amount_float
             station_bucket[f"total_{key}"] += amount_float
         _add_method_amount(row.method, amount_float, refund=False)
 
@@ -12238,8 +12241,14 @@ def _build_pos_closure_snapshot(
             "payments_total": round(payments_total, 2),
             "reserved_total": round(reserved_total, 2),
             "pending_total": round(max(pending_total, 0.0), 2),
-            "day_collected_total": round(max(net_amount - max(pending_total, 0.0), 0.0), 2),
-            "day_with_pending_total": round(net_amount, 2),
+            "day_collected_total": round(
+                max(
+                    net_amount - max(pending_total, 0.0) + separated_collected_total,
+                    0.0,
+                ),
+                2,
+            ),
+            "day_with_pending_total": round(net_amount + separated_collected_total, 2),
         }
 
     station_breakdown: list[dict[str, Any]] = []
