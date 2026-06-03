@@ -11739,7 +11739,7 @@ def _build_pos_closure_snapshot(
         models.Sale.tenant_id == effective_tenant_id,
         models.Sale.closure_id.is_(None),
         or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
-    )
+    ).options(selectinload(models.Sale.separated_order))
     if scoped_station_ids:
         pending_sales_query = pending_sales_query.filter(
             models.Sale.station_id.in_(scoped_station_ids)
@@ -12075,6 +12075,7 @@ def _build_pos_closure_snapshot(
             models.SeparatedOrderPayment.method,
             models.SeparatedOrderPayment.amount,
             models.SeparatedOrderPayment.paid_at,
+            models.SeparatedOrder.created_at.label("order_created_at"),
             func.coalesce(
                 models.SeparatedOrderPayment.station_id,
                 models.Sale.station_id,
@@ -12148,6 +12149,7 @@ def _build_pos_closure_snapshot(
                 "sale_id": row.sale_id,
                 "sale_station_id": row.sale_station_id,
                 "sale_pos_name": row.sale_pos_name,
+                "order_created_at": row.order_created_at,
                 "vendor_name": vendor_name,
                 "resolved_station_id": row.resolved_station_id,
                 "order_total_amount": float(row.order_total_amount or 0.0),
@@ -12195,10 +12197,19 @@ def _build_pos_closure_snapshot(
         pending_separated_sale_ids = {
             sale.id for sale in pending_sales if bool(sale.is_separated)
         }
+        def _is_same_closure_day(order_created_at: Optional[datetime]) -> bool:
+            return bool(
+                order_created_at and range_start <= order_created_at <= range_end
+            )
+
         for sale in pending_sales:
             if not bool(sale.is_separated):
                 continue
             order_state = separated_orders_map.get(sale.id)
+            order_created_at = (
+                getattr(getattr(sale, "separated_order", None), "created_at", None)
+                or (order_state["order_created_at"] if order_state else None)
+            )
             order_total = float(
                 (order_state["order_total_amount"] if order_state else None)
                 or sale.total
@@ -12212,10 +12223,13 @@ def _build_pos_closure_snapshot(
                 ),
                 0.0,
             )
-            tickets += 1
-            reserved_total += order_total
+            is_same_day_separated = _is_same_closure_day(order_created_at)
+            if is_same_day_separated:
+                tickets += 1
+                reserved_total += order_total
             pending_total += order_balance
-            payments_total += max(float(sale.initial_payment_amount or 0.0), 0.0)
+            if is_same_day_separated:
+                payments_total += max(float(sale.initial_payment_amount or 0.0), 0.0)
             if order_state:
                 payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
             station_key = sale.station_id or "__unassigned__"
@@ -12224,8 +12238,11 @@ def _build_pos_closure_snapshot(
         for order_id, order_state in separated_orders_map.items():
             if order_id in pending_separated_sale_ids:
                 continue
-            tickets += 1
-            reserved_total += max(float(order_state["order_total_amount"] or 0.0), 0.0)
+            order_created_at = order_state.get("order_created_at")
+            is_same_day_separated = _is_same_closure_day(order_created_at)
+            if is_same_day_separated:
+                tickets += 1
+                reserved_total += max(float(order_state["order_total_amount"] or 0.0), 0.0)
             order_balance = max(float(order_state["order_balance"] or 0.0), 0.0)
             pending_total += order_balance
             payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
