@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -13,6 +13,7 @@ import string
 import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, and_, case, cast, false, func, not_, or_, text, true
 from sqlalchemy.exc import IntegrityError
@@ -42,6 +43,34 @@ def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 60
     except Exception:
         return default
     return max(min_value, min(max_value, parsed))
+
+
+def _utc_naive_to_bogota_day_start(value: datetime) -> datetime:
+    bogota_tz = ZoneInfo("America/Bogota")
+    current = value
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    bogota_date = current.astimezone(bogota_tz).date()
+    return datetime.combine(bogota_date, datetime.min.time(), tzinfo=bogota_tz).astimezone(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+
+def _utc_naive_to_bogota_day_end(value: datetime) -> datetime:
+    bogota_tz = ZoneInfo("America/Bogota")
+    current = value
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    bogota_date = current.astimezone(bogota_tz).date()
+    return datetime.combine(
+        bogota_date,
+        datetime.max.time().replace(microsecond=0),
+        tzinfo=bogota_tz,
+    ).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _web_order_pending_expiry_minutes() -> int:
@@ -6881,6 +6910,14 @@ def create_return(
             "No encontramos la venta asociada (usa sale_id o sale_document_number)"
         )
 
+    requested_pos_name = _clean_field(change_in.pos_name)
+    requested_station_id = _clean_field(change_in.station_id)
+    target_pos_name = requested_pos_name or sale.pos_name
+    if _is_pos_web_name(target_pos_name):
+        target_station_id = None
+    else:
+        target_station_id = requested_station_id or sale.station_id
+
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
         raise ValueError("La venta seleccionada no tiene ítems registrados")
@@ -7330,9 +7367,9 @@ def create_change(
         net_total=net_total,
         extra_payment=extra_payment,
         refund_due=refund_due,
-        pos_name=sale.pos_name,
+        pos_name=target_pos_name,
         seller_name=change_in.created_by or sale.vendor_name,
-        station_id=sale.station_id,
+        station_id=target_station_id,
     )
     db.add(sale_change)
     db.flush()
@@ -11734,11 +11771,15 @@ def _build_pos_closure_snapshot(
     scoped_station_ids, scoped_station_meta = _resolve_closure_station_scope(
         db, station_id, tenant_id=effective_tenant_id
     )
+    closed_at = closure_in.closed_at or datetime.utcnow()
+    day_start = _utc_naive_to_bogota_day_start(closed_at)
+    range_end = _utc_naive_to_bogota_day_end(closed_at)
 
     pending_sales_query = db.query(models.Sale).filter(
         models.Sale.tenant_id == effective_tenant_id,
         models.Sale.closure_id.is_(None),
         or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
+        models.Sale.created_at >= day_start,
     ).options(selectinload(models.Sale.separated_order))
     if scoped_station_ids:
         pending_sales_query = pending_sales_query.filter(
@@ -11779,9 +11820,6 @@ def _build_pos_closure_snapshot(
             db.flush()
             admin_fallback_used = True
 
-    closed_at = closure_in.closed_at or datetime.utcnow()
-    range_end = closed_at
-
     pending_returns_query = (
         db.query(models.SaleReturn)
         .join(models.Sale, models.SaleReturn.sale_id == models.Sale.id)
@@ -11790,6 +11828,7 @@ def _build_pos_closure_snapshot(
             models.SaleReturn.closure_id.is_(None),
             models.SaleReturn.status == "confirmed",
             models.SaleReturn.adjustment_reference.is_(None),
+            models.SaleReturn.created_at >= day_start,
         )
     )
     if scoped_station_ids:
@@ -11813,6 +11852,7 @@ def _build_pos_closure_snapshot(
             models.SaleChange.tenant_id == effective_tenant_id,
             models.SaleChange.closure_id.is_(None),
             models.SaleChange.status == "confirmed",
+            models.SaleChange.created_at >= day_start,
         )
     )
     if scoped_station_ids:
@@ -11838,6 +11878,7 @@ def _build_pos_closure_snapshot(
             models.Sale.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             models.SeparatedOrder.status != "cancelado",
+            models.SeparatedOrderPayment.paid_at >= day_start,
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
                 models.SeparatedOrderPayment.status != "voided",
@@ -12244,7 +12285,6 @@ def _build_pos_closure_snapshot(
                 tickets += 1
                 reserved_total += max(float(order_state["order_total_amount"] or 0.0), 0.0)
             order_balance = max(float(order_state["order_balance"] or 0.0), 0.0)
-            pending_total += order_balance
             payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
             station_key = (
                 order_state["sale_station_id"]
@@ -12345,6 +12385,19 @@ def _build_pos_closure_snapshot(
         standard_rows + extra_rows,
         key=lambda row: (0 if row["is_standard"] else 1, row["label"].lower()),
     )
+    collected_total = round(
+        sum(float(row["net"] or 0.0) for row in methods_breakdown),
+        2,
+    )
+    total_amount = collected_total
+    net_amount = collected_total
+    separated_summary = separated_summary or None
+    if separated_summary is not None:
+        separated_summary["day_collected_total"] = collected_total
+        separated_summary["day_with_pending_total"] = round(
+            collected_total + max(float(separated_summary["pending_total"] or 0.0), 0.0),
+            2,
+        )
     user_breakdown = sorted(
         [
             {"name": name, "total": round(float(total), 2)}

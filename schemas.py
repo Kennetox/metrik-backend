@@ -2538,6 +2538,8 @@ class SaleChangePaymentCreate(BaseModel):
 class SaleChangeCreate(BaseModel):
     sale_id: Optional[int] = None
     sale_document_number: Optional[str] = None
+    pos_name: Optional[str] = None
+    station_id: Optional[str] = None
     status: Optional[str] = "confirmed"
     notes: Optional[str] = None
     created_by: Optional[str] = None
