@@ -27,6 +27,7 @@ class ExportProductsRequest(BaseModel):
     scope: str = "all"
     search: Optional[str] = None
     show_only_active: bool = False
+    show_only_inactive: bool = False
     group: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
@@ -270,6 +271,8 @@ def _filter_products(products: List[models.Product], payload: ExportProductsRequ
                 continue
 
         if payload.show_only_active and not p.active:
+            continue
+        if payload.show_only_inactive and p.active:
             continue
         if group_filter and (p.group_name or "") != group_filter:
             continue
