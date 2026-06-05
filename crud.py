@@ -7355,6 +7355,13 @@ def create_change(
         raise ValueError("No debes registrar pagos cuando no hay excedente")
 
     status = change_in.status or "confirmed"
+    requested_pos_name = _clean_field(change_in.pos_name)
+    requested_station_id = _clean_field(change_in.station_id)
+    target_pos_name = requested_pos_name or sale.pos_name
+    if _is_pos_web_name(target_pos_name):
+        target_station_id = None
+    else:
+        target_station_id = requested_station_id or sale.station_id
 
     sale_change = models.SaleChange(
         tenant_id=sale.tenant_id or get_default_tenant_id(db),
