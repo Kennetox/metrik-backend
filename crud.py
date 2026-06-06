@@ -5248,32 +5248,39 @@ def get_web_catalog_categories(
         if _normalize_web_catalog_category_key(item.key)
     }
     children_map = _build_web_catalog_category_children_map(categories)
-    return [
-        schemas.WebCatalogCategory(
-            id=item.key,
-            path=item.key,
-            parent_path=_normalize_web_catalog_category_key(item.parent_key) or None,
-            level=_get_web_catalog_category_level(_normalize_web_catalog_category_key(item.key), category_map),
-            has_children=not _is_leaf_web_catalog_category(
-                _normalize_web_catalog_category_key(item.key),
+    visible_categories: list[schemas.WebCatalogCategory] = []
+    for item in categories:
+        if _normalize_web_catalog_category_key(item.parent_key):
+            continue
+        normalized_key = _normalize_web_catalog_category_key(item.key)
+        product_count = sum(
+            direct_counts.get(descendant_key, 0)
+            for descendant_key in _get_web_catalog_descendant_keys(
+                normalized_key,
                 children_map,
-            ),
-            name=item.name,
-            image_url=item.image_url,
-            tile_color=item.tile_color,
-            home_featured=bool(item.home_featured),
-            home_featured_order=int(item.home_featured_order or 0),
-            product_count=sum(
-                direct_counts.get(descendant_key, 0)
-                for descendant_key in _get_web_catalog_descendant_keys(
-                    _normalize_web_catalog_category_key(item.key),
-                    children_map,
-                )
-            ),
+            )
         )
-        for item in categories
-        if not _normalize_web_catalog_category_key(item.parent_key)
-    ]
+        if product_count <= 0:
+            continue
+        visible_categories.append(
+            schemas.WebCatalogCategory(
+                id=item.key,
+                path=item.key,
+                parent_path=_normalize_web_catalog_category_key(item.parent_key) or None,
+                level=_get_web_catalog_category_level(normalized_key, category_map),
+                has_children=not _is_leaf_web_catalog_category(
+                    normalized_key,
+                    children_map,
+                ),
+                name=item.name,
+                image_url=item.image_url,
+                tile_color=item.tile_color,
+                home_featured=bool(item.home_featured),
+                home_featured_order=int(item.home_featured_order or 0),
+                product_count=product_count,
+            )
+        )
+    return visible_categories
 
 
 def get_web_catalog_products(
