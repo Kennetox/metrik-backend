@@ -218,6 +218,7 @@ class ProductRead(ProductBase):
 
 
 class ProductCostSuggestionRequest(BaseModel):
+    mode: Literal["balanced", "conservative", "aggressive"] = "balanced"
     price: float = Field(gt=0)
     group_name: Optional[str] = None
     brand: Optional[str] = None
@@ -226,6 +227,8 @@ class ProductCostSuggestionRequest(BaseModel):
 
 
 class ProductCostSuggestionResponse(BaseModel):
+    mode: Literal["balanced", "conservative", "aggressive"]
+    mode_label: Optional[str] = None
     suggested_cost: float
     range_min_cost: float
     range_max_cost: float
@@ -238,6 +241,7 @@ class ProductCostSuggestionResponse(BaseModel):
     markup_p25: float
     markup_p50: float
     markup_p75: float
+    selected_markup_percent: float
     recency_half_life_days: int
     notes: Optional[str] = None
 
@@ -257,6 +261,7 @@ class ProductDuplicateCandidate(BaseModel):
     name: str
     sku: Optional[str] = None
     barcode: Optional[str] = None
+    price: float
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None

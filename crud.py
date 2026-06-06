@@ -2278,11 +2278,136 @@ def _compute_markup_stats(rows: List[dict[str, Any]]) -> Optional[dict[str, floa
     }
 
 
+def _as_positive_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _build_self_product_history_rows(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    product_id: int,
+) -> tuple[List[dict[str, Any]], str]:
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    query = db.query(models.ProductAuditLog).filter(models.ProductAuditLog.product_id == product_id)
+    if effective_tenant_id is not None:
+        query = query.filter(models.ProductAuditLog.tenant_id == effective_tenant_id)
+    logs = (
+        query.order_by(models.ProductAuditLog.created_at.asc(), models.ProductAuditLog.id.asc())
+        .all()
+    )
+
+    rows: List[dict[str, Any]] = []
+    state: dict[str, Any] = {}
+    last_signature: tuple[Any, ...] | None = None
+    source_label = "historial del producto"
+
+    def apply_changes(changes: dict[str, Any]) -> None:
+        if isinstance(changes.get("after"), dict):
+            state.update(changes["after"])
+            return
+        for field, value in changes.items():
+            if isinstance(value, dict) and "after" in value:
+                state[field] = value["after"]
+
+    def append_snapshot(entry: models.ProductAuditLog) -> None:
+        nonlocal last_signature
+        price = _as_positive_float(state.get("price"))
+        cost = _as_positive_float(state.get("cost"))
+        if price is None or cost is None:
+            return
+        signature = (
+            round(price, 4),
+            round(cost, 4),
+            _normalized_text(state.get("group_name")),
+            _normalized_text(state.get("brand")),
+            _normalized_text(state.get("supplier")),
+        )
+        if signature == last_signature:
+            return
+        last_signature = signature
+        markup = ((price - cost) / cost) * 100.0
+        if markup < -95.0 or markup > 1500.0:
+            return
+        age_days = max(0.0, (datetime.utcnow() - entry.created_at).total_seconds() / 86400.0)
+        recency_weight = math.exp(-math.log(2) * (age_days / 180.0))
+        rows.append(
+            {
+                "id": int(entry.id),
+                "group": _normalized_text(state.get("group_name")),
+                "brand": _normalized_text(state.get("brand")),
+                "supplier": _normalized_text(state.get("supplier")),
+                "markup": float(markup),
+                "weight": max(0.05, recency_weight),
+            }
+        )
+
+    for entry in logs:
+        changes = entry.changes if isinstance(entry.changes, dict) else {}
+        action = (entry.action or "").strip().lower()
+        if action in {"create", "snapshot"}:
+            apply_changes(changes)
+            append_snapshot(entry)
+            continue
+        if action == "update":
+            apply_changes(changes)
+            append_snapshot(entry)
+            continue
+        if action == "delete":
+            break
+
+    if not rows:
+        current_product = (
+            db.query(
+                models.Product.id,
+                models.Product.price,
+                models.Product.cost,
+                models.Product.group_name,
+                models.Product.brand,
+                models.Product.supplier,
+                models.Product.updated_at,
+            )
+            .filter(models.Product.id == product_id)
+        )
+        if effective_tenant_id is not None:
+            current_product = current_product.filter(models.Product.tenant_id == effective_tenant_id)
+        row = current_product.first()
+        if row is not None:
+            price = _as_positive_float(row.price)
+            cost = _as_positive_float(row.cost)
+            if price is not None and cost is not None:
+                markup = ((price - cost) / cost) * 100.0
+                if -95.0 <= markup <= 1500.0:
+                    updated_at = row.updated_at if isinstance(row.updated_at, datetime) else datetime.utcnow()
+                    age_days = max(0.0, (datetime.utcnow() - updated_at).total_seconds() / 86400.0)
+                    recency_weight = math.exp(-math.log(2) * (age_days / 180.0))
+                    rows.append(
+                        {
+                            "id": int(row.id),
+                            "group": _normalized_text(row.group_name),
+                            "brand": _normalized_text(row.brand),
+                            "supplier": _normalized_text(row.supplier),
+                            "markup": float(markup),
+                            "weight": max(0.05, recency_weight),
+                        }
+                    )
+                    source_label = "producto actual"
+
+    return rows, source_label
+
+
 def suggest_product_cost(
     db: Session,
     *,
     tenant_id: Optional[int],
     price: float,
+    mode: str = "balanced",
     group_name: Optional[str] = None,
     brand: Optional[str] = None,
     supplier: Optional[str] = None,
@@ -2292,6 +2417,10 @@ def suggest_product_cost(
     safe_price = max(0.0, float(price or 0.0))
     if safe_price <= 0:
         raise ValueError("El precio debe ser mayor que cero para sugerir costo.")
+
+    mode_key = (mode or "balanced").strip().lower()
+    if mode_key not in {"balanced", "conservative", "aggressive"}:
+        raise ValueError("Modo de sugerencia inválido.")
 
     base_query = db.query(
         models.Product.id,
@@ -2342,6 +2471,23 @@ def suggest_product_cost(
     target_brand = _normalized_text(brand)
     target_supplier = _normalized_text(supplier)
 
+    self_history_rows: List[dict[str, Any]] = []
+    self_history_source_label: Optional[str] = None
+    if exclude_product_id is not None:
+        self_history_rows, self_history_source_label = _build_self_product_history_rows(
+            db,
+            tenant_id=effective_tenant_id,
+            product_id=int(exclude_product_id),
+        )
+
+    self_history_stats = _compute_markup_stats(self_history_rows) if self_history_rows else None
+    if self_history_stats:
+        chosen_method = "self_history"
+        chosen_stats = self_history_stats
+    else:
+        chosen_method = "default"
+        chosen_stats = None
+
     strategies: List[tuple[str, List[dict[str, Any]]]] = []
     if target_brand and target_group and target_supplier:
         strategies.append(
@@ -2389,24 +2535,35 @@ def suggest_product_cost(
         )
     strategies.append(("global", prepared))
 
-    chosen_method = "default"
-    chosen_stats: Optional[dict[str, float]] = None
-    for method, rows in strategies:
-        stats = _compute_markup_stats(rows)
-        if not stats:
-            continue
-        if stats["sample_size"] >= 8:
-            chosen_method = method
-            chosen_stats = stats
-            break
-        if chosen_stats is None:
-            chosen_method = method
-            chosen_stats = stats
+    if chosen_stats is None:
+        for method, rows in strategies:
+            stats = _compute_markup_stats(rows)
+            if not stats:
+                continue
+            if stats["sample_size"] >= 8:
+                chosen_method = method
+                chosen_stats = stats
+                break
+            if chosen_stats is None:
+                chosen_method = method
+                chosen_stats = stats
 
     if chosen_stats is None:
-        chosen_markup = float(default_markup_percent)
+        default_mode_markup = {
+            "balanced": float(default_markup_percent),
+            "conservative": max(5.0, float(default_markup_percent) - 15.0),
+            "aggressive": float(default_markup_percent) + 15.0,
+        }
+        chosen_markup = float(default_mode_markup[mode_key])
         suggested_cost = safe_price / (1.0 + (chosen_markup / 100.0))
+        method_labels = {
+            "balanced": "balanceado",
+            "conservative": "conservador",
+            "aggressive": "agresivo",
+        }
         return schemas.ProductCostSuggestionResponse(
+            mode=mode_key,  # type: ignore[arg-type]
+            mode_label=method_labels.get(mode_key, mode_key),
             suggested_cost=round(max(0.0, suggested_cost), 2),
             range_min_cost=round(max(0.0, suggested_cost), 2),
             range_max_cost=round(max(0.0, suggested_cost), 2),
@@ -2418,14 +2575,23 @@ def suggest_product_cost(
             markup_p25=round(chosen_markup, 4),
             markup_p50=round(chosen_markup, 4),
             markup_p75=round(chosen_markup, 4),
+            selected_markup_percent=round(chosen_markup, 4),
             recency_half_life_days=int(half_life_days),
-            notes="Sin muestra histórica válida; se usó markup por defecto.",
+            notes=(
+                f"Sin historial suficiente; se usó markup por defecto en modo "
+                f"{method_labels.get(mode_key, mode_key)}."
+            ),
         )
 
     markup_p25 = float(chosen_stats["p25"])
     markup_p50 = float(chosen_stats["p50"])
     markup_p75 = float(chosen_stats["p75"])
-    suggested_cost = safe_price / (1.0 + (markup_p50 / 100.0))
+    selected_markup = {
+        "balanced": markup_p50,
+        "conservative": markup_p25,
+        "aggressive": markup_p75,
+    }[mode_key]
+    suggested_cost = safe_price / (1.0 + (selected_markup / 100.0))
     range_min_cost = safe_price / (1.0 + (markup_p75 / 100.0))
     range_max_cost = safe_price / (1.0 + (markup_p25 / 100.0))
 
@@ -2435,6 +2601,8 @@ def suggest_product_cost(
     confidence *= max(0.55, 1.0 - min(dispersion, 200.0) / 300.0)
     if chosen_method == "global":
         confidence *= 0.85
+    if chosen_method == "self_history":
+        confidence += min(0.35, 0.18 + min(sample_size, 6) * 0.04)
     confidence = max(0.2, min(0.95, confidence))
 
     if confidence >= 0.75:
@@ -2445,6 +2613,7 @@ def suggest_product_cost(
         confidence_label = "baja"
 
     method_labels = {
+        "self_history": "historial del producto",
         "brand_group_supplier": "marca+grupo+proveedor",
         "brand_group": "marca+grupo",
         "supplier_group": "proveedor+grupo",
@@ -2453,7 +2622,14 @@ def suggest_product_cost(
         "global": "global",
         "default": "default",
     }
+    mode_labels = {
+        "balanced": "balanceado",
+        "conservative": "conservador",
+        "aggressive": "agresivo",
+    }
     return schemas.ProductCostSuggestionResponse(
+        mode=mode_key,  # type: ignore[arg-type]
+        mode_label=mode_labels.get(mode_key, mode_key),
         suggested_cost=round(max(0.0, suggested_cost), 2),
         range_min_cost=round(max(0.0, min(range_min_cost, range_max_cost)), 2),
         range_max_cost=round(max(0.0, max(range_min_cost, range_max_cost)), 2),
@@ -2466,8 +2642,17 @@ def suggest_product_cost(
         markup_p25=round(markup_p25, 4),
         markup_p50=round(markup_p50, 4),
         markup_p75=round(markup_p75, 4),
+        selected_markup_percent=round(selected_markup, 4),
         recency_half_life_days=int(half_life_days),
-        notes="Sugerencia calculada con markups históricos, recencia y limpieza de outliers.",
+        notes=(
+            "Sugerencia calculada con markups históricos, recencia y limpieza de outliers. "
+            f"Modo {mode_labels.get(mode_key, mode_key)} aplicado sobre la muestra. "
+            + (
+                f"Prioridad dada al {self_history_source_label} del mismo producto."
+                if chosen_method == "self_history" and self_history_source_label
+                else f"Fuente: {method_labels.get(chosen_method, chosen_method)}."
+            )
+        ),
     )
 
 

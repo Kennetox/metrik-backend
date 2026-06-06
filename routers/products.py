@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, Fil
 from sqlalchemy.orm import Session
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set
 from io import BytesIO
 from fastapi.responses import StreamingResponse, PlainTextResponse
@@ -134,8 +135,23 @@ def _tokenize_text(value: Optional[str]) -> List[str]:
     ]
 
 
+def _normalize_identifier(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
 def _spec_tokens(tokens: List[str]) -> Set[str]:
     return {token for token in tokens if any(ch.isdigit() for ch in token)}
+
+
+def _reference_tokens(tokens: List[str]) -> Set[str]:
+    return {
+        token
+        for token in tokens
+        if any(ch.isdigit() for ch in token) and any(ch.isalpha() for ch in token)
+    }
 
 
 def _jaccard_similarity(left_tokens: List[str], right_tokens: List[str]) -> float:
@@ -150,6 +166,45 @@ def _jaccard_similarity(left_tokens: List[str], right_tokens: List[str]) -> floa
     return intersection / union
 
 
+def _sequence_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def _shared_token_preview(left_tokens: List[str], right_tokens: List[str]) -> List[str]:
+    shared = sorted(set(left_tokens).intersection(right_tokens))
+    return shared[:4]
+
+
+def _search_terms_from_payload(payload: schemas.ProductDuplicateCandidatesRequest) -> List[str]:
+    raw_values = [
+        payload.name,
+        payload.sku,
+        payload.barcode,
+        payload.group_name,
+        payload.brand,
+        payload.supplier,
+    ]
+    terms: List[str] = []
+    seen: Set[str] = set()
+    for raw in raw_values:
+        normalized = _normalize_text(raw)
+        if normalized and len(normalized) >= 2 and normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+        for token in _tokenize_text(raw):
+            if len(token) < 2 or token in seen:
+                continue
+            seen.add(token)
+            terms.append(token)
+        identifier = _normalize_identifier(raw)
+        if len(identifier) >= 2 and identifier not in seen:
+            seen.add(identifier)
+            terms.append(identifier)
+    return terms
+
+
 def _build_duplicate_candidate(
     payload: schemas.ProductDuplicateCandidatesRequest,
     candidate: models.Product,
@@ -159,35 +214,48 @@ def _build_duplicate_candidate(
 
     input_name_norm = _normalize_text(payload.name)
     candidate_name_norm = _normalize_text(candidate.name)
+    input_name_id = _normalize_identifier(payload.name)
+    candidate_name_id = _normalize_identifier(candidate.name)
+    input_name_tokens = _tokenize_text(payload.name)
+    candidate_name_tokens = _tokenize_text(candidate.name)
+    input_spec_tokens = _spec_tokens(input_name_tokens)
+    candidate_spec_tokens = _spec_tokens(candidate_name_tokens)
+    input_reference_tokens = _reference_tokens(input_name_tokens)
+    candidate_reference_tokens = _reference_tokens(candidate_name_tokens)
+    shared_reference_tokens = input_reference_tokens.intersection(candidate_reference_tokens)
+
     if input_name_norm and candidate_name_norm and input_name_norm == candidate_name_norm:
-        score += 0.55
+        score += 0.58
         reasons.append("Nombre prácticamente idéntico.")
     elif input_name_norm and candidate_name_norm:
+        name_ratio = _sequence_similarity(input_name_norm, candidate_name_norm)
+        token_similarity = _jaccard_similarity(input_name_tokens, candidate_name_tokens)
+        overlap_score = max(name_ratio, token_similarity)
         if input_name_norm in candidate_name_norm or candidate_name_norm in input_name_norm:
             score += 0.22
             reasons.append("Nombre contenido casi completo (variación menor).")
+        if overlap_score > 0:
+            score += 0.38 * overlap_score
+            if overlap_score >= 0.85:
+                reasons.append("Nombre casi idéntico tras normalización.")
+            elif overlap_score >= 0.65:
+                reasons.append("Alta similitud textual en el nombre.")
+            elif overlap_score >= 0.45:
+                reasons.append("Similitud textual parcial en el nombre.")
 
-    input_tokens = _tokenize_text(payload.name)
-    candidate_tokens = _tokenize_text(candidate.name)
-    token_similarity = _jaccard_similarity(input_tokens, candidate_tokens)
-    if token_similarity > 0:
-        score += 0.35 * token_similarity
-        if token_similarity >= 0.7:
-            reasons.append("Alta similitud en palabras clave del nombre.")
-        elif token_similarity >= 0.45:
-            reasons.append("Similitud media en palabras del nombre.")
-
-    input_spec_tokens = _spec_tokens(input_tokens)
-    candidate_spec_tokens = _spec_tokens(candidate_tokens)
     if input_spec_tokens and candidate_spec_tokens:
         shared_specs = input_spec_tokens.intersection(candidate_spec_tokens)
         spec_ratio = len(shared_specs) / max(len(input_spec_tokens), len(candidate_spec_tokens))
         if spec_ratio > 0:
-            score += 0.18 * spec_ratio
+            score += 0.24 * spec_ratio
             reasons.append("Coinciden especificaciones numéricas relevantes.")
         else:
-            score -= 0.18
+            score -= 0.22
             reasons.append("Las especificaciones numéricas difieren.")
+
+    if shared_reference_tokens:
+        score += 0.22 + (0.02 * max(0, len(shared_reference_tokens) - 1))
+        reasons.append("Coincide la referencia alfanumérica.")
 
     payload_brand = _normalize_text(payload.brand)
     payload_group = _normalize_text(payload.group_name)
@@ -197,35 +265,84 @@ def _build_duplicate_candidate(
     candidate_supplier = _normalize_text(candidate.supplier)
 
     if payload_brand and payload_brand == candidate_brand:
-        score += 0.15
+        score += 0.16
         reasons.append("Misma marca.")
     if payload_group and payload_group == candidate_group:
-        score += 0.12
+        score += 0.2
         reasons.append("Mismo grupo.")
     if payload_supplier and payload_supplier == candidate_supplier:
-        score += 0.07
+        score += 0.09
         reasons.append("Mismo proveedor.")
+    if payload_group and payload_brand and payload_group == candidate_group and payload_brand == candidate_brand:
+        score += 0.08
+        reasons.append("Grupo y marca coinciden simultáneamente.")
+    if payload_group and payload_supplier and payload_group == candidate_group and payload_supplier == candidate_supplier:
+        score += 0.05
+        reasons.append("Grupo y proveedor coinciden simultáneamente.")
 
     payload_sku = (payload.sku or "").strip()
     payload_barcode = (payload.barcode or "").strip()
     candidate_sku = (candidate.sku or "").strip()
     candidate_barcode = (candidate.barcode or "").strip()
+    payload_sku_id = _normalize_identifier(payload_sku)
+    payload_barcode_id = _normalize_identifier(payload_barcode)
+    candidate_sku_id = _normalize_identifier(candidate_sku)
+    candidate_barcode_id = _normalize_identifier(candidate_barcode)
 
-    if payload_sku and candidate_sku and payload_sku == candidate_sku:
+    if payload_sku and candidate_sku and payload_sku.strip().lower() == candidate_sku.strip().lower():
         score = max(score, 1.0)
         reasons.append("SKU idéntico.")
-    if payload_barcode and candidate_barcode and payload_barcode == candidate_barcode:
+    elif payload_sku_id and candidate_sku_id:
+        if payload_sku_id == candidate_sku_id:
+            score = max(score, 0.98)
+            reasons.append("SKU idéntico tras normalización.")
+        elif payload_sku_id in candidate_sku_id or candidate_sku_id in payload_sku_id:
+            score += 0.28
+            reasons.append("SKU muy parecido.")
+    if payload_barcode and candidate_barcode and payload_barcode.strip() == candidate_barcode.strip():
         score = max(score, 1.0)
         reasons.append("Código de barras idéntico.")
+    elif payload_barcode_id and candidate_barcode_id:
+        if payload_barcode_id == candidate_barcode_id:
+            score = max(score, 0.99)
+            reasons.append("Código de barras idéntico tras normalización.")
+        elif payload_barcode_id in candidate_barcode_id or candidate_barcode_id in payload_barcode_id:
+            score += 0.3
+            reasons.append("Código de barras muy parecido.")
+
+    if input_name_id and candidate_name_id:
+        if input_name_id == candidate_name_id and input_name_norm != candidate_name_norm:
+            score += 0.08
+            reasons.append("Coinciden códigos en el nombre.")
+        elif input_name_id in candidate_name_id or candidate_name_id in input_name_id:
+            score += 0.14
+            reasons.append("Coincidencia parcial de códigos en el nombre.")
+
+    if (
+        payload_group
+        and payload_brand
+        and payload_supplier
+        and payload_group == candidate_group
+        and payload_brand == candidate_brand
+        and payload_supplier == candidate_supplier
+        and (input_name_norm and candidate_name_norm)
+    ):
+        score += 0.08
+        reasons.append("Coincidencia completa por catálogo.")
 
     score = max(0.0, min(1.0, score))
-    if score < 0.45:
+    min_score = 0.6
+    if input_name_norm and candidate_name_norm and input_name_norm == candidate_name_norm:
+        min_score = 0.4
+    if shared_reference_tokens:
+        min_score = min(min_score, 0.5)
+    if score < min_score:
         return None
 
     risk_level: str
-    if score >= 0.9:
+    if score >= 0.92:
         risk_level = "alto"
-    elif score >= 0.78:
+    elif score >= 0.76:
         risk_level = "medio"
     else:
         risk_level = "bajo"
@@ -235,12 +352,152 @@ def _build_duplicate_candidate(
         name=candidate.name,
         sku=candidate.sku,
         barcode=candidate.barcode,
+        price=float(candidate.price or 0.0),
         group_name=candidate.group_name,
         brand=candidate.brand,
         supplier=candidate.supplier,
         similarity_score=round(score, 4),
         risk_level=risk_level,
         match_reasons=reasons[:4],
+    )
+
+
+def _build_family_duplicate_candidate(
+    payload: schemas.ProductDuplicateCandidatesRequest,
+    candidate: models.Product,
+) -> Optional[schemas.ProductDuplicateCandidate]:
+    reasons: List[str] = []
+    score = 0.0
+
+    input_name_norm = _normalize_text(payload.name)
+    candidate_name_norm = _normalize_text(candidate.name)
+    input_name_tokens = _tokenize_text(payload.name)
+    candidate_name_tokens = _tokenize_text(candidate.name)
+    input_specs = _spec_tokens(input_name_tokens)
+    candidate_specs = _spec_tokens(candidate_name_tokens)
+    input_reference_tokens = _reference_tokens(input_name_tokens)
+    candidate_reference_tokens = _reference_tokens(candidate_name_tokens)
+    shared_reference_tokens = input_reference_tokens.intersection(candidate_reference_tokens)
+
+    payload_group = _normalize_text(payload.group_name)
+    payload_brand = _normalize_text(payload.brand)
+    payload_supplier = _normalize_text(payload.supplier)
+    candidate_group = _normalize_text(candidate.group_name)
+    candidate_brand = _normalize_text(candidate.brand)
+    candidate_supplier = _normalize_text(candidate.supplier)
+
+    family_hits = 0
+    if payload_group and payload_group == candidate_group:
+        family_hits += 1
+        score += 0.3
+        reasons.append("Mismo grupo.")
+    if payload_brand and payload_brand == candidate_brand:
+        family_hits += 1
+        score += 0.22
+        reasons.append("Misma marca.")
+    if payload_supplier and payload_supplier == candidate_supplier:
+        family_hits += 1
+        score += 0.12
+        reasons.append("Mismo proveedor.")
+
+    if input_specs and candidate_specs:
+        shared_specs = input_specs.intersection(candidate_specs)
+        spec_ratio = len(shared_specs) / max(len(input_specs), len(candidate_specs))
+        if spec_ratio > 0:
+            score += 0.22 * spec_ratio
+            reasons.append("Coinciden especificaciones numéricas.")
+
+    input_name_id = _normalize_identifier(payload.name)
+    candidate_name_id = _normalize_identifier(candidate.name)
+    if input_name_id and candidate_name_id:
+        if input_name_id == candidate_name_id:
+            score += 0.28
+            reasons.append("Nombre normalizado idéntico.")
+        elif input_name_id in candidate_name_id or candidate_name_id in input_name_id:
+            score += 0.18
+            reasons.append("Nombre normalizado muy parecido.")
+
+    if input_name_norm and candidate_name_norm:
+        token_similarity = _jaccard_similarity(input_name_tokens, candidate_name_tokens)
+        seq_similarity = _sequence_similarity(input_name_norm, candidate_name_norm)
+        blended = max(token_similarity, seq_similarity * 0.85)
+        if blended > 0:
+            score += 0.18 * blended
+            if blended >= 0.8:
+                reasons.append("Nombre comercial muy cercano.")
+            elif blended >= 0.55:
+                reasons.append("Nombre comercial parcialmente similar.")
+
+    if shared_reference_tokens:
+        score += 0.2 + (0.02 * max(0, len(shared_reference_tokens) - 1))
+        reasons.append("Coincide parte de la referencia alfanumérica.")
+
+    payload_sku = _normalize_identifier(payload.sku)
+    candidate_sku = _normalize_identifier(candidate.sku)
+    payload_barcode = _normalize_identifier(payload.barcode)
+    candidate_barcode = _normalize_identifier(candidate.barcode)
+    if payload_sku and candidate_sku and payload_sku == candidate_sku:
+        score = max(score, 0.98)
+        reasons.append("SKU equivalente.")
+    if payload_barcode and candidate_barcode and payload_barcode == candidate_barcode:
+        score = max(score, 1.0)
+        reasons.append("Código de barras equivalente.")
+
+    if family_hits == 0:
+        return None
+
+    if family_hits >= 2:
+        score += 0.12
+        reasons.append("Coincidencia de familia comercial.")
+
+    if family_hits == 1 and score < 0.6:
+        return None
+
+    score = max(0.0, min(1.0, score))
+    min_score = 0.58
+    if shared_reference_tokens:
+        min_score = min(min_score, 0.48)
+    if score < min_score:
+        return None
+
+    if score >= 0.9:
+        risk_level = "alto"
+    elif score >= 0.72:
+        risk_level = "medio"
+    else:
+        risk_level = "bajo"
+
+    return schemas.ProductDuplicateCandidate(
+        product_id=candidate.id,
+        name=candidate.name,
+        sku=candidate.sku,
+        barcode=candidate.barcode,
+        price=float(candidate.price or 0.0),
+        group_name=candidate.group_name,
+        brand=candidate.brand,
+        supplier=candidate.supplier,
+        similarity_score=round(score, 4),
+        risk_level=risk_level,
+        match_reasons=reasons[:4],
+    )
+
+
+def _duplicate_candidate_rank(candidate: schemas.ProductDuplicateCandidate) -> tuple:
+    exact_signal = 1 if any(
+        reason in {
+            "SKU idéntico.",
+            "SKU idéntico tras normalización.",
+            "Código de barras idéntico.",
+            "Código de barras idéntico tras normalización.",
+        }
+        for reason in candidate.match_reasons
+    ) else 0
+    strong_signal = 1 if candidate.risk_level == "alto" else 0
+    return (
+        exact_signal,
+        strong_signal,
+        candidate.similarity_score,
+        candidate.product_id,
     )
 
 
@@ -452,6 +709,7 @@ def get_product_cost_suggestion(
             db,
             tenant_id=tenant_id,
             price=payload.price,
+            mode=payload.mode,
             group_name=payload.group_name,
             brand=payload.brand,
             supplier=payload.supplier,
@@ -471,8 +729,8 @@ def get_product_duplicate_candidates(
     current_user: models.PosUser = Depends(require_permission("products.view")),
 ):
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
-    name_tokens = _tokenize_text(payload.name)
-    if not name_tokens and not (payload.sku or "").strip() and not (payload.barcode or "").strip():
+    search_terms = _search_terms_from_payload(payload)
+    if not search_terms and not (payload.sku or "").strip() and not (payload.barcode or "").strip():
         return schemas.ProductDuplicateCandidatesResponse(candidates=[], has_high_risk=False)
 
     base_query = db.query(models.Product)
@@ -484,16 +742,24 @@ def get_product_duplicate_candidates(
     payload_barcode = (payload.barcode or "").strip()
     if payload_sku:
         coarse_conditions.append(models.Product.sku == payload_sku)
+        coarse_conditions.append(models.Product.sku.ilike(f"%{payload_sku}%"))
     if payload_barcode:
         coarse_conditions.append(models.Product.barcode == payload_barcode)
-    for token in name_tokens[:6]:
-        if len(token) < 2:
-            continue
-        coarse_conditions.append(models.Product.name.ilike(f"%{token}%"))
+        coarse_conditions.append(models.Product.barcode.ilike(f"%{payload_barcode}%"))
+    for term in search_terms[:18]:
+        coarse_conditions.extend(
+            [
+                models.Product.name.ilike(f"%{term}%"),
+                models.Product.sku.ilike(f"%{term}%"),
+                models.Product.barcode.ilike(f"%{term}%"),
+                models.Product.group_name.ilike(f"%{term}%"),
+                models.Product.brand.ilike(f"%{term}%"),
+                models.Product.supplier.ilike(f"%{term}%"),
+            ]
+        )
 
     if coarse_conditions:
         # Priorizamos recall sobre agresividad para no perder coincidencias antiguas.
-        # Con catálogos de miles de filas, 300 recientes puede dejar fuera productos relevantes.
         candidates_rows = (
             base_query.filter(or_(*coarse_conditions))
             .order_by(models.Product.id.desc())
@@ -501,7 +767,7 @@ def get_product_duplicate_candidates(
             .all()
         )
     else:
-        candidates_rows = base_query.order_by(models.Product.id.desc()).limit(1200).all()
+        candidates_rows = base_query.order_by(models.Product.id.desc()).limit(3000).all()
 
     scored: List[schemas.ProductDuplicateCandidate] = []
     for row in candidates_rows:
@@ -509,14 +775,49 @@ def get_product_duplicate_candidates(
         if candidate:
             scored.append(candidate)
 
-    scored.sort(
-        key=lambda item: (
-            item.similarity_score,
-            1 if item.risk_level == "alto" else 0,
-            item.product_id,
-        ),
-        reverse=True,
-    )
+    family_rows = candidates_rows
+    if len(scored) < 3:
+        family_terms: List[str] = []
+        family_seen: Set[str] = set()
+        for raw in [payload.group_name, payload.brand, payload.supplier, payload.name]:
+            normalized = _normalize_text(raw)
+            if normalized and normalized not in family_seen:
+                family_seen.add(normalized)
+                family_terms.append(normalized)
+        if family_terms:
+            family_conditions = []
+            for term in family_terms[:10]:
+                family_conditions.extend(
+                    [
+                        models.Product.name.ilike(f"%{term}%"),
+                        models.Product.sku.ilike(f"%{term}%"),
+                        models.Product.barcode.ilike(f"%{term}%"),
+                        models.Product.group_name.ilike(f"%{term}%"),
+                        models.Product.brand.ilike(f"%{term}%"),
+                        models.Product.supplier.ilike(f"%{term}%"),
+                    ]
+                )
+            family_rows = (
+                base_query.filter(or_(*family_conditions))
+                .order_by(models.Product.id.desc())
+                .limit(5000)
+                .all()
+            )
+        family_scored: List[schemas.ProductDuplicateCandidate] = []
+        for row in family_rows:
+            candidate = _build_family_duplicate_candidate(payload, row)
+            if candidate:
+                family_scored.append(candidate)
+        scored.extend(family_scored)
+
+    deduped: Dict[int, schemas.ProductDuplicateCandidate] = {}
+    for item in scored:
+        previous = deduped.get(item.product_id)
+        if previous is None or item.similarity_score > previous.similarity_score:
+            deduped[item.product_id] = item
+    scored = list(deduped.values())
+
+    scored.sort(key=_duplicate_candidate_rank, reverse=True)
     limited = scored[: payload.limit]
     has_high_risk = any(item.risk_level == "alto" for item in limited)
     return schemas.ProductDuplicateCandidatesResponse(
