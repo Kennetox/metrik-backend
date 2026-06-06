@@ -129,6 +129,17 @@ def _ensure_tablet_station_ready(db: Session, station):
     return parent_station
 
 
+def _get_mobile_stock_user_issue(user) -> str | None:
+    if not user:
+        return "Correo no encontrado"
+    if not user.is_active:
+        return "Usuario inactivo (is_active=false)"
+    status = (user.status or "").strip()
+    if status != "Activo":
+        return f"Usuario con estado no permitido: {status or 'vacío'}"
+    return None
+
+
 @router.post("/login", response_model=schemas.AuthLoginResponse)
 def login(
     payload: schemas.AuthLoginRequest,
@@ -721,8 +732,9 @@ def mobile_stock_email_check(
     db: Session = Depends(get_db),
 ):
     user = crud.get_pos_user_by_email_global(db, payload.email)
-    if not user or not user.is_active or user.status != "Activo":
-        raise HTTPException(status_code=404, detail="Correo no encontrado o inactivo")
+    user_issue = _get_mobile_stock_user_issue(user)
+    if user_issue:
+        raise HTTPException(status_code=404, detail=user_issue)
     if user.tenant_id is None:
         raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
     tenant = crud.get_tenant(db, int(user.tenant_id))
@@ -741,8 +753,9 @@ def mobile_stock_login(
     db: Session = Depends(get_db),
 ):
     user = crud.get_pos_user_by_email_global(db, payload.email)
-    if not user or not user.is_active or user.status != "Activo":
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    user_issue = _get_mobile_stock_user_issue(user)
+    if user_issue:
+        raise HTTPException(status_code=401, detail=user_issue)
     if user.tenant_id is None:
         raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
     tenant = crud.get_tenant(db, int(user.tenant_id))

@@ -65,6 +65,7 @@ class ProductBase(BaseModel):
 
 class ProductCreate(ProductBase):
     cost_suggestion_meta: Optional[Dict[str, Any]] = None
+    auto_generate_codes: bool = False
 
 
 class ProductUpdate(BaseModel):

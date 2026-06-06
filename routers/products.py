@@ -487,8 +487,10 @@ def _duplicate_candidate_rank(candidate: schemas.ProductDuplicateCandidate) -> t
         reason in {
             "SKU idéntico.",
             "SKU idéntico tras normalización.",
+            "SKU equivalente.",
             "Código de barras idéntico.",
             "Código de barras idéntico tras normalización.",
+            "Código de barras equivalente.",
         }
         for reason in candidate.match_reasons
     ) else 0
@@ -839,30 +841,52 @@ def create_product(
         product_in = product_in.model_copy(update={"is_investment": False})
 
     tenant_id = crud.resolve_user_tenant_id(db, actor)
-    # Si quieres evitar SKUs duplicados:
-    if product_in.sku:
-        existing = crud.get_product_by_sku(db, product_in.sku, tenant_id=tenant_id)
-        if existing:
-            raise HTTPException(status_code=400, detail="SKU already registered")
-    if product_in.barcode:
-        existing_barcode = crud.get_product_by_barcode(
-            db,
-            product_in.barcode,
-            tenant_id=tenant_id,
-        )
-        if existing_barcode:
-            raise HTTPException(status_code=400, detail="Barcode already registered")
+    if product_in.auto_generate_codes:
+        for _ in range(8):
+            crud._acquire_product_codes_lock(db)
+            next_sku, next_barcode = crud.get_next_product_codes(db, tenant_id=tenant_id)
+            generated_product_in = product_in.model_copy(
+                update={
+                    "sku": next_sku,
+                    "barcode": next_barcode,
+                    "auto_generate_codes": False,
+                }
+            )
+            try:
+                product = crud.create_product(db, generated_product_in, tenant_id=tenant_id)
+                break
+            except IntegrityError as exc:
+                db.rollback()
+                message = str(getattr(exc, "orig", exc)).lower()
+                if "sku" not in message and "barcode" not in message:
+                    raise HTTPException(status_code=400, detail="No se pudo crear el producto por restricción de datos.") from exc
+        else:
+            raise HTTPException(status_code=409, detail="No se pudieron generar códigos únicos para el producto.")
+    else:
+        # Si quieres evitar SKUs duplicados:
+        if product_in.sku:
+            existing = crud.get_product_by_sku(db, product_in.sku, tenant_id=tenant_id)
+            if existing:
+                raise HTTPException(status_code=400, detail="SKU already registered")
+        if product_in.barcode:
+            existing_barcode = crud.get_product_by_barcode(
+                db,
+                product_in.barcode,
+                tenant_id=tenant_id,
+            )
+            if existing_barcode:
+                raise HTTPException(status_code=400, detail="Barcode already registered")
 
-    try:
-        product = crud.create_product(db, product_in, tenant_id=tenant_id)
-    except IntegrityError as exc:
-        db.rollback()
-        message = str(getattr(exc, "orig", exc)).lower()
-        if "sku" in message:
-            raise HTTPException(status_code=400, detail="SKU already registered") from exc
-        if "barcode" in message:
-            raise HTTPException(status_code=400, detail="Barcode already registered") from exc
-        raise HTTPException(status_code=400, detail="No se pudo crear el producto por restricción de datos.") from exc
+        try:
+            product = crud.create_product(db, product_in, tenant_id=tenant_id)
+        except IntegrityError as exc:
+            db.rollback()
+            message = str(getattr(exc, "orig", exc)).lower()
+            if "sku" in message:
+                raise HTTPException(status_code=400, detail="SKU already registered") from exc
+            if "barcode" in message:
+                raise HTTPException(status_code=400, detail="Barcode already registered") from exc
+            raise HTTPException(status_code=400, detail="No se pudo crear el producto por restricción de datos.") from exc
     crud.create_product_audit_log(
         db,
         product_id=product.id,

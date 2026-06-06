@@ -1598,10 +1598,10 @@ def create_receiving_product_quick(
     payload: schemas.ReceivingProductQuickCreate,
     tenant_id: Optional[int] = None,
 ) -> models.Product:
-    _acquire_product_codes_lock(db)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
 
     for _ in range(8):
+        _acquire_product_codes_lock(db)
         next_sku, next_barcode = get_next_product_codes(db, tenant_id=effective_tenant_id)
         product_data = schemas.ProductCreate(
             sku=next_sku,
