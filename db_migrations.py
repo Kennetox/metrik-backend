@@ -507,6 +507,56 @@ def _ensure_products_tenant_scoped_unique_indexes(connection, backend: str) -> N
         )
 
 
+def _ensure_products_updated_at_trigger(connection, backend: str) -> None:
+    """Guarantees `products.updated_at` changes on every row update."""
+
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION touch_products_updated_at()
+                RETURNS trigger AS $$
+                BEGIN
+                    NEW.updated_at = CURRENT_TIMESTAMP;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+        )
+        connection.execute(text("DROP TRIGGER IF EXISTS products_touch_updated_at ON products"))
+        connection.execute(
+            text(
+                """
+                CREATE TRIGGER products_touch_updated_at
+                BEFORE UPDATE ON products
+                FOR EACH ROW
+                EXECUTE FUNCTION touch_products_updated_at()
+                """
+            )
+        )
+        return
+
+    if not _table_exists(connection, "products"):
+        return
+
+    connection.execute(text("DROP TRIGGER IF EXISTS products_touch_updated_at"))
+    connection.execute(
+        text(
+            """
+            CREATE TRIGGER products_touch_updated_at
+            AFTER UPDATE ON products
+            FOR EACH ROW
+            BEGIN
+                UPDATE products
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = NEW.id;
+            END;
+            """
+        )
+    )
+
+
 def _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend: str) -> None:
     if backend == "postgresql":
         # Legacy global uniqueness on slug breaks multitenant isolation.
@@ -1565,6 +1615,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_last_error", "TEXT")
                 _ensure_column_postgres(connection, "web_orders", "checkout_context_json", "JSON")
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
+                _ensure_products_updated_at_trigger(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_web_order_payments_provider_reference_unique_index(
@@ -1962,6 +2013,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     if _table_exists(connection, table):
                         _ensure_column(connection, table, "tenant_id", "INTEGER")
                 _ensure_products_by_target_indexes(connection, backend="sqlite")
+                _ensure_products_updated_at_trigger(connection, backend="sqlite")
                 _ensure_table_password_resets(connection)
                 _ensure_table_pos_sessions(connection)
                 _ensure_table_platform_login_2fa_challenges(connection)
