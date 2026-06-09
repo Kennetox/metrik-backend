@@ -257,6 +257,50 @@ DEFAULT_WEB_CATALOG_CATEGORIES = [
     {"key": "accesorios", "name": "Accesorios", "sort_order": 40},
     {"key": "camaras", "name": "Camaras", "sort_order": 50},
 ]
+DEFAULT_WEB_TECHNICAL_SPEC_TYPES = [
+    "Dimensiones",
+    "Peso",
+    "Material",
+    "Color",
+    "Acabado",
+    "Longitud",
+    "Compatibilidad",
+    "Uso recomendado",
+    "Alimentacion",
+    "Voltaje",
+    "Potencia",
+    "Conectividad",
+    "Tipo de conexion",
+    "Bluetooth",
+    "USB",
+    "Entrada auxiliar",
+    "Entradas",
+    "Salidas",
+    "Conectores",
+    "Canales",
+    "Frecuencia",
+    "Respuesta en frecuencia",
+    "Sensibilidad",
+    "Cobertura",
+    "Capacidad",
+    "Autonomia",
+    "Tiempo de carga",
+    "Resistencia / IP",
+    "Instalacion",
+    "Funciones",
+    "Incluye accesorios",
+    "Accesorios",
+    "Garantia",
+    "Numero de piezas",
+    "Numero de teclas",
+    "Numero de cuerdas",
+    "Escala / menzura",
+    "Patron polar",
+    "Diametro",
+    "Profundidad",
+    "Tipo de parche",
+    "Otro",
+]
 DEFAULT_WEB_DESCRIPTION_TEMPLATE_CLOSING = (
     "En Kensar te asesoramos para elegir el producto adecuado segun tu necesidad. "
     "Contactanos por WhatsApp para mas informacion."
@@ -3847,6 +3891,10 @@ def _seed_default_web_description_templates(
     ]
     db.add_all(rows)
     db.commit()
+
+
+def get_comercio_web_technical_spec_types() -> list[str]:
+    return list(DEFAULT_WEB_TECHNICAL_SPEC_TYPES)
 
 
 def list_comercio_web_description_templates(

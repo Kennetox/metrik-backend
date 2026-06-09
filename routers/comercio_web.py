@@ -92,6 +92,16 @@ def list_comercio_web_catalog_products(
     return crud.get_products(db, skip=skip, limit=limit, tenant_id=tenant_id)
 
 
+@router.get("/catalog/technical-spec-types", response_model=list[str])
+def list_comercio_web_technical_spec_types(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    _tenant_id_for_user(db, current_user)
+    return crud.get_comercio_web_technical_spec_types()
+
+
 @router.get(
     "/catalog/publications",
     response_model=schemas.ComercioWebCatalogPublicationPage,
