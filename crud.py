@@ -5364,9 +5364,9 @@ def get_web_catalog_categories(
     children_map = _build_web_catalog_category_children_map(categories)
     visible_categories: list[schemas.WebCatalogCategory] = []
     for item in categories:
-        if _normalize_web_catalog_category_key(item.parent_key):
-            continue
         normalized_key = _normalize_web_catalog_category_key(item.key)
+        if not normalized_key:
+            continue
         product_count = sum(
             direct_counts.get(descendant_key, 0)
             for descendant_key in _get_web_catalog_descendant_keys(
