@@ -7216,14 +7216,6 @@ def create_return(
             "No encontramos la venta asociada (usa sale_id o sale_document_number)"
         )
 
-    requested_pos_name = _clean_field(change_in.pos_name)
-    requested_station_id = _clean_field(change_in.station_id)
-    target_pos_name = requested_pos_name or sale.pos_name
-    if _is_pos_web_name(target_pos_name):
-        target_station_id = None
-    else:
-        target_station_id = requested_station_id or sale.station_id
-
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
         raise ValueError("La venta seleccionada no tiene ítems registrados")
