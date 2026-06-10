@@ -107,6 +107,28 @@ def get_web_personalization_bindings(
 
 
 @router.get(
+    "/personalization/home-images",
+    response_model=schemas.WebPersonalizationHomeImages,
+)
+def get_web_personalization_home_images(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    return crud.get_public_web_personalization_home_images(db, tenant_id=tenant_id)
+
+
+@router.get(
+    "/brand-collage",
+    response_model=schemas.WebBrandCollageImages,
+)
+def get_web_brand_collage_images(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    return crud.get_public_web_brand_collage_images(db, tenant_id=tenant_id)
+
+
+@router.get(
     "/personalization/service-by-sku",
     response_model=schemas.ProductRead,
 )

@@ -996,6 +996,19 @@ _DEFAULT_WEB_PERSONALIZATION_BINDINGS: dict[str, dict[str, str]] = {
     "maraca_par": {},
 }
 
+_DEFAULT_WEB_PERSONALIZATION_HOME_IMAGES: dict[str, dict[str, str]] = {
+    "campana": {"before_image_url": "", "after_image_url": ""},
+    "guiro": {"before_image_url": "", "after_image_url": ""},
+    "maraca": {"before_image_url": "", "after_image_url": ""},
+}
+
+_DEFAULT_WEB_BRAND_COLLAGE_IMAGES: dict[str, dict[str, str]] = {
+    "main": {"image_url": "/brands/collage/hero-yamaha.webp"},
+    "top_left": {"image_url": "/brands/collage/title-prodj.webp"},
+    "top_right": {"image_url": "/brands/collage/title-rm1.webp"},
+    "bottom": {"image_url": "/brands/collage/banner-spain.webp"},
+}
+
 
 def _normalize_web_personalization_bindings(value: Any) -> dict[str, dict[str, str]]:
     result: dict[str, dict[str, str]] = {
@@ -1023,6 +1036,41 @@ def _normalize_web_personalization_bindings(value: Any) -> dict[str, dict[str, s
     return result
 
 
+def _normalize_web_personalization_home_images(value: Any) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {
+        key: dict(default_value) for key, default_value in _DEFAULT_WEB_PERSONALIZATION_HOME_IMAGES.items()
+    }
+    if not isinstance(value, dict):
+        return result
+    for variant_key in result.keys():
+        row = value.get(variant_key)
+        if not isinstance(row, dict):
+            continue
+        normalized: dict[str, str] = {}
+        for field in ("before_image_url", "after_image_url"):
+            raw = row.get(field)
+            normalized[field] = str(raw).strip() if raw is not None else ""
+        result[variant_key] = normalized
+    return result
+
+
+def _normalize_web_brand_collage_images(value: Any) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {
+        key: dict(default_value) for key, default_value in _DEFAULT_WEB_BRAND_COLLAGE_IMAGES.items()
+    }
+    if not isinstance(value, dict):
+        return result
+    for slot_key in result.keys():
+        row = value.get(slot_key)
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("image_url")
+        result[slot_key] = {
+            "image_url": str(raw).strip() if raw is not None else "",
+        }
+    return result
+
+
 def get_public_web_personalization_bindings(
     db: Session,
     tenant_id: Optional[int] = None,
@@ -1030,6 +1078,24 @@ def get_public_web_personalization_bindings(
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
     settings = get_pos_settings(db, tenant_id=effective_tenant_id)
     return _normalize_web_personalization_bindings(settings.web_personalization_bindings)
+
+
+def get_public_web_personalization_home_images(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> dict[str, dict[str, str]]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
+    return _normalize_web_personalization_home_images(settings.web_personalization_home_images)
+
+
+def get_public_web_brand_collage_images(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> dict[str, dict[str, str]]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
+    return _normalize_web_brand_collage_images(settings.web_brand_collage_images)
 
 
 def build_platform_tenant_read(
@@ -8158,6 +8224,10 @@ def get_pos_settings(
     settings.web_personalization_bindings = (
         settings.web_personalization_bindings or {}
     )
+    settings.web_personalization_home_images = (
+        settings.web_personalization_home_images or {}
+    )
+    settings.web_brand_collage_images = settings.web_brand_collage_images or {}
     normalized_permissions = permissions.ensure_permissions(settings.role_permissions)
     if settings.role_permissions != normalized_permissions:
         settings.role_permissions = normalized_permissions

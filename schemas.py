@@ -1480,6 +1480,34 @@ class WebPersonalizationBindings(BaseModel):
     )
 
 
+class WebPersonalizationHomeImageEntry(BaseModel):
+    before_image_url: Optional[str] = None
+    after_image_url: Optional[str] = None
+
+
+class WebPersonalizationHomeImages(BaseModel):
+    campana: WebPersonalizationHomeImageEntry = Field(
+        default_factory=WebPersonalizationHomeImageEntry
+    )
+    guiro: WebPersonalizationHomeImageEntry = Field(
+        default_factory=WebPersonalizationHomeImageEntry
+    )
+    maraca: WebPersonalizationHomeImageEntry = Field(
+        default_factory=WebPersonalizationHomeImageEntry
+    )
+
+
+class WebBrandCollageTile(BaseModel):
+    image_url: Optional[str] = None
+
+
+class WebBrandCollageImages(BaseModel):
+    main: WebBrandCollageTile = Field(default_factory=WebBrandCollageTile)
+    top_left: WebBrandCollageTile = Field(default_factory=WebBrandCollageTile)
+    top_right: WebBrandCollageTile = Field(default_factory=WebBrandCollageTile)
+    bottom: WebBrandCollageTile = Field(default_factory=WebBrandCollageTile)
+
+
 class PosSettingsBase(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     theme_mode: Literal["dark", "midnight", "light"] = "light"
@@ -1522,6 +1550,12 @@ class PosSettingsBase(BaseModel):
     )
     web_personalization_bindings: WebPersonalizationBindings = Field(
         default_factory=WebPersonalizationBindings
+    )
+    web_personalization_home_images: WebPersonalizationHomeImages = Field(
+        default_factory=WebPersonalizationHomeImages
+    )
+    web_brand_collage_images: WebBrandCollageImages = Field(
+        default_factory=WebBrandCollageImages
     )
 
     @field_validator(

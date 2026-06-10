@@ -1321,6 +1321,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column_postgres(
                     connection,
+                    "pos_settings",
+                    "web_personalization_home_images",
+                    "JSONB DEFAULT '{}'::jsonb",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_settings",
+                    "web_brand_collage_images",
+                    "JSONB DEFAULT '{}'::jsonb",
+                )
+                _ensure_column_postgres(
+                    connection,
                     "pos_stations",
                     "bound_device_id",
                     "TEXT",
@@ -2301,6 +2313,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "web_personalization_bindings",
                         "TEXT DEFAULT '{}'",
                     )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "web_personalization_home_images",
+                        "TEXT DEFAULT '{}'",
+                    )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "web_brand_collage_images",
+                        "TEXT DEFAULT '{}'",
+                    )
             if not _table_exists(connection, "pos_closures"):
                 connection.execute(
                     text(
@@ -2548,7 +2572,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                             low_stock_alert,
                             require_seller_pin,
                             notifications,
-                            logo_url
+                            logo_url,
+                            web_personalization_bindings,
+                            web_personalization_home_images,
+                            web_brand_collage_images
                         )
                         SELECT 1,
                                'Mi Negocio',
@@ -2563,7 +2590,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                                1,
                                0,
                                '{"daily_summary_email": false, "cash_alert_email": false, "cash_alert_sms": false, "monthly_report_email": false}',
-                               NULL
+                               NULL,
+                               '{}',
+                               '{}',
+                               '{"main": {"image_url": "/brands/collage/hero-yamaha.webp"}, "top_left": {"image_url": "/brands/collage/title-prodj.webp"}, "top_right": {"image_url": "/brands/collage/title-rm1.webp"}, "bottom": {"image_url": "/brands/collage/banner-spain.webp"}}'
                         WHERE NOT EXISTS (SELECT 1 FROM pos_settings WHERE id = 1)
                         """
                 )
