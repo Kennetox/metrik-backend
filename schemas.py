@@ -276,6 +276,145 @@ class ProductDuplicateCandidatesResponse(BaseModel):
     has_high_risk: bool = False
 
 
+WebCatalogStockStatus = Literal["in_stock", "low_stock", "out_of_stock", "service", "consultar"]
+WebCatalogComboStockMode = Literal["manual", "components"]
+
+
+class ComercioWebComboItemBase(BaseModel):
+    product_id: int = Field(ge=1)
+    quantity: float = Field(gt=0)
+    required: bool = True
+    sort_order: int = 0
+    product_price: Optional[float] = Field(default=None, gt=0)
+
+
+class ComercioWebComboItemCreate(ComercioWebComboItemBase):
+    pass
+
+
+class ComercioWebComboItemUpdate(BaseModel):
+    product_id: Optional[int] = Field(default=None, ge=1)
+    quantity: Optional[float] = Field(default=None, gt=0)
+    required: Optional[bool] = None
+    sort_order: Optional[int] = None
+    product_price: Optional[float] = Field(default=None, gt=0)
+
+
+class ComercioWebComboItemRead(ComercioWebComboItemBase):
+    id: int
+    product_name: str
+    product_sku: Optional[str] = None
+    product_slug: Optional[str] = None
+    product_image_url: Optional[str] = None
+    product_image_thumb_url: Optional[str] = None
+    product_brand: Optional[str] = None
+    product_original_price: float = 0
+    product_price: float = 0
+    stock_status: WebCatalogStockStatus = "out_of_stock"
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ComercioWebComboBase(BaseModel):
+    name: NonEmptyStr
+    slug: SlugStr
+    short_description: Optional[str] = None
+    long_description: Optional[str] = None
+    image_url: Optional[str] = None
+    image_thumb_url: Optional[str] = None
+    gallery_urls: List[str] = Field(default_factory=list)
+    video_url: Optional[str] = None
+    badge_text: Optional[str] = None
+    category_key: Optional[SlugStr] = None
+    price: float = Field(gt=0)
+    compare_price: Optional[float] = None
+    stock_mode: WebCatalogComboStockMode = "components"
+    published: bool = False
+    featured: bool = False
+    sort_order: int = 0
+    visible_when_out_of_stock: bool = True
+    active: bool = True
+    warranty_text: Optional[str] = None
+    technical_specs: List[Dict[str, str]] = Field(default_factory=list)
+
+    @field_validator("gallery_urls", mode="before")
+    @classmethod
+    def _sanitize_gallery_urls(cls, value: Any):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",")]
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if normalized and normalized not in clean:
+                clean.append(normalized)
+        return clean[:8]
+
+
+class ComercioWebComboCreate(ComercioWebComboBase):
+    items: List[ComercioWebComboItemCreate] = Field(default_factory=list)
+
+
+class ComercioWebComboUpdate(BaseModel):
+    name: Optional[NonEmptyStr] = None
+    slug: Optional[SlugStr] = None
+    short_description: Optional[str] = None
+    long_description: Optional[str] = None
+    image_url: Optional[str] = None
+    image_thumb_url: Optional[str] = None
+    gallery_urls: Optional[List[str]] = None
+    video_url: Optional[str] = None
+    badge_text: Optional[str] = None
+    category_key: Optional[SlugStr] = None
+    price: Optional[float] = Field(default=None, gt=0)
+    compare_price: Optional[float] = None
+    stock_mode: Optional[WebCatalogComboStockMode] = None
+    published: Optional[bool] = None
+    featured: Optional[bool] = None
+    sort_order: Optional[int] = None
+    visible_when_out_of_stock: Optional[bool] = None
+    active: Optional[bool] = None
+    warranty_text: Optional[str] = None
+    technical_specs: Optional[List[Dict[str, str]]] = None
+    items: Optional[List[ComercioWebComboItemCreate]] = None
+
+    @field_validator("gallery_urls", mode="before")
+    @classmethod
+    def _sanitize_gallery_urls(cls, value: Any):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",")]
+        if not isinstance(value, list):
+            return []
+        clean: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if normalized and normalized not in clean:
+                clean.append(normalized)
+        return clean[:8]
+
+
+class ComercioWebComboRead(ComercioWebComboBase):
+    id: int
+    items: List[ComercioWebComboItemRead] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ComercioWebCatalogPublicationStats(BaseModel):
     configured: int
     published: int
@@ -1499,6 +1638,7 @@ class WebPersonalizationHomeImages(BaseModel):
 
 class WebBrandCollageTile(BaseModel):
     image_url: Optional[str] = None
+    href: Optional[str] = None
 
 
 class WebBrandCollageImages(BaseModel):
@@ -2163,6 +2303,7 @@ class WebCustomerProfileUpdateRequest(BaseModel):
 class WebCartItemMutationRequest(BaseModel):
     product_id: int
     quantity: float = Field(gt=0)
+    unit_price_snapshot: Optional[float] = None
 
 
 class WebCartItemUpdateRequest(BaseModel):

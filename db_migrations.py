@@ -372,26 +372,26 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, table, "created_at", "DATETIME")
     _ensure_column(connection, table, "updated_at", "DATETIME")
-    connection.execute(
-        text(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_home_sliders_tenant_slot_key
-            ON web_catalog_home_sliders (tenant_id, slot)
-            """
-        )
-    )
-    connection.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_tenant_id "
-            "ON web_catalog_home_sliders (tenant_id)"
-        )
-    )
-    connection.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_sliders_slot "
-            "ON web_catalog_home_sliders (slot)"
-        )
-    )
+
+
+def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
+    items_table = "web_combo_items"
+    combo_table = "web_combos"
+    if backend == "postgresql":
+        if _table_exists_postgres(connection, items_table):
+            _ensure_column_postgres(connection, items_table, "product_price_attributed", "FLOAT NOT NULL DEFAULT 0")
+        if _table_exists_postgres(connection, combo_table):
+            _ensure_column_postgres(connection, combo_table, "video_url", "VARCHAR(512)")
+            _ensure_column_postgres(connection, combo_table, "warranty_text", "VARCHAR(160)")
+            _ensure_column_postgres(connection, combo_table, "technical_specs", "JSON NOT NULL DEFAULT '[]'")
+        return
+
+    if _table_exists(connection, items_table):
+        _ensure_column(connection, items_table, "product_price_attributed", "FLOAT NOT NULL DEFAULT 0")
+    if _table_exists(connection, combo_table):
+        _ensure_column(connection, combo_table, "video_url", "TEXT")
+        _ensure_column(connection, combo_table, "warranty_text", "TEXT")
+        _ensure_column(connection, combo_table, "technical_specs", "TEXT NOT NULL DEFAULT '[]'")
 
 
 def _table_exists_postgres(connection, table: str) -> bool:
@@ -1642,6 +1642,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
                 _ensure_web_description_template_schema(connection, backend="postgresql")
                 _ensure_web_catalog_home_slider_schema(connection, backend="postgresql")
+                _ensure_web_catalog_combo_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -2593,7 +2594,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                                NULL,
                                '{}',
                                '{}',
-                               '{"main": {"image_url": "/brands/collage/hero-yamaha.webp"}, "top_left": {"image_url": "/brands/collage/title-prodj.webp"}, "top_right": {"image_url": "/brands/collage/title-rm1.webp"}, "bottom": {"image_url": "/brands/collage/banner-spain.webp"}}'
+                               '{"main": {"image_url": "/brands/collage/hero-yamaha.webp", "href": "/catalogo?brand=Yamaha"}, "top_left": {"image_url": "/brands/collage/title-prodj.webp", "href": "/catalogo?brand=Pro%20DJ"}, "top_right": {"image_url": "/brands/collage/title-rm1.webp", "href": "/catalogo?brand=Ritmo%20Musical"}, "bottom": {"image_url": "/brands/collage/banner-spain.webp", "href": "/catalogo?brand=Spain"}}'
                         WHERE NOT EXISTS (SELECT 1 FROM pos_settings WHERE id = 1)
                         """
                 )
@@ -2796,6 +2797,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
                 _ensure_web_description_template_schema(connection, backend="sqlite")
                 _ensure_web_catalog_home_slider_schema(connection, backend="sqlite")
+                _ensure_web_catalog_combo_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:

@@ -309,6 +309,74 @@ def export_comercio_web_publications_xlsx(
     )
 
 
+@router.get("/catalog/combos", response_model=list[schemas.ComercioWebComboRead])
+def list_comercio_web_combos(
+    q: Optional[str] = Query(default=None),
+    published_only: Optional[bool] = Query(default=None),
+    active_only: Optional[bool] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_combos(
+        db,
+        tenant_id=tenant_id,
+        q=q,
+        published_only=published_only,
+        active_only=active_only,
+    )
+
+
+@router.post("/catalog/combos", response_model=schemas.ComercioWebComboRead, status_code=201)
+def create_comercio_web_combo(
+    payload: schemas.ComercioWebComboCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_comercio_web_combo(db, tenant_id=tenant_id, payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/catalog/combos/{combo_id}", response_model=schemas.ComercioWebComboRead)
+def update_comercio_web_combo(
+    combo_id: int,
+    payload: schemas.ComercioWebComboUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_combo(
+            db,
+            tenant_id=tenant_id,
+            combo_id=combo_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/catalog/combos/{combo_id}", status_code=204)
+def delete_comercio_web_combo(
+    combo_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        crud.delete_comercio_web_combo(db, tenant_id=tenant_id, combo_id=combo_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None
+
+
 @router.put("/catalog/products/{product_id}", response_model=schemas.ProductRead)
 def update_comercio_web_catalog_product(
     product_id: int,

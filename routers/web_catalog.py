@@ -83,6 +83,21 @@ def list_web_catalog_best_sellers(
     return schemas.WebCatalogBestSellerList(items=items, updated_at=updated_at)
 
 
+@router.get("/combos", response_model=list[schemas.ComercioWebComboRead])
+def list_web_catalog_combos(
+    q: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    return crud.list_comercio_web_combos(
+        db,
+        tenant_id=tenant_id,
+        q=q,
+        published_only=True,
+        active_only=True,
+    )
+
+
 @router.get("/products/{slug}", response_model=schemas.WebCatalogProductDetail)
 def get_web_catalog_product(
     slug: str,

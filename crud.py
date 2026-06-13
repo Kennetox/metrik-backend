@@ -82,12 +82,26 @@ def _web_order_reuse_window_minutes() -> int:
     return _env_int("WEB_ORDER_REUSE_WINDOW_MINUTES", 24 * 60)
 
 
+def _web_cart_max_units_per_item() -> int:
+    return _env_int("WEB_CART_MAX_UNITS_PER_ITEM", 3, min_value=1, max_value=100)
+
+
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProductCard], datetime]] = {}
 
 
 def _web_best_sellers_cache_ttl_seconds() -> int:
     return _env_int("WEB_BEST_SELLERS_CACHE_TTL_SECONDS", 12 * 60 * 60, min_value=300, max_value=7 * 24 * 60 * 60)
+
+
+def _web_best_sellers_rotation_window_hours() -> int:
+    return _env_int("WEB_BEST_SELLERS_ROTATION_HOURS", 3, min_value=1, max_value=24)
+
+
+def _web_best_sellers_rotation_bucket(now: datetime) -> int:
+    window_seconds = _web_best_sellers_rotation_window_hours() * 60 * 60
+    reference = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return int(reference.timestamp() // window_seconds)
 
 
 def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
@@ -169,6 +183,11 @@ def build_web_order_item_signature(items: Sequence[Any]) -> tuple[tuple[int, flo
 
 def _money_eq(left: Any, right: Any) -> bool:
     return abs(round(float(left or 0.0), 2) - round(float(right or 0.0), 2)) <= 0.01
+
+
+def _round_currency_to_unit(value: Any) -> float:
+    # El flujo de POS trabaja en pesos enteros, así que normalizamos al peso más cercano.
+    return float(math.floor(float(value or 0.0) + 0.5))
 
 
 DEFAULT_PRODUCT_LABEL_FORMAT = "Kensar1"
@@ -1003,10 +1022,22 @@ _DEFAULT_WEB_PERSONALIZATION_HOME_IMAGES: dict[str, dict[str, str]] = {
 }
 
 _DEFAULT_WEB_BRAND_COLLAGE_IMAGES: dict[str, dict[str, str]] = {
-    "main": {"image_url": "/brands/collage/hero-yamaha.webp"},
-    "top_left": {"image_url": "/brands/collage/title-prodj.webp"},
-    "top_right": {"image_url": "/brands/collage/title-rm1.webp"},
-    "bottom": {"image_url": "/brands/collage/banner-spain.webp"},
+    "main": {
+        "image_url": "/brands/collage/hero-yamaha.webp",
+        "href": "/catalogo?brand=Yamaha",
+    },
+    "top_left": {
+        "image_url": "/brands/collage/title-prodj.webp",
+        "href": "/catalogo?brand=Pro%20DJ",
+    },
+    "top_right": {
+        "image_url": "/brands/collage/title-rm1.webp",
+        "href": "/catalogo?brand=Ritmo%20Musical",
+    },
+    "bottom": {
+        "image_url": "/brands/collage/banner-spain.webp",
+        "href": "/catalogo?brand=Spain",
+    },
 }
 
 
@@ -1064,9 +1095,11 @@ def _normalize_web_brand_collage_images(value: Any) -> dict[str, dict[str, str]]
         row = value.get(slot_key)
         if not isinstance(row, dict):
             continue
-        raw = row.get("image_url")
+        image_raw = row.get("image_url")
+        href_raw = row.get("href")
         result[slot_key] = {
-            "image_url": str(raw).strip() if raw is not None else "",
+            "image_url": str(image_raw).strip() if image_raw is not None else "",
+            "href": str(href_raw).strip() if href_raw is not None else result[slot_key].get("href", ""),
         }
     return result
 
@@ -3842,6 +3875,429 @@ def delete_comercio_web_catalog_category(
     db.commit()
 
 
+def _normalize_web_combo_slug(value: Optional[str]) -> str:
+    normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9_-]+", "-", ascii_text)
+    slug = re.sub(r"-+", "-", slug)
+    slug = re.sub(r"_+", "_", slug)
+    return slug.strip("-_")[:160]
+
+
+def _web_combo_slug_candidates(value: Optional[str]) -> list[str]:
+    normalized = _normalize_web_combo_slug(value)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    for item in [normalized.replace("-", "_"), normalized.replace("_", "-")]:
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def _serialize_web_combo_item(
+    row: models.WebCatalogComboItem,
+    *,
+    stock_by_product_id: Optional[dict[int, float]] = None,
+) -> schemas.ComercioWebComboItemRead:
+    product = getattr(row, "product", None)
+    product_name = (row.product_name_snapshot or (product.name if product else "") or "").strip()
+    attributed_price = float(
+        row.product_price_attributed
+        if row.product_price_attributed is not None
+        else row.product_price_snapshot
+        if row.product_price_snapshot is not None
+        else (product.price if product else 0)
+        or 0
+    )
+    original_price = float(
+        row.product_price_snapshot
+        if row.product_price_snapshot is not None
+        else (product.price if product else 0)
+        or 0
+    )
+    qty_on_hand = None
+    if product is not None and stock_by_product_id is not None:
+        qty_on_hand = stock_by_product_id.get(int(product.id))
+    stock_status = resolve_web_product_stock_status(product, qty_on_hand) if product else "out_of_stock"
+    return schemas.ComercioWebComboItemRead(
+        id=row.id,
+        product_id=row.product_id,
+        quantity=float(row.quantity or 0),
+        required=bool(row.required),
+        sort_order=int(row.sort_order or 0),
+        product_price=attributed_price,
+        product_original_price=original_price,
+        product_name=product_name or "Producto",
+        product_sku=(row.product_sku_snapshot or (product.sku if product else None)),
+        product_slug=(row.product_slug_snapshot or None),
+        product_image_url=(
+            row.product_image_url_snapshot
+            or (product.image_url if product else None)
+        ),
+        product_image_thumb_url=(
+            row.product_image_thumb_url_snapshot
+            or (product.image_thumb_url if product else None)
+        ),
+        product_brand=(row.product_brand_snapshot or (product.brand if product else None)),
+        stock_status=stock_status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _serialize_web_combo(
+    row: models.WebCatalogCombo,
+    *,
+    stock_by_product_id: Optional[dict[int, float]] = None,
+) -> schemas.ComercioWebComboRead:
+    items = [
+        _serialize_web_combo_item(item, stock_by_product_id=stock_by_product_id)
+        for item in getattr(row, "items", []) or []
+    ]
+    gallery_urls = row.gallery_urls if isinstance(row.gallery_urls, list) else []
+    clean_gallery_urls = [
+        str(item).strip()
+        for item in gallery_urls
+        if isinstance(item, str) and str(item).strip()
+    ]
+    return schemas.ComercioWebComboRead(
+        id=row.id,
+        name=(row.name or "").strip(),
+        slug=(row.slug or "").strip(),
+        short_description=(row.short_description or None),
+        long_description=(row.long_description or None),
+        image_url=row.image_url,
+        image_thumb_url=row.image_thumb_url,
+        gallery_urls=clean_gallery_urls[:8],
+        video_url=(row.video_url or None),
+        badge_text=row.badge_text,
+        category_key=_normalize_web_catalog_category_key(row.category_key) or None,
+        price=float(row.price or 0),
+        compare_price=float(row.compare_price) if row.compare_price is not None else None,
+        stock_mode=(row.stock_mode or "components"),
+        published=bool(row.published),
+        featured=bool(row.featured),
+        sort_order=int(row.sort_order or 0),
+        visible_when_out_of_stock=bool(row.visible_when_out_of_stock),
+        active=bool(row.active),
+        warranty_text=row.warranty_text,
+        technical_specs=row.technical_specs if isinstance(row.technical_specs, list) else [],
+        items=items,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _combo_item_snapshot_from_product(
+    product: models.Product,
+    payload: schemas.ComercioWebComboItemCreate,
+) -> models.WebCatalogComboItem:
+    attributed_price = float(
+        payload.product_price if payload.product_price is not None else float(product.price or 0)
+    )
+    return models.WebCatalogComboItem(
+        tenant_id=product.tenant_id,
+        product_id=product.id,
+        quantity=float(payload.quantity or 0),
+        required=bool(payload.required),
+        sort_order=int(payload.sort_order or 0),
+        product_name_snapshot=(product.web_name or product.name or "").strip(),
+        product_sku_snapshot=(product.sku or None),
+        product_slug_snapshot=(product.web_slug or None),
+        product_image_url_snapshot=product.image_url,
+        product_image_thumb_url_snapshot=product.image_thumb_url,
+        product_brand_snapshot=product.brand,
+        product_price_snapshot=float(product.price or 0),
+        product_price_attributed=attributed_price,
+    )
+
+
+def _resolve_combo_items_from_payload(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    items: list[schemas.ComercioWebComboItemCreate] | list[dict[str, Any]],
+) -> list[models.WebCatalogComboItem]:
+    if not items:
+        raise ValueError("Debes agregar al menos un producto al combo")
+
+    products_by_id: dict[int, models.Product] = {}
+    normalized_items: list[schemas.ComercioWebComboItemCreate] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized_items.append(schemas.ComercioWebComboItemCreate.model_validate(item))
+        else:
+            normalized_items.append(item)
+
+    product_ids = [int(item.product_id) for item in normalized_items]
+    for product in db.query(models.Product).filter(models.Product.id.in_(product_ids)).all():
+        products_by_id[product.id] = product
+
+    combo_items: list[models.WebCatalogComboItem] = []
+    seen: set[int] = set()
+    for item in normalized_items:
+        product_id = int(item.product_id)
+        if product_id in seen:
+            raise ValueError("No puedes repetir el mismo producto dentro del combo")
+        seen.add(product_id)
+        product = products_by_id.get(product_id)
+        if not product:
+            raise ValueError(f"El producto {product_id} no existe")
+        effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+        if effective_tenant_id is not None and product.tenant_id != effective_tenant_id:
+            raise ValueError(f"El producto {product_id} no pertenece a la empresa activa")
+        if not bool(product.active):
+            raise ValueError(f"El producto {product.name} está inactivo")
+        combo_items.append(_combo_item_snapshot_from_product(product, item))
+
+    combo_items.sort(key=lambda row: (int(row.sort_order or 0), row.product_name_snapshot or ""))
+    return combo_items
+
+
+def list_comercio_web_combos(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    q: Optional[str] = None,
+    published_only: Optional[bool] = None,
+    active_only: Optional[bool] = None,
+) -> list[schemas.ComercioWebComboRead]:
+    query = db.query(models.WebCatalogCombo).options(
+        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+    )
+    if tenant_id is not None:
+        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+    if published_only is True:
+        query = query.filter(models.WebCatalogCombo.published.is_(True))
+    elif published_only is False:
+        query = query.filter(models.WebCatalogCombo.published.is_(False))
+    if active_only is True:
+        query = query.filter(models.WebCatalogCombo.active.is_(True))
+    elif active_only is False:
+        query = query.filter(models.WebCatalogCombo.active.is_(False))
+
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        query = query.filter(
+            or_(
+                models.WebCatalogCombo.name.ilike(like),
+                models.WebCatalogCombo.slug.ilike(like),
+                models.WebCatalogCombo.short_description.ilike(like),
+                models.WebCatalogCombo.badge_text.ilike(like),
+            )
+        )
+
+    rows = query.order_by(
+        models.WebCatalogCombo.featured.desc(),
+        models.WebCatalogCombo.sort_order.asc(),
+        models.WebCatalogCombo.updated_at.desc(),
+        models.WebCatalogCombo.id.desc(),
+    ).all()
+    stock_product_ids = list(
+        {
+            int(item.product_id)
+            for row in rows
+            for item in (getattr(row, "items", []) or [])
+        }
+    )
+    stock_by_product_id = _get_web_combo_stock_snapshot(db, tenant_id, stock_product_ids)
+    return [_serialize_web_combo(row, stock_by_product_id=stock_by_product_id) for row in rows]
+
+
+def get_comercio_web_combo(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    combo_id: int,
+) -> Optional[schemas.ComercioWebComboRead]:
+    query = db.query(models.WebCatalogCombo).options(
+        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+    )
+    if tenant_id is not None:
+        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+    row = query.filter(models.WebCatalogCombo.id == combo_id).first()
+    if not row:
+        return None
+    stock_by_product_id = _get_web_combo_stock_snapshot(
+        db,
+        tenant_id,
+        [int(item.product_id) for item in (getattr(row, "items", []) or [])],
+    )
+    return _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
+
+
+def create_comercio_web_combo(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    payload: schemas.ComercioWebComboCreate,
+) -> schemas.ComercioWebComboRead:
+    slug = _normalize_web_combo_slug(payload.slug or payload.name)
+    if not slug:
+        raise ValueError("Debes indicar un slug válido para el combo")
+    duplicate = (
+        db.query(models.WebCatalogCombo.id)
+        .filter(
+            models.WebCatalogCombo.tenant_id == tenant_id,
+            models.WebCatalogCombo.slug.in_(_web_combo_slug_candidates(slug)),
+        )
+        .first()
+    )
+    if duplicate:
+        raise ValueError("Ya existe un combo con ese slug")
+
+    combo_items = _resolve_combo_items_from_payload(
+        db,
+        tenant_id=tenant_id,
+        items=payload.items,
+    )
+    computed_price = sum(
+        float(item.quantity or 0) * float(item.product_price_attributed or 0) for item in combo_items
+    )
+    now = datetime.utcnow()
+    row = models.WebCatalogCombo(
+        tenant_id=tenant_id,
+        name=payload.name.strip(),
+        slug=slug,
+        short_description=payload.short_description or None,
+        long_description=payload.long_description or None,
+        image_url=payload.image_url or None,
+        image_thumb_url=payload.image_thumb_url or None,
+        gallery_urls=payload.gallery_urls or [],
+        video_url=payload.video_url or None,
+        badge_text=payload.badge_text or None,
+        category_key=_normalize_web_catalog_category_key(payload.category_key) or None,
+        price=computed_price,
+        compare_price=float(payload.compare_price) if payload.compare_price is not None else None,
+        stock_mode=payload.stock_mode or "components",
+        published=bool(payload.published),
+        featured=bool(payload.featured),
+        sort_order=int(payload.sort_order or 0),
+        visible_when_out_of_stock=bool(payload.visible_when_out_of_stock),
+        active=bool(payload.active),
+        warranty_text=payload.warranty_text or None,
+        technical_specs=payload.technical_specs or [],
+        created_at=now,
+        updated_at=now,
+        items=combo_items,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return get_comercio_web_combo(db, tenant_id=tenant_id, combo_id=row.id)  # type: ignore[return-value]
+
+
+def update_comercio_web_combo(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    combo_id: int,
+    payload: schemas.ComercioWebComboUpdate,
+) -> schemas.ComercioWebComboRead:
+    query = db.query(models.WebCatalogCombo).options(
+        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+    )
+    if tenant_id is not None:
+        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+    row = query.filter(models.WebCatalogCombo.id == combo_id).first()
+    if not row:
+        raise ValueError("Combo no encontrado")
+
+    data = payload.model_dump(exclude_unset=True)
+    if "slug" in data:
+        next_slug = _normalize_web_combo_slug(data.get("slug"))
+        if not next_slug:
+            raise ValueError("Debes indicar un slug válido para el combo")
+        duplicate = (
+            db.query(models.WebCatalogCombo.id)
+            .filter(
+                models.WebCatalogCombo.tenant_id == tenant_id,
+                models.WebCatalogCombo.slug.in_(_web_combo_slug_candidates(next_slug)),
+                models.WebCatalogCombo.id != row.id,
+            )
+            .first()
+        )
+        if duplicate:
+            raise ValueError("Ya existe un combo con ese slug")
+        row.slug = next_slug
+    if "name" in data:
+        row.name = (data.get("name") or "").strip()
+    if "short_description" in data:
+        row.short_description = data.get("short_description") or None
+    if "long_description" in data:
+        row.long_description = data.get("long_description") or None
+    if "image_url" in data:
+        row.image_url = data.get("image_url") or None
+    if "image_thumb_url" in data:
+        row.image_thumb_url = data.get("image_thumb_url") or None
+    if "gallery_urls" in data:
+        row.gallery_urls = data.get("gallery_urls") or []
+    if "video_url" in data:
+        row.video_url = (data.get("video_url") or None)
+    if "badge_text" in data:
+        row.badge_text = data.get("badge_text") or None
+    if "category_key" in data:
+        row.category_key = _normalize_web_catalog_category_key(data.get("category_key")) or None
+    if "price" in data and data.get("price") is not None:
+        row.price = float(data.get("price") or 0)
+    if "compare_price" in data:
+        row.compare_price = (
+            float(data.get("compare_price")) if data.get("compare_price") is not None else None
+        )
+    if "stock_mode" in data and data.get("stock_mode") is not None:
+        row.stock_mode = data.get("stock_mode")
+    if "published" in data:
+        row.published = bool(data.get("published"))
+    if "featured" in data:
+        row.featured = bool(data.get("featured"))
+    if "sort_order" in data:
+        row.sort_order = int(data.get("sort_order") or 0)
+    if "visible_when_out_of_stock" in data:
+        row.visible_when_out_of_stock = bool(data.get("visible_when_out_of_stock"))
+    if "active" in data:
+        row.active = bool(data.get("active"))
+    if "warranty_text" in data:
+        row.warranty_text = data.get("warranty_text") or None
+    if "technical_specs" in data:
+        row.technical_specs = data.get("technical_specs") or []
+    if "items" in data:
+        new_items = _resolve_combo_items_from_payload(
+            db,
+            tenant_id=tenant_id,
+            items=data.get("items") or [],
+        )
+        row.items = []
+        db.flush()
+        row.items = new_items
+    row.price = sum(
+        float(item.quantity or 0) * float(item.product_price_attributed or 0)
+        for item in getattr(row, "items", []) or []
+    )
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return get_comercio_web_combo(db, tenant_id=tenant_id, combo_id=row.id)  # type: ignore[return-value]
+
+
+def delete_comercio_web_combo(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    combo_id: int,
+) -> None:
+    query = db.query(models.WebCatalogCombo)
+    if tenant_id is not None:
+        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+    row = query.filter(models.WebCatalogCombo.id == combo_id).first()
+    if not row:
+        raise ValueError("Combo no encontrado")
+    db.delete(row)
+    db.commit()
+
+
 def _normalize_web_description_template_key(value: Optional[str]) -> str:
     normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
@@ -5586,6 +6042,7 @@ def get_web_catalog_best_sellers(
     safe_days = max(7, min(int(days or 90), 365))
 
     now = datetime.utcnow()
+    rotation_bucket = _web_best_sellers_rotation_bucket(now)
     catalog_updated_at = (
         db.query(func.max(models.Product.updated_at))
         .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
@@ -5600,7 +6057,7 @@ def get_web_catalog_best_sellers(
         int(catalog_updated_at.timestamp()) if isinstance(catalog_updated_at, datetime) else 0
     )
     cache_key_prefix = f"{effective_tenant_id}:{safe_limit}:{safe_days}:"
-    cache_key = f"{cache_key_prefix}{catalog_version_token}"
+    cache_key = f"{cache_key_prefix}{catalog_version_token}:{rotation_bucket}"
     cache_entry = _WEB_BEST_SELLERS_CACHE.get(cache_key)
     if cache_entry:
         expires_at, cached_items, cached_updated_at = cache_entry
@@ -5739,6 +6196,47 @@ def get_web_catalog_best_sellers(
             pool_rows.append(row)
             seen_pool_ids.add(int(product.id))
 
+    pool_target = max(safe_limit * 8, 80)
+    if len(pool_rows) < pool_target:
+        broad_rows = (
+            db.query(
+                models.Product,
+                func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+                models.ProductGroup.display_name.label("category_name"),
+            )
+            .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+            .outerjoin(
+                models.ProductGroup,
+                and_(
+                    models.ProductGroup.path == models.Product.group_name,
+                    models.ProductGroup.tenant_id == models.Product.tenant_id,
+                ),
+            )
+            .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+            .filter(
+                models.Product.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true()
+            )
+            .order_by(
+                models.Product.web_featured.desc(),
+                models.Product.web_sort_order.asc(),
+                models.Product.updated_at.desc(),
+                models.Product.id.asc(),
+            )
+            .limit(pool_target)
+            .all()
+        )
+        seen_pool_ids = {int(product.id) for product, _, _ in pool_rows}
+        for row in broad_rows:
+            product = row[0]
+            if int(product.id) in seen_pool_ids:
+                continue
+            pool_rows.append(row)
+            seen_pool_ids.add(int(product.id))
+            if len(pool_rows) >= pool_target:
+                break
+
     max_qty = max((m["qty_sold"] for m in metrics_by_product.values()), default=0.0)
     max_gross = max((m["gross_sold"] for m in metrics_by_product.values()), default=0.0)
     price_candidates = [
@@ -5780,6 +6278,18 @@ def get_web_catalog_best_sellers(
             + featured_bonus * 0.05
         )
 
+    def _rotation_key(product: models.Product) -> float:
+        digest = hashlib.sha256(
+            f"{rotation_bucket}:{effective_tenant_id}:{safe_limit}:{safe_days}:{product.id}".encode("utf-8")
+        ).digest()
+        return int.from_bytes(digest[:8], "big") / float(2**64 - 1)
+
+    def _rotated_sort_key(entry: tuple[float, Any]) -> tuple[float, int, int]:
+        score, row = entry
+        product = row[0]
+        blended_score = (score * 0.58) + (_rotation_key(product) * 0.42)
+        return (-blended_score, int(product.web_sort_order or 999999), -int(product.id or 0))
+
     candidates_sold: list[tuple[float, Any]] = []
     candidates_representative: list[tuple[float, Any]] = []
     for product, qty_on_hand, category_name in pool_rows:
@@ -5794,7 +6304,7 @@ def get_web_catalog_best_sellers(
         payload = (_compute_score(product), (product, qty_on_hand, category_name))
         if qty_sold > 0:
             candidates_sold.append(payload)
-        elif bool(product.web_featured) or int(product.web_sort_order or 999999) <= 40:
+        else:
             candidates_representative.append(payload)
 
     candidates_sold.sort(key=lambda entry: (-entry[0], int(entry[1][0].web_sort_order or 999999), -int(entry[1][0].id or 0)))
@@ -5807,44 +6317,40 @@ def get_web_catalog_best_sellers(
     selected_rows: list[Any] = []
     selected_ids: set[int] = set()
 
-    sold_target = min(len(candidates_sold), max(1, int(math.floor(safe_limit * 0.7))))
-    representative_target = max(0, safe_limit - sold_target)
+    anchor_target = min(len(candidates_sold), max(1, int(math.ceil(safe_limit * 0.4))))
+
+    def try_add_row(row: Any) -> bool:
+        product = row[0]
+        pid = int(product.id)
+        if pid in selected_ids:
+            return False
+        brand_key = (product.brand or "__none__").strip().lower()
+        category_key = (_normalize_web_catalog_category_key(product.web_category_key) or (product.group_name or "__none__")).strip().lower()
+        if brand_counts[brand_key] >= brand_cap:
+            return False
+        if category_counts[category_key] >= category_cap:
+            return False
+        selected_rows.append(row)
+        selected_ids.add(pid)
+        brand_counts[brand_key] += 1
+        category_counts[category_key] += 1
+        return True
 
     for _, row in candidates_sold:
-        product = row[0]
-        pid = int(product.id)
-        if pid in selected_ids:
-            continue
-        brand_key = (product.brand or "__none__").strip().lower()
-        category_key = (_normalize_web_catalog_category_key(product.web_category_key) or (product.group_name or "__none__")).strip().lower()
-        if brand_counts[brand_key] >= brand_cap:
-            continue
-        if category_counts[category_key] >= category_cap:
-            continue
-        selected_rows.append(row)
-        selected_ids.add(pid)
-        brand_counts[brand_key] += 1
-        category_counts[category_key] += 1
-        if len(selected_rows) >= sold_target:
+        if try_add_row(row) and len(selected_rows) >= anchor_target:
             break
 
-    for _, row in candidates_representative:
-        if len(selected_rows) >= sold_target + representative_target:
+    rotation_pool = [
+        entry
+        for entry in candidates_sold + candidates_representative
+        if int(entry[1][0].id) not in selected_ids
+    ]
+    rotation_pool.sort(key=_rotated_sort_key)
+
+    for _, row in rotation_pool:
+        if len(selected_rows) >= safe_limit:
             break
-        product = row[0]
-        pid = int(product.id)
-        if pid in selected_ids:
-            continue
-        brand_key = (product.brand or "__none__").strip().lower()
-        category_key = (_normalize_web_catalog_category_key(product.web_category_key) or (product.group_name or "__none__")).strip().lower()
-        if brand_counts[brand_key] >= brand_cap:
-            continue
-        if category_counts[category_key] >= category_cap:
-            continue
-        selected_rows.append(row)
-        selected_ids.add(pid)
-        brand_counts[brand_key] += 1
-        category_counts[category_key] += 1
+        try_add_row(row)
 
     if len(selected_rows) < safe_limit:
         for _, row in candidates_sold + candidates_representative:
@@ -7568,15 +8074,15 @@ def create_change(
         )
         unit_cart_share = cart_share_per_unit.get(sale_item.id, 0.0)
         unit_credit_value = max(0.0, unit_net_after_line - unit_cart_share)
-        line_total_credit = unit_credit_value * requested_qty
+        line_total_credit = _round_currency_to_unit(unit_credit_value * requested_qty)
 
         line_discount_per_unit = (
             float(sale_item.line_discount_value or 0.0) / line_quantity
             if line_quantity
             else 0.0
         )
-        line_discount_value = line_discount_per_unit * requested_qty
-        cart_discount_share_value = unit_cart_share * requested_qty
+        line_discount_value = _round_currency_to_unit(line_discount_per_unit * requested_qty)
+        cart_discount_share_value = _round_currency_to_unit(unit_cart_share * requested_qty)
 
         returned_items_data.append(
             {
@@ -7617,7 +8123,7 @@ def create_change(
                 f"No encontramos el producto {item_in.product_id} para el cambio"
             )
         unit_price = float(product.price or 0.0)
-        line_total = unit_price * requested_qty
+        line_total = _round_currency_to_unit(unit_price * requested_qty)
         new_items_data.append(
             {
                 "product": product,
@@ -7633,14 +8139,28 @@ def create_change(
     if total_new <= 0:
         raise ValueError("El total del nuevo producto debe ser mayor a cero")
 
+    total_credit = _round_currency_to_unit(total_credit)
+    total_new = _round_currency_to_unit(total_new)
+
+    if total_credit <= 0:
+        raise ValueError("El total de crédito debe ser mayor a cero")
+    if total_new <= 0:
+        raise ValueError("El total del nuevo producto debe ser mayor a cero")
+
     net_total = total_new - total_credit
-    extra_payment = max(0.0, net_total)
-    refund_due = max(0.0, -net_total)
+    extra_payment = _round_currency_to_unit(max(0.0, net_total))
+    refund_due = _round_currency_to_unit(max(0.0, -net_total))
 
     payments_payload = []
     if extra_payment > 0:
         payments_payload = (
-            list(change_in.payments)
+            [
+                schemas.SaleChangePaymentCreate(
+                    method=payment.method,
+                    amount=_round_currency_to_unit(payment.amount),
+                )
+                for payment in change_in.payments
+            ]
             if change_in.payments and len(change_in.payments) > 0
             else [schemas.SaleChangePaymentCreate(method="cash", amount=extra_payment)]
         )
@@ -10550,6 +11070,14 @@ def _get_web_cart_stock_snapshot(
     return {int(product_id): float(qty_on_hand or 0.0) for product_id, qty_on_hand in rows}
 
 
+def _get_web_combo_stock_snapshot(
+    db: Session,
+    tenant_id: Optional[int],
+    product_ids: list[int],
+) -> dict[int, float]:
+    return _get_web_cart_stock_snapshot(db, tenant_id, product_ids)
+
+
 def _resolve_valid_discount_code(
     db: Session,
     *,
@@ -10693,10 +11221,21 @@ def add_item_to_web_cart(
         raise ValueError("Producto no disponible para web")
 
     existing = _get_cart_item(db, cart.id, product.id)
-    web_unit_price = resolve_web_product_sale_price(product)
+    requested_unit_price = float(getattr(payload, "unit_price_snapshot", None) or 0.0)
+    web_unit_price = requested_unit_price if requested_unit_price > 0 else resolve_web_product_sale_price(product)
     if existing:
-        existing.quantity = float(existing.quantity or 0.0) + float(payload.quantity)
-        existing.unit_price_snapshot = float(web_unit_price or 0.0)
+        previous_quantity = float(existing.quantity or 0.0)
+        previous_unit_price = float(existing.unit_price_snapshot or 0.0)
+        max_units = float(_web_cart_max_units_per_item())
+        allowed_quantity = max(0.0, min(float(payload.quantity), max_units - previous_quantity))
+        if allowed_quantity <= 0:
+            db.commit()
+            db.refresh(cart)
+            return get_web_cart(db, account)
+        combined_quantity = previous_quantity + allowed_quantity
+        combined_total = (previous_quantity * previous_unit_price) + (allowed_quantity * float(web_unit_price or 0.0))
+        existing.quantity = combined_quantity
+        existing.unit_price_snapshot = (combined_total / combined_quantity) if combined_quantity > 0 else float(web_unit_price or 0.0)
     else:
         existing = models.WebCartItem(
             tenant_id=cart.tenant_id,
@@ -11721,6 +12260,33 @@ def create_web_order_from_cart(
     total_amount = max(0.0, subtotal_base - discount_amount)
     currency = (cart.currency or "COP").strip().upper()
 
+    line_discount_shares: list[float] = [0.0 for _ in line_items_payload]
+    if discount_amount > 0 and subtotal_base > 0:
+        allocated_discount = 0.0
+        for index, line in enumerate(line_items_payload):
+            if index == len(line_items_payload) - 1:
+                share = max(0.0, discount_amount - allocated_discount)
+            else:
+                share = round((float(line["line_total"]) / subtotal_base) * discount_amount, 2)
+            share = min(max(0.0, share), float(line["line_total"]))
+            line_discount_shares[index] = share
+            allocated_discount += share
+        if allocated_discount > discount_amount and line_discount_shares:
+            line_discount_shares[-1] = max(0.0, line_discount_shares[-1] - (allocated_discount - discount_amount))
+
+    reusable_item_signature = build_web_order_item_signature(
+        [
+            {
+                **line,
+                "line_total": max(
+                    0.0,
+                    float(line["line_total"]) - float(line_discount_shares[index] if index < len(line_discount_shares) else 0.0),
+                ),
+            }
+            for index, line in enumerate(line_items_payload)
+        ]
+    )
+
     expire_stale_web_orders(db, tenant_id=account.tenant_id)
     reusable = find_reusable_pending_web_order(
         db,
@@ -11731,7 +12297,7 @@ def create_web_order_from_cart(
         subtotal=subtotal_base,
         discount_amount=discount_amount,
         total=total_amount,
-        item_signature=build_web_order_item_signature(line_items_payload),
+        item_signature=reusable_item_signature,
     )
     if reusable:
         if reusable.status == "payment_failed":
@@ -11801,7 +12367,9 @@ def create_web_order_from_cart(
     )
     db.add(order)
     db.flush()
-    for line in line_items_payload:
+    for index, line in enumerate(line_items_payload):
+        line_discount_value = float(line_discount_shares[index] if index < len(line_discount_shares) else 0.0)
+        line_total = max(0.0, float(line["line_total"]) - line_discount_value)
         db.add(
             models.WebOrderItem(
                 tenant_id=order.tenant_id,
@@ -11812,8 +12380,8 @@ def create_web_order_from_cart(
                 product_barcode_snapshot=line.get("product_barcode_snapshot"),
                 unit_price_snapshot=float(line["unit_price_snapshot"]),
                 quantity=float(line["quantity"]),
-                line_discount_value=float(line["line_discount_value"]),
-                line_total=float(line["line_total"]),
+                line_discount_value=line_discount_value,
+                line_total=line_total,
             )
         )
 
