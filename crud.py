@@ -1104,6 +1104,13 @@ def _normalize_web_brand_collage_images(value: Any) -> dict[str, dict[str, str]]
     return result
 
 
+def _normalize_web_home_sections_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"categories", "instruments", "both"}:
+        return normalized
+    return "categories"
+
+
 def get_public_web_personalization_bindings(
     db: Session,
     tenant_id: Optional[int] = None,
@@ -8740,6 +8747,9 @@ def get_pos_settings(
         settings.web_personalization_home_images or {}
     )
     settings.web_brand_collage_images = settings.web_brand_collage_images or {}
+    settings.web_home_sections_mode = _normalize_web_home_sections_mode(
+        getattr(settings, "web_home_sections_mode", None)
+    )
     normalized_permissions = permissions.ensure_permissions(settings.role_permissions)
     if settings.role_permissions != normalized_permissions:
         settings.role_permissions = normalized_permissions

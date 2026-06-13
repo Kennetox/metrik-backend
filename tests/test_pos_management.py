@@ -682,6 +682,103 @@ def _create_change_test_sale(
     return sale.id, sale_item_id, sale_product.id, new_product.id
 
 
+def _create_change_discounted_sale():
+    db = TestingSessionLocal()
+    sale_product = models.Product(
+        name="Producto cambio con descuento",
+        price=10000.0,
+        cost=5000.0,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    other_product = models.Product(
+        name="Producto extra cambio con descuento",
+        price=20000.0,
+        cost=10000.0,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    new_product = models.Product(
+        name="Nuevo producto cambio con descuento",
+        price=11000.0,
+        cost=5500.0,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add_all([sale_product, other_product, new_product])
+    db.commit()
+    db.refresh(sale_product)
+    db.refresh(other_product)
+    db.refresh(new_product)
+
+    sale_in = schemas.SaleCreate(
+        payment_method="cash",
+        total=29999.0,
+        paid_amount=29999.0,
+        change_amount=0.0,
+        cart_discount_value=1.0,
+        cart_discount_percent=0.0,
+        customer_name="Cliente prueba",
+        notes=None,
+        pos_name="POS 1",
+        vendor_name="Tester",
+        items=[
+            schemas.SaleItemCreate(
+                product_id=sale_product.id,
+                quantity=1,
+                unit_price=sale_product.price,
+                product_sku=sale_product.sku,
+                product_name=sale_product.name,
+                product_barcode=sale_product.barcode,
+                discount=0.0,
+            ),
+            schemas.SaleItemCreate(
+                product_id=other_product.id,
+                quantity=1,
+                unit_price=other_product.price,
+                product_sku=other_product.sku,
+                product_name=other_product.name,
+                product_barcode=other_product.barcode,
+                discount=0.0,
+            ),
+        ],
+        payments=[schemas.SalePaymentCreate(method="cash", amount=29999.0)],
+    )
+    sale = crud.create_sale(db, sale_in)
+    sale_item_id = (
+        db.query(models.SaleItem.id)
+        .filter(models.SaleItem.sale_id == sale.id)
+        .filter(models.SaleItem.product_id == sale_product.id)
+        .scalar()
+    )
+    db.close()
+    return sale.id, sale_item_id, sale_product.id, new_product.id
+
+
 def test_return_creates_inventory_entry(client: TestClient):
     headers = _auth_headers(client)
     sale_id, sale_item_id, sale_product_id, _ = _create_change_test_sale(
@@ -779,3 +876,32 @@ def test_change_creates_and_voids_inventory_movements(client: TestClient):
     assert len(all_movements) == 4
     assert sum(m.qty_delta for m in all_movements if m.product_id == sale_product_id) == 0
     assert sum(m.qty_delta for m in all_movements if m.product_id == new_product_id) == 0
+
+
+def test_change_accepts_discounted_ticket_with_integer_payment(client: TestClient):
+    headers = _auth_headers(client)
+    sale_id, sale_item_id, _, new_product_id = _create_change_discounted_sale()
+
+    resp = client.post(
+        "/pos/changes",
+        json={
+            "sale_id": sale_id,
+            "return_items": [
+                {"sale_item_id": sale_item_id, "quantity": 1, "reason": "cambio"},
+            ],
+            "new_items": [
+                {"product_id": new_product_id, "quantity": 1},
+            ],
+            "payments": [
+                {"method": "cash", "amount": 1000},
+            ],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["total_credit"] == 10000
+    assert data["total_new"] == 11000
+    assert data["extra_payment"] == 1000
+    assert data["refund_due"] == 0
+    assert data["payments"][0]["amount"] == 1000

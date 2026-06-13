@@ -827,6 +827,7 @@ class PosSettings(Base):
     web_personalization_bindings = Column(JSON, nullable=True)
     web_personalization_home_images = Column(JSON, nullable=True)
     web_brand_collage_images = Column(JSON, nullable=True)
+    web_home_sections_mode = Column(String(20), nullable=True, default="categories")
 
 
 class MonthlyReportDispatch(Base):
@@ -1082,6 +1083,83 @@ class WebCatalogHomeSlider(Base):
         onupdate=datetime.utcnow,
         nullable=False,
     )
+
+
+class WebCatalogCombo(Base):
+    __tablename__ = "web_combos"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="web_combos_tenant_slug_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    name = Column(String(180), nullable=False)
+    slug = Column(String(160), nullable=False, index=True)
+    short_description = Column(String(280), nullable=True)
+    long_description = Column(Text, nullable=True)
+    image_url = Column(String(512), nullable=True)
+    image_thumb_url = Column(String(512), nullable=True)
+    gallery_urls = Column(JSON, nullable=False, default=list)
+    video_url = Column(String(512), nullable=True)
+    badge_text = Column(String(80), nullable=True)
+    category_key = Column(String(64), nullable=True, index=True)
+    price = Column(Float, nullable=False, default=0)
+    compare_price = Column(Float, nullable=True)
+    stock_mode = Column(String(24), nullable=False, default="components")
+    published = Column(Boolean, nullable=False, default=False)
+    featured = Column(Boolean, nullable=False, default=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    visible_when_out_of_stock = Column(Boolean, nullable=False, default=True)
+    active = Column(Boolean, nullable=False, default=True)
+    warranty_text = Column(String(160), nullable=True)
+    technical_specs = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    items = relationship(
+        "WebCatalogComboItem",
+        back_populates="combo",
+        cascade="all, delete-orphan",
+        order_by="WebCatalogComboItem.sort_order",
+    )
+
+
+class WebCatalogComboItem(Base):
+    __tablename__ = "web_combo_items"
+    __table_args__ = (
+        UniqueConstraint("combo_id", "product_id", name="web_combo_items_combo_product_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    combo_id = Column(Integer, ForeignKey("web_combos.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    quantity = Column(Float, nullable=False, default=1)
+    required = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    product_name_snapshot = Column(String, nullable=False)
+    product_sku_snapshot = Column(String, nullable=True)
+    product_slug_snapshot = Column(String(160), nullable=True)
+    product_image_url_snapshot = Column(String(512), nullable=True)
+    product_image_thumb_url_snapshot = Column(String(512), nullable=True)
+    product_brand_snapshot = Column(String, nullable=True)
+    product_price_snapshot = Column(Float, nullable=False, default=0)
+    product_price_attributed = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    combo = relationship("WebCatalogCombo", back_populates="items")
+    product = relationship("Product")
 
 
 class WebOrder(Base):

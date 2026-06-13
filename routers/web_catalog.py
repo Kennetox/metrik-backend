@@ -38,6 +38,19 @@ def list_web_catalog_home_sliders(
     return schemas.WebCatalogHomeSliderList(items=items)
 
 
+@router.get("/home-sections", response_model=schemas.WebCatalogHomeSectionsConfig)
+def get_web_catalog_home_sections(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    return schemas.WebCatalogHomeSectionsConfig(
+        web_home_sections_mode=crud._normalize_web_home_sections_mode(
+            getattr(settings, "web_home_sections_mode", None)
+        )
+    )
+
+
 @router.get("/products", response_model=schemas.WebCatalogProductList)
 def list_web_catalog_products(
     q: str | None = Query(default=None),

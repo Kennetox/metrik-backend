@@ -1333,6 +1333,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _ensure_column_postgres(
                     connection,
+                    "pos_settings",
+                    "web_home_sections_mode",
+                    "VARCHAR(20) DEFAULT 'categories'",
+                )
+                _ensure_column_postgres(
+                    connection,
                     "pos_stations",
                     "bound_device_id",
                     "TEXT",
@@ -2326,6 +2332,12 @@ def run_schema_upgrades(engine: Engine) -> None:
                         "web_brand_collage_images",
                         "TEXT DEFAULT '{}'",
                     )
+                    _ensure_column(
+                        connection,
+                        "pos_settings",
+                        "web_home_sections_mode",
+                        "TEXT DEFAULT 'categories'",
+                    )
             if not _table_exists(connection, "pos_closures"):
                 connection.execute(
                     text(
@@ -2576,7 +2588,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                             logo_url,
                             web_personalization_bindings,
                             web_personalization_home_images,
-                            web_brand_collage_images
+                            web_brand_collage_images,
+                            web_home_sections_mode
                         )
                         SELECT 1,
                                'Mi Negocio',
@@ -2594,7 +2607,8 @@ def run_schema_upgrades(engine: Engine) -> None:
                                NULL,
                                '{}',
                                '{}',
-                               '{"main": {"image_url": "/brands/collage/hero-yamaha.webp", "href": "/catalogo?brand=Yamaha"}, "top_left": {"image_url": "/brands/collage/title-prodj.webp", "href": "/catalogo?brand=Pro%20DJ"}, "top_right": {"image_url": "/brands/collage/title-rm1.webp", "href": "/catalogo?brand=Ritmo%20Musical"}, "bottom": {"image_url": "/brands/collage/banner-spain.webp", "href": "/catalogo?brand=Spain"}}'
+                               '{"main": {"image_url": "/brands/collage/hero-yamaha.webp", "href": "/catalogo?brand=Yamaha"}, "top_left": {"image_url": "/brands/collage/title-prodj.webp", "href": "/catalogo?brand=Pro%20DJ"}, "top_right": {"image_url": "/brands/collage/title-rm1.webp", "href": "/catalogo?brand=Ritmo%20Musical"}, "bottom": {"image_url": "/brands/collage/banner-spain.webp", "href": "/catalogo?brand=Spain"}}',
+                               'categories'
                         WHERE NOT EXISTS (SELECT 1 FROM pos_settings WHERE id = 1)
                         """
                 )
