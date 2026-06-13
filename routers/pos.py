@@ -4,6 +4,7 @@ from typing import Any, List, Optional, Literal
 import base64
 import os
 import unicodedata
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from fastapi import (
@@ -656,6 +657,89 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
     return sale_schema.model_copy(update=updates)
 
 
+def _serialize_sale_response_with_adjustments(
+    db: Session,
+    sale: models.Sale,
+    *,
+    tenant_id: int | None,
+) -> tuple[schemas.SaleRead, float, float]:
+    sale_schema = _serialize_sale_response(sale)
+    if sale.id is None:
+        return sale_schema, 0.0, 0.0
+
+    latest_payment_adjustment, total_delta_by_sale = crud._collect_sale_adjustments(
+        db,
+        [sale.id],
+        tenant_id=tenant_id,
+    )
+    total_delta = float(total_delta_by_sale.get(sale.id, 0.0))
+    updates: dict[str, Any] = {}
+
+    if abs(total_delta) > 0.0001:
+        base_total = float(sale_schema.total or sale.paid_amount or 0.0)
+        updates["total"] = max(0.0, base_total + total_delta)
+
+    adjustment = latest_payment_adjustment.get(sale.id)
+    payment_delta = 0.0
+    if adjustment:
+        adjusted_payments = crud._parse_adjustment_payments(adjustment.payload)
+        if adjusted_payments:
+            adjusted_paid_amount = _sum_payments(adjusted_payments)
+            base_paid_amount = float(
+                sale.paid_amount
+                if sale.paid_amount is not None
+                else sum(float(payment.amount or 0.0) for payment in getattr(sale, "payments", []) or [])
+            )
+            payment_delta = adjusted_paid_amount - base_paid_amount
+            updates["paid_amount"] = adjusted_paid_amount
+            updates["payment_method"] = (
+                adjusted_payments[0][0] if adjusted_payments[0][0] else sale_schema.payment_method
+            )
+            updates["payments"] = [
+                schemas.SalePaymentRead(
+                    id=max(1, idx + 1),
+                    method=method or "unknown",
+                    amount=float(amount or 0.0),
+                )
+                for idx, (method, amount) in enumerate(adjusted_payments)
+            ]
+
+    if updates:
+        sale_schema = sale_schema.model_copy(update=updates)
+    sale_schema = sale_schema.model_copy(
+        update={
+            "adjustment_total_delta": total_delta,
+            "adjustment_payment_delta": payment_delta,
+        }
+    )
+    return sale_schema, total_delta, payment_delta
+
+
+def _sale_render_proxy(
+    db: Session,
+    sale: models.Sale,
+    *,
+    tenant_id: int | None,
+) -> SimpleNamespace:
+    sale_schema, total_delta, payment_delta = _serialize_sale_response_with_adjustments(
+        db,
+        sale,
+        tenant_id=tenant_id,
+    )
+    payload = sale_schema.model_dump()
+    proxy = SimpleNamespace(**payload)
+    proxy.items = [SimpleNamespace(**item) for item in payload.get("items", [])]
+    proxy.payments = [SimpleNamespace(**payment) for payment in payload.get("payments", [])]
+    proxy.returns = [SimpleNamespace(**ret) for ret in payload.get("returns", [])]
+    proxy.changes = [SimpleNamespace(**change) for change in payload.get("changes", [])]
+    proxy.refunded_payments = [
+        SimpleNamespace(**payment) for payment in payload.get("refunded_payments", [])
+    ]
+    proxy.adjustment_total_delta = total_delta
+    proxy.adjustment_payment_delta = payment_delta
+    return proxy
+
+
 def _serialize_sales_with_adjustments(
     db: Session,
     *,
@@ -685,10 +769,12 @@ def _serialize_sales_with_adjustments(
             updates["total"] = max(0.0, base_total + total_delta)
 
         adjustment = latest_payment_adjustment.get(row.id)
+        payment_delta = 0.0
         if adjustment:
             adjusted_payments = crud._parse_adjustment_payments(adjustment.payload)
             if adjusted_payments:
                 adjusted_paid_amount = _sum_payments(adjusted_payments)
+                payment_delta = adjusted_paid_amount - float(row.paid_amount or row.total or 0.0)
                 updates["paid_amount"] = adjusted_paid_amount
                 updates["payment_method"] = (
                     adjusted_payments[0][0] if adjusted_payments[0][0] else row.payment_method
@@ -701,6 +787,9 @@ def _serialize_sales_with_adjustments(
                     )
                     for idx, (method, amount) in enumerate(adjusted_payments)
                 ]
+        if abs(total_delta) > 0.0001 or abs(payment_delta) > 0.0001:
+            updates["adjustment_total_delta"] = total_delta
+            updates["adjustment_payment_delta"] = payment_delta
 
         if updates:
             merged_payload = row.model_dump()
@@ -1136,7 +1225,12 @@ def get_sale(
     sale = crud.get_sale(db, sale_id, tenant_id=tenant_id)
     if not sale:
         raise HTTPException(status_code=404, detail="Venta no encontrada")
-    return _serialize_sale_response(sale)
+    sale_schema, _, _ = _serialize_sale_response_with_adjustments(
+        db,
+        sale,
+        tenant_id=tenant_id,
+    )
+    return sale_schema
 
 
 @router.post(
@@ -1549,13 +1643,14 @@ def get_sale_document(
 
     settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     payment_labels = _payment_method_labels_by_slug(db, tenant_id)
+    sale_view = _sale_render_proxy(db, sale, tenant_id=tenant_id)
     mode = (
         ticket_renderer.INVOICE_MODE
         if document_type == "invoice"
         else ticket_renderer.TICKET_MODE
     )
     document_html = ticket_renderer.render_sale_ticket_html(
-        sale,
+        sale_view,
         settings=settings,
         mode=mode,
         payment_method_labels=payment_labels,
@@ -1600,6 +1695,7 @@ def view_sale_document(
 
     settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     payment_labels = _payment_method_labels_by_slug(db, tenant_id)
+    sale_view = _sale_render_proxy(db, sale, tenant_id=tenant_id)
     if document_type == "invoice":
         mode = ticket_renderer.INVOICE_MODE
     elif layout == "thermal":
@@ -1607,7 +1703,7 @@ def view_sale_document(
     else:
         mode = ticket_renderer.TICKET_MODE
     document_html = ticket_renderer.render_sale_ticket_html(
-        sale,
+        sale_view,
         settings=settings,
         mode=mode,
         payment_method_labels=payment_labels,

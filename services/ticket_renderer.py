@@ -776,6 +776,22 @@ def _cart_discount_meta(sale: models.Sale) -> tuple[str, str]:
     return "Desc. carrito", display
 
 
+def _adjustment_meta(sale: models.Sale) -> tuple[str, str]:
+    total_delta = float(getattr(sale, "adjustment_total_delta", 0.0) or 0.0)
+    payment_delta = float(getattr(sale, "adjustment_payment_delta", 0.0) or 0.0)
+    if abs(total_delta) < 0.01 and abs(payment_delta) < 0.01:
+        return "", ""
+
+    details: List[str] = []
+    if abs(total_delta) >= 0.01:
+        sign = "+" if total_delta > 0 else "-"
+        details.append(f"Total {sign} {_format_money(abs(total_delta))}")
+    if abs(payment_delta) >= 0.01:
+        sign = "+" if payment_delta > 0 else "-"
+        details.append(f"Pagos {sign} {_format_money(abs(payment_delta))}")
+    return "VENTA AJUSTADA", " · ".join(details)
+
+
 def _note_lines(notes: Optional[str]) -> List[str]:
     clean_notes = (notes or "").strip()
     if not clean_notes:
@@ -1120,6 +1136,7 @@ def _render_modern_ticket_html(
     padded_sale = numeric_sale.zfill(6) if numeric_sale else "000000"
     barcode_svg = _generate_code128_svg(padded_sale, height=90.0, module_width=2.0, include_text=True, font_size=14.0, quiet_zone_modules=10)
     total_amount = _effective_total(sale)
+    adjustment_badge, adjustment_note = _adjustment_meta(sale)
 
     parts: List[str] = [
         "<!DOCTYPE html>",
@@ -1166,6 +1183,16 @@ def _render_modern_ticket_html(
         f'<span class="tag">Documento: {_escape_html(document_number)}</span>'
     )
     parts.append("</div>")
+    if adjustment_badge:
+        parts.append(
+            '<div style="margin-top:14px;padding:12px 14px;border-radius:16px;'
+            'background:#ffffff;border:1px solid #111827;color:#111827;'
+            'font-weight:700;display:flex;flex-direction:column;gap:4px;">'
+            f'<div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;">'
+            f'{_escape_html(adjustment_badge)}</div>'
+            f'<div style="font-size:13px;font-weight:600;">{_escape_html(adjustment_note)}</div>'
+            "</div>"
+        )
 
     parts.append('<div class="meta-grid">')
     parts.append('<div class="meta-card">')
@@ -1259,6 +1286,7 @@ def _render_thermal_ticket_html(
     if cart_discount_label == "Desc. carrito":
         cart_discount_label = "Descuento carrito"
     total_amount = _effective_total(sale)
+    adjustment_badge, adjustment_note = _adjustment_meta(sale)
     footer_html = _footer_lines(company["footer"])
     change_amount = float(sale.change_amount or 0.0)
     change_row = ""
@@ -1400,6 +1428,21 @@ def _render_thermal_ticket_html(
             "</div>",
             "<div class=\"separator\"></div>",
             customer_block,
+        ]
+    )
+    if adjustment_badge:
+        html_parts.extend(
+            [
+                '<div class="section" style="margin-top:2px;">',
+                '<div style="padding:10px 12px;border-radius:14px;background:#ffffff;border:1px solid #111827;color:#111827;font-weight:700;">',
+                f'<div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;">{_escape_html(adjustment_badge)}</div>',
+                f'<div style="font-size:12px;margin-top:4px;">{_escape_html(adjustment_note)}</div>',
+                "</div>",
+                "</div>",
+            ]
+        )
+    html_parts.extend(
+        [
             "<div class=\"section\">",
             f"<div class=\"line\"><span>No. Recibo</span><span>{_escape_html(document_number)}</span></div>",
             f"<div class=\"line\"><span>Fecha</span><span>{_escape_html(formatted_date)}</span></div>",
@@ -1480,6 +1523,7 @@ def _render_classic_invoice_html(
     )
     paid_amount = float(sale.paid_amount or 0.0)
     total_amount = _effective_total(sale)
+    adjustment_badge, adjustment_note = _adjustment_meta(sale)
     change_amount = float(sale.change_amount or 0.0)
     payment_status = "Pagado" if (total_amount - paid_amount) <= 0.01 else "Pendiente"
 
@@ -1618,6 +1662,13 @@ def _render_classic_invoice_html(
             f"<div>No. venta: {_escape_html(str(sale_number))}</div>",
             f"<div>Documento: {_escape_html(document_number)}</div>",
             f"<div>Estado del pago: {payment_status}</div>",
+            (
+                f"<div style='margin-top:8px;padding:8px 10px;border-radius:12px;background:#ffffff;border:1px solid #111827;color:#111827;'>"
+                f"<div style='font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;'>"
+                f"{_escape_html(adjustment_badge)}</div>"
+                f"<div style='margin-top:3px;font-size:11px;font-weight:600;'>{_escape_html(adjustment_note)}</div>"
+                "</div>"
+            ) if adjustment_badge else "",
             "</div>",
             "</div>",
             '<table class="items-table">',

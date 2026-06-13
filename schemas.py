@@ -1648,6 +1648,9 @@ class WebBrandCollageImages(BaseModel):
     bottom: WebBrandCollageTile = Field(default_factory=WebBrandCollageTile)
 
 
+WebHomeSectionsMode = Literal["categories", "instruments", "both"]
+
+
 class PosSettingsBase(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     theme_mode: Literal["dark", "midnight", "light"] = "light"
@@ -1697,6 +1700,7 @@ class PosSettingsBase(BaseModel):
     web_brand_collage_images: WebBrandCollageImages = Field(
         default_factory=WebBrandCollageImages
     )
+    web_home_sections_mode: WebHomeSectionsMode = "categories"
 
     @field_validator(
         "tax_id",
@@ -1723,6 +1727,10 @@ class PosSettingsRead(PosSettingsBase):
     class Config:
         from_attributes = True
         populate_by_name = True
+
+
+class WebCatalogHomeSectionsConfig(BaseModel):
+    web_home_sections_mode: WebHomeSectionsMode = "categories"
 
 
 class PosUserBase(BaseModel):
@@ -3235,6 +3243,8 @@ class SaleRead(SaleBase):
     initial_payment_method: Optional[str] = None
     initial_payment_amount: Optional[float] = None
     balance: Optional[float] = None
+    adjustment_total_delta: float = 0.0
+    adjustment_payment_delta: float = 0.0
     has_cash_payment: bool = False
     source_system: str = "metrik"
     is_imported: bool = False
