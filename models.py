@@ -1105,6 +1105,7 @@ class WebCatalogCombo(Base):
     category_key = Column(String(64), nullable=True, index=True)
     price = Column(Float, nullable=False, default=0)
     compare_price = Column(Float, nullable=True)
+    price_mode = Column(String(24), nullable=False, default="auto")
     stock_mode = Column(String(24), nullable=False, default="components")
     published = Column(Boolean, nullable=False, default=False)
     featured = Column(Boolean, nullable=False, default=False)

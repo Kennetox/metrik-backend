@@ -278,6 +278,7 @@ class ProductDuplicateCandidatesResponse(BaseModel):
 
 WebCatalogStockStatus = Literal["in_stock", "low_stock", "out_of_stock", "service", "consultar"]
 WebCatalogComboStockMode = Literal["manual", "components"]
+WebCatalogComboPriceMode = Literal["auto", "fixed", "discount"]
 
 
 class ComercioWebComboItemBase(BaseModel):
@@ -331,6 +332,7 @@ class ComercioWebComboBase(BaseModel):
     category_key: Optional[SlugStr] = None
     price: float = Field(gt=0)
     compare_price: Optional[float] = None
+    price_mode: WebCatalogComboPriceMode = "auto"
     stock_mode: WebCatalogComboStockMode = "components"
     published: bool = False
     featured: bool = False
@@ -376,6 +378,7 @@ class ComercioWebComboUpdate(BaseModel):
     category_key: Optional[SlugStr] = None
     price: Optional[float] = Field(default=None, gt=0)
     compare_price: Optional[float] = None
+    price_mode: Optional[WebCatalogComboPriceMode] = None
     stock_mode: Optional[WebCatalogComboStockMode] = None
     published: Optional[bool] = None
     featured: Optional[bool] = None

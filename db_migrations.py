@@ -384,6 +384,26 @@ def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
             _ensure_column_postgres(connection, combo_table, "video_url", "VARCHAR(512)")
             _ensure_column_postgres(connection, combo_table, "warranty_text", "VARCHAR(160)")
             _ensure_column_postgres(connection, combo_table, "technical_specs", "JSON NOT NULL DEFAULT '[]'")
+            _ensure_column_postgres(connection, combo_table, "price_mode", "VARCHAR(24) NOT NULL DEFAULT 'auto'")
+            connection.execute(
+                text(
+                    """
+                    UPDATE web_combos
+                    SET price_mode = 'discount'
+                    WHERE compare_price IS NOT NULL
+                      AND compare_price > price
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE web_combos
+                    SET price_mode = 'auto'
+                    WHERE price_mode IS NULL OR btrim(price_mode) = ''
+                    """
+                )
+            )
         return
 
     if _table_exists(connection, items_table):
@@ -392,6 +412,26 @@ def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
         _ensure_column(connection, combo_table, "video_url", "TEXT")
         _ensure_column(connection, combo_table, "warranty_text", "TEXT")
         _ensure_column(connection, combo_table, "technical_specs", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, combo_table, "price_mode", "TEXT NOT NULL DEFAULT 'auto'")
+        connection.execute(
+            text(
+                """
+                UPDATE web_combos
+                SET price_mode = 'discount'
+                WHERE compare_price IS NOT NULL
+                  AND compare_price > price
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE web_combos
+                SET price_mode = 'auto'
+                WHERE price_mode IS NULL OR trim(price_mode) = ''
+                """
+            )
+        )
 
 
 def _table_exists_postgres(connection, table: str) -> bool:

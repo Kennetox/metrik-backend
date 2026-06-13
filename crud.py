@@ -3902,6 +3902,13 @@ def _web_combo_slug_candidates(value: Optional[str]) -> list[str]:
     return candidates
 
 
+def _normalize_web_combo_price_mode(value: Optional[str]) -> str:
+    normalized = (value or "auto").strip().lower()
+    if normalized in {"auto", "fixed", "discount"}:
+        return normalized
+    return "auto"
+
+
 def _serialize_web_combo_item(
     row: models.WebCatalogComboItem,
     *,
@@ -3982,6 +3989,7 @@ def _serialize_web_combo(
         category_key=_normalize_web_catalog_category_key(row.category_key) or None,
         price=float(row.price or 0),
         compare_price=float(row.compare_price) if row.compare_price is not None else None,
+        price_mode=_normalize_web_combo_price_mode(row.price_mode),
         stock_mode=(row.stock_mode or "components"),
         published=bool(row.published),
         featured=bool(row.featured),
@@ -4163,6 +4171,15 @@ def create_comercio_web_combo(
     computed_price = sum(
         float(item.quantity or 0) * float(item.product_price_attributed or 0) for item in combo_items
     )
+    price_mode = _normalize_web_combo_price_mode(getattr(payload, "price_mode", None))
+    price = computed_price if price_mode == "auto" else float(payload.price or 0)
+    if price <= 0:
+        raise ValueError("Debes indicar un precio válido para el combo")
+    compare_price = (
+        float(payload.compare_price)
+        if payload.compare_price is not None and float(payload.compare_price) > price
+        else None
+    )
     now = datetime.utcnow()
     row = models.WebCatalogCombo(
         tenant_id=tenant_id,
@@ -4176,8 +4193,9 @@ def create_comercio_web_combo(
         video_url=payload.video_url or None,
         badge_text=payload.badge_text or None,
         category_key=_normalize_web_catalog_category_key(payload.category_key) or None,
-        price=computed_price,
-        compare_price=float(payload.compare_price) if payload.compare_price is not None else None,
+        price=price,
+        compare_price=compare_price,
+        price_mode=price_mode,
         stock_mode=payload.stock_mode or "components",
         published=bool(payload.published),
         featured=bool(payload.featured),
@@ -4247,11 +4265,15 @@ def update_comercio_web_combo(
         row.badge_text = data.get("badge_text") or None
     if "category_key" in data:
         row.category_key = _normalize_web_catalog_category_key(data.get("category_key")) or None
+    if "price_mode" in data:
+        row.price_mode = _normalize_web_combo_price_mode(data.get("price_mode"))
+    next_price_mode = _normalize_web_combo_price_mode(data.get("price_mode", row.price_mode))
     if "price" in data and data.get("price") is not None:
         row.price = float(data.get("price") or 0)
     if "compare_price" in data:
+        compare_value = data.get("compare_price")
         row.compare_price = (
-            float(data.get("compare_price")) if data.get("compare_price") is not None else None
+            float(compare_value) if compare_value is not None and float(compare_value) > 0 else None
         )
     if "stock_mode" in data and data.get("stock_mode") is not None:
         row.stock_mode = data.get("stock_mode")
@@ -4278,10 +4300,17 @@ def update_comercio_web_combo(
         row.items = []
         db.flush()
         row.items = new_items
-    row.price = sum(
+    computed_price = sum(
         float(item.quantity or 0) * float(item.product_price_attributed or 0)
         for item in getattr(row, "items", []) or []
     )
+    if next_price_mode == "auto":
+        row.price = computed_price
+    elif row.price <= 0:
+        raise ValueError("Debes indicar un precio válido para el combo")
+    if row.compare_price is not None and row.compare_price <= row.price:
+        row.compare_price = None
+    row.price_mode = next_price_mode
     row.updated_at = datetime.utcnow()
     db.add(row)
     db.commit()
