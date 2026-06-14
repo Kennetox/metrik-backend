@@ -3322,7 +3322,7 @@ def _seed_comercio_web_home_sliders(
 
 def _normalize_slider_link_type(value: Optional[str]) -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"sin_link", "catalogo", "categoria", "subcategoria", "personalizacion", "contacto", "url_interna"}:
+    if normalized in {"sin_link", "catalogo", "combos", "categoria", "subcategoria", "personalizacion", "contacto", "url_interna"}:
         return normalized
     return "catalogo"
 
@@ -3343,6 +3343,8 @@ def _validate_home_slider_link(
     if link_type == "sin_link":
         return None
     if link_type == "catalogo":
+        return None
+    if link_type == "combos":
         return None
     if link_type == "categoria":
         if not clean_value:

@@ -553,6 +553,7 @@ class ComercioWebCatalogCategoryRead(ComercioWebCatalogCategoryBase):
 ComercioWebHomeSliderLinkType = Literal[
     "sin_link",
     "catalogo",
+    "combos",
     "categoria",
     "subcategoria",
     "personalizacion",
