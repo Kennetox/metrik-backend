@@ -3448,13 +3448,19 @@ def update_comercio_web_home_slider(
         raise ValueError("Slider no encontrado")
 
     data = payload.model_dump(exclude_unset=True)
-    next_link_type = _normalize_slider_link_type(data.get("link_type", row.link_type))
-    next_link_value = _validate_home_slider_link(
-        db,
-        tenant_id=tenant_id,
-        link_type=next_link_type,
-        link_value=data.get("link_value", row.link_value),
-    )
+    link_type_changed = "link_type" in data
+    link_value_changed = "link_value" in data
+    if link_type_changed or link_value_changed:
+        next_link_type = _normalize_slider_link_type(data.get("link_type", row.link_type))
+        next_link_value = _validate_home_slider_link(
+            db,
+            tenant_id=tenant_id,
+            link_type=next_link_type,
+            link_value=data.get("link_value", row.link_value),
+        )
+    else:
+        next_link_type = _normalize_slider_link_type(row.link_type)
+        next_link_value = row.link_value
     next_image_url = _normalize_slider_text(data.get("image_url", row.image_url))
     next_mobile_image_url = _normalize_slider_text(data.get("mobile_image_url", row.mobile_image_url))
     next_enabled = bool(data.get("enabled", row.enabled))
