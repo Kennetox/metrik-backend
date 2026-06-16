@@ -4247,6 +4247,31 @@ def get_comercio_web_combo(
     return _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
 
 
+def get_comercio_web_combo_by_slug(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    slug: str,
+) -> Optional[schemas.ComercioWebComboRead]:
+    normalized_slug = (slug or "").strip()
+    if not normalized_slug:
+        return None
+    query = db.query(models.WebCatalogCombo).options(
+        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+    )
+    if tenant_id is not None:
+        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+    row = query.filter(models.WebCatalogCombo.slug == normalized_slug).first()
+    if not row:
+        return None
+    stock_by_product_id = _get_web_combo_stock_snapshot(
+        db,
+        tenant_id,
+        [int(item.product_id) for item in (getattr(row, "items", []) or [])],
+    )
+    return _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
+
+
 def create_comercio_web_combo(
     db: Session,
     *,

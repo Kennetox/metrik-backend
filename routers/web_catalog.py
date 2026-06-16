@@ -111,6 +111,18 @@ def list_web_catalog_combos(
     )
 
 
+@router.get("/combos/{slug}", response_model=schemas.ComercioWebComboRead)
+def get_web_catalog_combo(
+    slug: str,
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    combo = crud.get_comercio_web_combo_by_slug(db, tenant_id=tenant_id, slug=slug)
+    if not combo:
+        raise HTTPException(status_code=404, detail="Combo no encontrado")
+    return combo
+
+
 @router.get("/products/{slug}", response_model=schemas.WebCatalogProductDetail)
 def get_web_catalog_product(
     slug: str,
