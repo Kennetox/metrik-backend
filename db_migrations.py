@@ -385,6 +385,7 @@ def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
             _ensure_column_postgres(connection, combo_table, "warranty_text", "VARCHAR(160)")
             _ensure_column_postgres(connection, combo_table, "technical_specs", "JSON NOT NULL DEFAULT '[]'")
             _ensure_column_postgres(connection, combo_table, "price_mode", "VARCHAR(24) NOT NULL DEFAULT 'auto'")
+            _ensure_column_postgres(connection, combo_table, "badge_color", "VARCHAR(16)")
             connection.execute(
                 text(
                     """
@@ -413,6 +414,7 @@ def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
         _ensure_column(connection, combo_table, "warranty_text", "TEXT")
         _ensure_column(connection, combo_table, "technical_specs", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, combo_table, "price_mode", "TEXT NOT NULL DEFAULT 'auto'")
+        _ensure_column(connection, combo_table, "badge_color", "TEXT")
         connection.execute(
             text(
                 """
