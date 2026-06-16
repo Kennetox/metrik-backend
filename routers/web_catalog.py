@@ -43,10 +43,10 @@ def get_web_catalog_home_sections(
     db: Session = Depends(get_db),
 ):
     tenant_id = crud.resolve_public_catalog_tenant_id(db)
-    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
     return schemas.WebCatalogHomeSectionsConfig(
-        web_home_sections_mode=crud._normalize_web_home_sections_mode(
-            getattr(settings, "web_home_sections_mode", None)
+        web_home_sections_mode=crud.get_public_web_home_sections_mode(
+            db,
+            tenant_id=tenant_id,
         )
     )
 

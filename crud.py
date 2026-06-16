@@ -89,6 +89,7 @@ def _web_cart_max_units_per_item() -> int:
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProductCard], datetime]] = {}
 _PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
+_PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
 
 
 def _web_best_sellers_cache_ttl_seconds() -> int:
@@ -103,6 +104,47 @@ def _web_best_sellers_rotation_bucket(now: datetime) -> int:
     window_seconds = _web_best_sellers_rotation_window_hours() * 60 * 60
     reference = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     return int(reference.timestamp() // window_seconds)
+
+
+def _public_web_home_cache_ttl_seconds() -> int:
+    return _env_int(
+        "PUBLIC_WEB_HOME_CACHE_TTL_SECONDS",
+        30,
+        min_value=5,
+        max_value=15 * 60,
+    )
+
+
+def _public_web_home_cache_key(namespace: str, tenant_id: Optional[int]) -> str:
+    return f"{namespace}:{tenant_id if tenant_id is not None else 'none'}"
+
+
+def _get_public_web_home_cache(namespace: str, tenant_id: Optional[int]) -> Any:
+    cache_key = _public_web_home_cache_key(namespace, tenant_id)
+    cache_entry = _PUBLIC_WEB_HOME_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_HOME_CACHE.pop(cache_key, None)
+        return None
+    return value
+
+
+def _set_public_web_home_cache(namespace: str, tenant_id: Optional[int], value: Any) -> None:
+    cache_key = _public_web_home_cache_key(namespace, tenant_id)
+    ttl_seconds = _public_web_home_cache_ttl_seconds()
+    _PUBLIC_WEB_HOME_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def clear_public_web_home_cache(tenant_id: Optional[int] = None) -> None:
+    if tenant_id is None:
+        _PUBLIC_WEB_HOME_CACHE.clear()
+        return
+    suffix = f":{tenant_id}"
+    for key in list(_PUBLIC_WEB_HOME_CACHE.keys()):
+        if key.endswith(suffix):
+            _PUBLIC_WEB_HOME_CACHE.pop(key, None)
 
 
 def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
@@ -1131,8 +1173,10 @@ def get_public_web_personalization_bindings(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
-    return _normalize_web_personalization_bindings(settings.web_personalization_bindings)
+    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    return _normalize_web_personalization_bindings(
+        getattr(settings, "web_personalization_bindings", None) if settings else None
+    )
 
 
 def get_public_web_personalization_home_images(
@@ -1140,8 +1184,10 @@ def get_public_web_personalization_home_images(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
-    return _normalize_web_personalization_home_images(settings.web_personalization_home_images)
+    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    return _normalize_web_personalization_home_images(
+        getattr(settings, "web_personalization_home_images", None) if settings else None
+    )
 
 
 def get_public_web_brand_collage_images(
@@ -1149,8 +1195,27 @@ def get_public_web_brand_collage_images(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_pos_settings(db, tenant_id=effective_tenant_id)
-    return _normalize_web_brand_collage_images(settings.web_brand_collage_images)
+    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    return _normalize_web_brand_collage_images(
+        getattr(settings, "web_brand_collage_images", None) if settings else None
+    )
+
+
+def get_public_web_home_sections_mode(
+    db: Session,
+    tenant_id: Optional[int] = None,
+) -> str:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    cached_mode = _get_public_web_home_cache("sections", effective_tenant_id)
+    if isinstance(cached_mode, str):
+        return cached_mode
+
+    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    normalized_mode = _normalize_web_home_sections_mode(
+        getattr(settings, "web_home_sections_mode", None) if settings else None
+    )
+    _set_public_web_home_cache("sections", effective_tenant_id, normalized_mode)
+    return normalized_mode
 
 
 def build_platform_tenant_read(
@@ -3511,6 +3576,7 @@ def update_comercio_web_home_slider(
     db.add(row)
     db.commit()
     db.refresh(row)
+    clear_public_web_home_cache(tenant_id=tenant_id)
 
     return schemas.ComercioWebHomeSliderRead(
         id=row.id,
@@ -3535,28 +3601,37 @@ def list_public_web_home_sliders(
     *,
     tenant_id: Optional[int] = None,
 ) -> list[schemas.WebCatalogHomeSlider]:
-    items = list_comercio_web_home_sliders(db, tenant_id=tenant_id)
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    cached_items = _get_public_web_home_cache("sliders", effective_tenant_id)
+    if isinstance(cached_items, list):
+        return list(cached_items)
+
+    rows = (
+        db.query(models.WebCatalogHomeSlider)
+        .filter(models.WebCatalogHomeSlider.tenant_id == effective_tenant_id)
+        .order_by(models.WebCatalogHomeSlider.slot.asc(), models.WebCatalogHomeSlider.id.asc())
+        .all()
+    )
     filtered = [
-        item
-        for item in items
-        if item.enabled and bool((item.image_url or "").strip())
+        schemas.WebCatalogHomeSlider(
+            slot=int(row.slot or 0),
+            image_url=row.image_url,
+            mobile_image_url=row.mobile_image_url,
+            alt_text=row.alt_text,
+            cta_label=row.cta_label,
+            cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
+            cta_y_percent=float(row.cta_y_percent if row.cta_y_percent is not None else 80),
+            link_type=_normalize_slider_link_type(row.link_type),
+            link_value=row.link_value,
+            sort_order=int(row.sort_order or 0),
+        )
+        for row in rows
+        if bool(row.enabled) and bool((row.image_url or "").strip())
     ]
     filtered.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
-    return [
-        schemas.WebCatalogHomeSlider(
-            slot=item.slot,
-            image_url=item.image_url,
-            mobile_image_url=item.mobile_image_url,
-            alt_text=item.alt_text,
-            cta_label=item.cta_label,
-            cta_x_percent=item.cta_x_percent,
-            cta_y_percent=item.cta_y_percent,
-            link_type=item.link_type,
-            link_value=item.link_value,
-            sort_order=item.sort_order,
-        )
-        for item in filtered[:5]
-    ]
+    result = filtered[:5]
+    _set_public_web_home_cache("sliders", effective_tenant_id, result)
+    return list(result)
 
 
 def list_comercio_web_catalog_categories(
@@ -4014,6 +4089,7 @@ def _serialize_web_combo(
         gallery_urls=clean_gallery_urls[:8],
         video_url=(row.video_url or None),
         badge_text=row.badge_text,
+        badge_color=row.badge_color,
         category_key=_normalize_web_catalog_category_key(row.category_key) or None,
         price=float(row.price or 0),
         compare_price=float(row.compare_price) if row.compare_price is not None else None,
@@ -4220,6 +4296,7 @@ def create_comercio_web_combo(
         gallery_urls=payload.gallery_urls or [],
         video_url=payload.video_url or None,
         badge_text=payload.badge_text or None,
+        badge_color=payload.badge_color or None,
         category_key=_normalize_web_catalog_category_key(payload.category_key) or None,
         price=price,
         compare_price=compare_price,
@@ -4291,6 +4368,8 @@ def update_comercio_web_combo(
         row.video_url = (data.get("video_url") or None)
     if "badge_text" in data:
         row.badge_text = data.get("badge_text") or None
+    if "badge_color" in data:
+        row.badge_color = data.get("badge_color") or None
     if "category_key" in data:
         row.category_key = _normalize_web_catalog_category_key(data.get("category_key")) or None
     if "price_mode" in data:
@@ -8828,6 +8907,7 @@ def update_pos_settings(
         settings.notifications = notifications
     db.commit()
     db.refresh(settings)
+    clear_public_web_home_cache(tenant_id=settings.tenant_id)
     return settings
 
 
