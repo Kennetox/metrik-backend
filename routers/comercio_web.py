@@ -12,7 +12,6 @@ import models
 import schemas
 from database import get_db
 from dependencies import require_module_access, require_permission
-from services.payments.sync import refresh_backoffice_order_payment_statuses
 
 
 router = APIRouter(
@@ -47,17 +46,6 @@ def list_comercio_web_orders(
         payment_status=payment_status,
         search=search,
     )
-    # Evita refresco masivo por cada poll del frontend: solo sincroniza un subset
-    # de órdenes aún pendientes para mantener estado razonablemente fresco.
-    refresh_candidates = [
-        order
-        for order in orders
-        if order.sale_id is None and order.payment_status in {"pending", "failed"}
-    ][:12]
-    if refresh_candidates:
-        refreshed = refresh_backoffice_order_payment_statuses(db, refresh_candidates)
-        refreshed_by_id = {order.id: order for order in refreshed if order}
-        orders = [refreshed_by_id.get(order.id, order) for order in orders]
     return [crud._serialize_web_order(order) for order in orders]
 
 
