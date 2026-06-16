@@ -186,7 +186,7 @@ async def _monthly_report_scheduler_loop():
 
 
 def _payment_reconciliation_enabled() -> bool:
-    raw = os.getenv("WEB_PAYMENT_RECONCILIATION_ENABLED", "true").strip().lower()
+    raw = os.getenv("WEB_PAYMENT_RECONCILIATION_ENABLED", "false").strip().lower()
     if raw in {"0", "false", "off", "no"}:
         return False
     if os.getenv("PYTEST_CURRENT_TEST"):

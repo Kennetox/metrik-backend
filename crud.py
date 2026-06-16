@@ -11,6 +11,7 @@ import re
 import secrets
 import string
 import unicodedata
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -614,6 +615,57 @@ def _seed_default_web_catalog_categories(
     if pending_rows:
         db.add_all(pending_rows)
         db.commit()
+
+
+def _build_default_web_catalog_category_rows(
+    tenant_id: Optional[int],
+    product_counts: Optional[dict[str, int]] = None,
+) -> list[SimpleNamespace]:
+    counts = product_counts or {}
+    now = datetime.utcnow()
+    rows: list[SimpleNamespace] = []
+    for item in DEFAULT_WEB_CATALOG_CATEGORIES:
+        key = _normalize_web_catalog_category_key(item["key"])
+        rows.append(
+            SimpleNamespace(
+                id=f"default:{key}",
+                tenant_id=tenant_id,
+                key=key,
+                parent_key=None,
+                name=item["name"],
+                sort_order=int(item["sort_order"]),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                image_url=None,
+                tile_color=None,
+                home_featured=False,
+                home_featured_order=0,
+                product_count=int(counts.get(key, 0)),
+            )
+        )
+    for key, count in counts.items():
+        if not key or any(_normalize_web_catalog_category_key(item["key"]) == key for item in DEFAULT_WEB_CATALOG_CATEGORIES):
+            continue
+        rows.append(
+            SimpleNamespace(
+                id=f"default:{key}",
+                tenant_id=tenant_id,
+                key=key,
+                parent_key=None,
+                name=_humanize_web_catalog_category_key(key),
+                sort_order=1000 + len(rows),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                image_url=None,
+                tile_color=None,
+                home_featured=False,
+                home_featured_order=0,
+                product_count=int(count or 0),
+            )
+        )
+    return rows
 
 
 def _get_tenant_web_catalog_categories(
@@ -5978,8 +6030,29 @@ def get_web_catalog_categories(
         db,
         tenant_id=effective_tenant_id,
         include_inactive=False,
-        ensure_seeded=True,
+        ensure_seeded=False,
     )
+    if not categories:
+        fallback_rows = _build_default_web_catalog_category_rows(
+            effective_tenant_id,
+            product_counts=direct_counts,
+        )
+        return [
+            schemas.WebCatalogCategory(
+                id=str(item.id),
+                path=str(item.key),
+                name=str(item.name),
+                parent_path=None,
+                level=1,
+                has_children=False,
+                image_url=None,
+                tile_color=None,
+                home_featured=False,
+                home_featured_order=0,
+                product_count=int(getattr(item, "product_count", 0) or 0),
+            )
+            for item in fallback_rows
+        ]
     category_map = {
         _normalize_web_catalog_category_key(item.key): item
         for item in categories
@@ -6040,8 +6113,14 @@ def get_web_catalog_products(
         db,
         tenant_id=effective_tenant_id,
         include_inactive=True,
-        ensure_seeded=True,
+        ensure_seeded=False,
     )
+    if not category_map:
+        category_map = {
+            item.key: item
+            for item in _build_default_web_catalog_category_rows(effective_tenant_id)
+            if getattr(item, "key", None)
+        }
     children_map = _build_web_catalog_category_children_map(list(category_map.values()))
     inactive_category_keys = {
         _normalize_web_catalog_category_key(item.key)
