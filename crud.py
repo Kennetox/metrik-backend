@@ -17,7 +17,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, and_, case, cast, false, func, not_, or_, text, true
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 from sqlalchemy.orm import Session, selectinload, joinedload
 
@@ -91,6 +91,7 @@ CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProductCard], datetime]] = {}
 _PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
 _PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
+_PUBLIC_WEB_CATEGORIES_CACHE: Dict[str, tuple[datetime, list[models.WebCatalogCategory]]] = {}
 
 
 def _web_best_sellers_cache_ttl_seconds() -> int:
@@ -136,6 +137,46 @@ def _set_public_web_home_cache(namespace: str, tenant_id: Optional[int], value: 
     cache_key = _public_web_home_cache_key(namespace, tenant_id)
     ttl_seconds = _public_web_home_cache_ttl_seconds()
     _PUBLIC_WEB_HOME_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def _public_web_categories_cache_ttl_seconds() -> int:
+    return _env_int(
+        "PUBLIC_WEB_CATEGORIES_CACHE_TTL_SECONDS",
+        60,
+        min_value=10,
+        max_value=15 * 60,
+    )
+
+
+def _get_public_web_categories_cache(tenant_id: Optional[int]) -> Optional[list[models.WebCatalogCategory]]:
+    cache_key = _public_web_home_cache_key("categories", tenant_id)
+    cache_entry = _PUBLIC_WEB_CATEGORIES_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_CATEGORIES_CACHE.pop(cache_key, None)
+        return None
+    return list(value)
+
+
+def _set_public_web_categories_cache(
+    tenant_id: Optional[int],
+    value: list[models.WebCatalogCategory],
+) -> None:
+    cache_key = _public_web_home_cache_key("categories", tenant_id)
+    ttl_seconds = _public_web_categories_cache_ttl_seconds()
+    _PUBLIC_WEB_CATEGORIES_CACHE[cache_key] = (
+        datetime.utcnow() + timedelta(seconds=ttl_seconds),
+        list(value),
+    )
+
+
+def _build_public_default_category_map(
+    product_counts: Optional[dict[str, int]] = None,
+) -> dict[str, SimpleNamespace]:
+    rows = _build_default_web_catalog_category_rows(None, product_counts=product_counts)
+    return {row.key: row for row in rows if getattr(row, "key", None)}
 
 
 def clear_public_web_home_cache(tenant_id: Optional[int] = None) -> None:
@@ -1225,7 +1266,14 @@ def get_public_web_personalization_bindings(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    try:
+        settings = (
+            get_tenant_company_settings(db, effective_tenant_id)
+            if effective_tenant_id is not None
+            else None
+        )
+    except SQLAlchemyError:
+        return {}
     return _normalize_web_personalization_bindings(
         getattr(settings, "web_personalization_bindings", None) if settings else None
     )
@@ -1236,7 +1284,14 @@ def get_public_web_personalization_home_images(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    try:
+        settings = (
+            get_tenant_company_settings(db, effective_tenant_id)
+            if effective_tenant_id is not None
+            else None
+        )
+    except SQLAlchemyError:
+        return {}
     return _normalize_web_personalization_home_images(
         getattr(settings, "web_personalization_home_images", None) if settings else None
     )
@@ -1247,7 +1302,14 @@ def get_public_web_brand_collage_images(
     tenant_id: Optional[int] = None,
 ) -> dict[str, dict[str, str]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    try:
+        settings = (
+            get_tenant_company_settings(db, effective_tenant_id)
+            if effective_tenant_id is not None
+            else None
+        )
+    except SQLAlchemyError:
+        return {}
     return _normalize_web_brand_collage_images(
         getattr(settings, "web_brand_collage_images", None) if settings else None
     )
@@ -1262,7 +1324,16 @@ def get_public_web_home_sections_mode(
     if isinstance(cached_mode, str):
         return cached_mode
 
-    settings = get_tenant_company_settings(db, effective_tenant_id) if effective_tenant_id is not None else None
+    try:
+        settings = (
+            get_tenant_company_settings(db, effective_tenant_id)
+            if effective_tenant_id is not None
+            else None
+        )
+    except SQLAlchemyError:
+        normalized_mode = "categories"
+        _set_public_web_home_cache("sections", effective_tenant_id, normalized_mode)
+        return normalized_mode
     normalized_mode = _normalize_web_home_sections_mode(
         getattr(settings, "web_home_sections_mode", None) if settings else None
     )
@@ -6007,36 +6078,21 @@ def get_web_catalog_categories(
     tenant_id: Optional[int] = None,
 ) -> List[schemas.WebCatalogCategory]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    query = (
-        db.query(
-            models.Product.web_category_key,
-            func.count(models.Product.id).label("product_count"),
-        )
-        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
-    )
-    if effective_tenant_id is not None:
-        query = query.filter(models.Product.tenant_id == effective_tenant_id)
-    rows = (
-        query.group_by(models.Product.web_category_key)
-        .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
-        .all()
-    )
-    direct_counts = {
-        _normalize_web_catalog_category_key(row.web_category_key): int(row.product_count or 0)
-        for row in rows
-        if row.web_category_key
-    }
-    categories = _get_tenant_web_catalog_categories(
-        db,
-        tenant_id=effective_tenant_id,
-        include_inactive=False,
-        ensure_seeded=False,
-    )
+    cached_categories = _get_public_web_categories_cache(effective_tenant_id)
+    if cached_categories is not None:
+        categories = cached_categories
+    else:
+        try:
+            categories = _get_tenant_web_catalog_categories(
+                db,
+                tenant_id=effective_tenant_id,
+                include_inactive=False,
+                ensure_seeded=False,
+            )
+            _set_public_web_categories_cache(effective_tenant_id, categories)
+        except SQLAlchemyError:
+            categories = []
     if not categories:
-        fallback_rows = _build_default_web_catalog_category_rows(
-            effective_tenant_id,
-            product_counts=direct_counts,
-        )
         return [
             schemas.WebCatalogCategory(
                 id=str(item.id),
@@ -6051,8 +6107,30 @@ def get_web_catalog_categories(
                 home_featured_order=0,
                 product_count=int(getattr(item, "product_count", 0) or 0),
             )
-            for item in fallback_rows
+            for item in _build_default_web_catalog_category_rows(effective_tenant_id)
         ]
+    query = (
+        db.query(
+            models.Product.web_category_key,
+            func.count(models.Product.id).label("product_count"),
+        )
+        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+    )
+    if effective_tenant_id is not None:
+        query = query.filter(models.Product.tenant_id == effective_tenant_id)
+    try:
+        rows = (
+            query.group_by(models.Product.web_category_key)
+            .order_by(func.count(models.Product.id).desc(), models.Product.web_category_key.asc())
+            .all()
+        )
+    except SQLAlchemyError:
+        rows = []
+    direct_counts = {
+        _normalize_web_catalog_category_key(row.web_category_key): int(row.product_count or 0)
+        for row in rows
+        if row.web_category_key
+    }
     category_map = {
         _normalize_web_catalog_category_key(item.key): item
         for item in categories
@@ -6109,18 +6187,28 @@ def get_web_catalog_products(
     page_size: int = 24,
 ) -> schemas.WebCatalogProductList:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    category_map = _get_tenant_web_catalog_category_map(
-        db,
-        tenant_id=effective_tenant_id,
-        include_inactive=True,
-        ensure_seeded=False,
-    )
-    if not category_map:
-        category_map = {
-            item.key: item
-            for item in _build_default_web_catalog_category_rows(effective_tenant_id)
-            if getattr(item, "key", None)
-        }
+    category_map = _build_public_default_category_map()
+    try:
+        cached_categories = _get_public_web_categories_cache(effective_tenant_id)
+        if cached_categories is not None:
+            category_map = {
+                _normalize_web_catalog_category_key(item.key): item
+                for item in cached_categories
+                if _normalize_web_catalog_category_key(item.key)
+            }
+        else:
+            category_map = _get_tenant_web_catalog_category_map(
+                db,
+                tenant_id=effective_tenant_id,
+                include_inactive=True,
+                ensure_seeded=False,
+            )
+            if not category_map:
+                category_map = _build_public_default_category_map()
+            else:
+                _set_public_web_categories_cache(effective_tenant_id, list(category_map.values()))
+    except SQLAlchemyError:
+        category_map = _build_public_default_category_map()
     children_map = _build_web_catalog_category_children_map(list(category_map.values()))
     inactive_category_keys = {
         _normalize_web_catalog_category_key(item.key)
