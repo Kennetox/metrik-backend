@@ -329,6 +329,11 @@ class ComercioWebComboBase(BaseModel):
     gallery_urls: List[str] = Field(default_factory=list)
     video_url: Optional[str] = None
     badge_text: Optional[str] = None
+    badge_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
     category_key: Optional[SlugStr] = None
     price: float = Field(gt=0)
     compare_price: Optional[float] = None
@@ -375,6 +380,11 @@ class ComercioWebComboUpdate(BaseModel):
     gallery_urls: Optional[List[str]] = None
     video_url: Optional[str] = None
     badge_text: Optional[str] = None
+    badge_color: Optional[str] = Field(
+        default=None,
+        pattern=r"^#([0-9a-fA-F]{6})$",
+        description="Hex color like #112233",
+    )
     category_key: Optional[SlugStr] = None
     price: Optional[float] = Field(default=None, gt=0)
     compare_price: Optional[float] = None

@@ -1102,6 +1102,7 @@ class WebCatalogCombo(Base):
     gallery_urls = Column(JSON, nullable=False, default=list)
     video_url = Column(String(512), nullable=True)
     badge_text = Column(String(80), nullable=True)
+    badge_color = Column(String(16), nullable=True)
     category_key = Column(String(64), nullable=True, index=True)
     price = Column(Float, nullable=False, default=0)
     compare_price = Column(Float, nullable=True)
