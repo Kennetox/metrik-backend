@@ -88,6 +88,7 @@ def _web_cart_max_units_per_item() -> int:
 
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProductCard], datetime]] = {}
+_PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
 
 
 def _web_best_sellers_cache_ttl_seconds() -> int:
@@ -718,6 +719,18 @@ def get_tenant_by_slug(db: Session, slug: str) -> Optional[models.Tenant]:
     )
 
 
+def _cache_public_catalog_tenant_id(tenant_id: Optional[int]) -> Optional[int]:
+    global _PUBLIC_CATALOG_TENANT_ID
+    if tenant_id is not None:
+        _PUBLIC_CATALOG_TENANT_ID = int(tenant_id)
+    return tenant_id
+
+
+def clear_public_catalog_tenant_cache() -> None:
+    global _PUBLIC_CATALOG_TENANT_ID
+    _PUBLIC_CATALOG_TENANT_ID = None
+
+
 def get_platform_user_by_email(db: Session, email: str) -> Optional[models.PlatformUser]:
     return (
         db.query(models.PlatformUser)
@@ -770,8 +783,10 @@ def ensure_platform_user(
 
 
 def get_default_tenant_id(db: Session) -> Optional[int]:
+    if _PUBLIC_CATALOG_TENANT_ID is not None:
+        return _PUBLIC_CATALOG_TENANT_ID
     tenant = get_tenant_by_slug(db, "kensar")
-    return tenant.id if tenant else None
+    return _cache_public_catalog_tenant_id(tenant.id if tenant else None)
 
 
 def resolve_user_tenant_id(db: Session, user: Optional[models.PosUser]) -> Optional[int]:
@@ -1253,6 +1268,7 @@ def create_tenant_with_admin(
     db.commit()
     db.refresh(tenant)
     db.refresh(admin_user)
+    clear_public_catalog_tenant_cache()
     return tenant, admin_user
 
 
@@ -1313,6 +1329,7 @@ def update_tenant(
 
     db.commit()
     db.refresh(tenant)
+    clear_public_catalog_tenant_cache()
     return tenant
 
 
@@ -1379,6 +1396,7 @@ def create_demo_tenant_with_admin(
     db.commit()
     db.refresh(tenant)
     db.refresh(admin_user)
+    clear_public_catalog_tenant_cache()
     return tenant, admin_user
 
 
@@ -1395,6 +1413,7 @@ def extend_tenant_trial(
     tenant.is_active = True
     db.commit()
     db.refresh(tenant)
+    clear_public_catalog_tenant_cache()
     return tenant
 
 
@@ -1404,6 +1423,7 @@ def convert_tenant_to_active(db: Session, tenant: models.Tenant) -> models.Tenan
     tenant.converted_at = datetime.utcnow()
     db.commit()
     db.refresh(tenant)
+    clear_public_catalog_tenant_cache()
     return tenant
 
 
