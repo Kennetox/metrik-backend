@@ -57,6 +57,26 @@ load_dotenv()
 
 # Kill switch del modulo de horarios.
 ENABLE_SCHEDULE_MODULE = True
+_READYZ_CACHE: dict[str, tuple[datetime, int, dict[str, object]]] = {}
+
+
+def _get_readyz_cache() -> tuple[int, dict[str, object]] | None:
+    cache_entry = _READYZ_CACHE.get("readyz")
+    if not cache_entry:
+        return None
+    expires_at, status_code, payload = cache_entry
+    if expires_at <= datetime.utcnow():
+        _READYZ_CACHE.pop("readyz", None)
+        return None
+    return status_code, payload
+
+
+def _set_readyz_cache(status_code: int, payload: dict[str, object], ttl_seconds: int) -> None:
+    _READYZ_CACHE["readyz"] = (
+        datetime.utcnow() + timedelta(seconds=ttl_seconds),
+        status_code,
+        payload,
+    )
 
 
 @app.get("/health")
@@ -86,39 +106,46 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
+    cached = _get_readyz_cache()
+    if cached is not None:
+        status_code, payload = cached
+        if status_code == 200:
+            return payload
+        return JSONResponse(status_code=status_code, content=payload)
+
     if _maintenance_enabled():
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "maintenance",
-                "service": "kensar-backend",
-                "ready": False,
-                "maintenance": True,
-            },
-        )
+        payload = {
+            "status": "maintenance",
+            "service": "kensar-backend",
+            "ready": False,
+            "maintenance": True,
+        }
+        _set_readyz_cache(503, payload, ttl_seconds=5)
+        return JSONResponse(status_code=503, content=payload)
 
     db = SessionLocal()
     try:
         db.execute(text("SELECT 1"))
     except Exception:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "degraded",
-                "service": "kensar-backend",
-                "ready": False,
-                "maintenance": False,
-            },
-        )
+        payload = {
+            "status": "degraded",
+            "service": "kensar-backend",
+            "ready": False,
+            "maintenance": False,
+        }
+        _set_readyz_cache(503, payload, ttl_seconds=5)
+        return JSONResponse(status_code=503, content=payload)
     finally:
         db.close()
 
-    return {
+    payload = {
         "status": "ok",
         "service": "kensar-backend",
         "ready": True,
         "maintenance": False,
     }
+    _set_readyz_cache(200, payload, ttl_seconds=10)
+    return payload
 
 
 cors_origins = [
