@@ -92,6 +92,8 @@ _WEB_BEST_SELLERS_CACHE: Dict[str, tuple[datetime, List[schemas.WebCatalogProduc
 _PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
 _PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
 _PUBLIC_WEB_CATEGORIES_CACHE: Dict[str, tuple[datetime, list[models.WebCatalogCategory]]] = {}
+_PUBLIC_WEB_PRODUCTS_CACHE: Dict[str, tuple[datetime, schemas.WebCatalogProductList]] = {}
+_PUBLIC_WEB_STALE_CACHE: Dict[str, Any] = {}
 
 
 def _web_best_sellers_cache_ttl_seconds() -> int:
@@ -137,6 +139,11 @@ def _set_public_web_home_cache(namespace: str, tenant_id: Optional[int], value: 
     cache_key = _public_web_home_cache_key(namespace, tenant_id)
     ttl_seconds = _public_web_home_cache_ttl_seconds()
     _PUBLIC_WEB_HOME_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+    _PUBLIC_WEB_STALE_CACHE[cache_key] = value
+
+
+def _get_public_web_stale_cache(cache_key: str) -> Any:
+    return _PUBLIC_WEB_STALE_CACHE.get(cache_key)
 
 
 def _public_web_categories_cache_ttl_seconds() -> int:
@@ -182,11 +189,70 @@ def _build_public_default_category_map(
 def clear_public_web_home_cache(tenant_id: Optional[int] = None) -> None:
     if tenant_id is None:
         _PUBLIC_WEB_HOME_CACHE.clear()
+        for key in list(_PUBLIC_WEB_STALE_CACHE.keys()):
+            _PUBLIC_WEB_STALE_CACHE.pop(key, None)
         return
     suffix = f":{tenant_id}"
     for key in list(_PUBLIC_WEB_HOME_CACHE.keys()):
         if key.endswith(suffix):
             _PUBLIC_WEB_HOME_CACHE.pop(key, None)
+    for key in list(_PUBLIC_WEB_STALE_CACHE.keys()):
+        if key.endswith(suffix):
+            _PUBLIC_WEB_STALE_CACHE.pop(key, None)
+
+
+def _public_web_products_cache_key(
+    tenant_id: Optional[int],
+    q: Optional[str],
+    category: Optional[str],
+    brands: Optional[List[str]],
+    featured: Optional[bool],
+    sort: str,
+    min_price: Optional[float],
+    max_price: Optional[float],
+    page: int,
+    page_size: int,
+) -> str:
+    normalized_brands = tuple(
+        sorted(
+            {
+                item.strip().lower()
+                for item in (brands or [])
+                if isinstance(item, str) and item.strip()
+            }
+        )
+    )
+    return "|".join(
+        [
+            f"tenant={tenant_id if tenant_id is not None else 'none'}",
+            f"q={(q or '').strip().lower()}",
+            f"category={(category or '').strip().lower()}",
+            f"brands={','.join(normalized_brands)}",
+            f"featured={featured if featured is not None else 'any'}",
+            f"sort={sort}",
+            f"min={'' if min_price is None else float(min_price)}",
+            f"max={'' if max_price is None else float(max_price)}",
+            f"page={int(page)}",
+            f"size={int(page_size)}",
+        ]
+    )
+
+
+def _get_public_web_products_cache(cache_key: str) -> Optional[schemas.WebCatalogProductList]:
+    cache_entry = _PUBLIC_WEB_PRODUCTS_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_PRODUCTS_CACHE.pop(cache_key, None)
+        return None
+    return value
+
+
+def _set_public_web_products_cache(cache_key: str, value: schemas.WebCatalogProductList) -> None:
+    ttl_seconds = _public_web_home_cache_ttl_seconds()
+    _PUBLIC_WEB_PRODUCTS_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+    _PUBLIC_WEB_STALE_CACHE[cache_key] = value
 
 
 def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
@@ -3728,33 +3794,39 @@ def list_public_web_home_sliders(
     cached_items = _get_public_web_home_cache("sliders", effective_tenant_id)
     if isinstance(cached_items, list):
         return list(cached_items)
-
-    rows = (
-        db.query(models.WebCatalogHomeSlider)
-        .filter(models.WebCatalogHomeSlider.tenant_id == effective_tenant_id)
-        .order_by(models.WebCatalogHomeSlider.slot.asc(), models.WebCatalogHomeSlider.id.asc())
-        .all()
-    )
-    filtered = [
-        schemas.WebCatalogHomeSlider(
-            slot=int(row.slot or 0),
-            image_url=row.image_url,
-            mobile_image_url=row.mobile_image_url,
-            alt_text=row.alt_text,
-            cta_label=row.cta_label,
-            cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
-            cta_y_percent=float(row.cta_y_percent if row.cta_y_percent is not None else 80),
-            link_type=_normalize_slider_link_type(row.link_type),
-            link_value=row.link_value,
-            sort_order=int(row.sort_order or 0),
+    cache_key = _public_web_home_cache_key("sliders", effective_tenant_id)
+    try:
+        rows = (
+            db.query(models.WebCatalogHomeSlider)
+            .filter(models.WebCatalogHomeSlider.tenant_id == effective_tenant_id)
+            .order_by(models.WebCatalogHomeSlider.slot.asc(), models.WebCatalogHomeSlider.id.asc())
+            .all()
         )
-        for row in rows
-        if bool(row.enabled) and bool((row.image_url or "").strip())
-    ]
-    filtered.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
-    result = filtered[:5]
-    _set_public_web_home_cache("sliders", effective_tenant_id, result)
-    return list(result)
+        filtered = [
+            schemas.WebCatalogHomeSlider(
+                slot=int(row.slot or 0),
+                image_url=row.image_url,
+                mobile_image_url=row.mobile_image_url,
+                alt_text=row.alt_text,
+                cta_label=row.cta_label,
+                cta_x_percent=float(row.cta_x_percent if row.cta_x_percent is not None else 50),
+                cta_y_percent=float(row.cta_y_percent if row.cta_y_percent is not None else 80),
+                link_type=_normalize_slider_link_type(row.link_type),
+                link_value=row.link_value,
+                sort_order=int(row.sort_order or 0),
+            )
+            for row in rows
+            if bool(row.enabled) and bool((row.image_url or "").strip())
+        ]
+        filtered.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
+        result = filtered[:5]
+        _set_public_web_home_cache("sliders", effective_tenant_id, result)
+        return list(result)
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_items = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_items, list):
+            return list(stale_items)
+        return []
 
 
 def list_comercio_web_catalog_categories(
@@ -6040,37 +6112,49 @@ def get_web_catalog_version(
     tenant_id: Optional[int] = None,
 ) -> schemas.WebCatalogVersion:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    products_query = db.query(models.Product).filter(
-        models.Product.active.is_(True),
-        models.Product.web_published.is_(True),
-    )
-    groups_query = (
-        db.query(models.ProductGroup)
-        .join(models.Product, models.Product.group_name == models.ProductGroup.path)
-        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
-    )
-    if effective_tenant_id is not None:
-        products_query = products_query.filter(models.Product.tenant_id == effective_tenant_id)
-        groups_query = groups_query.filter(
-            models.ProductGroup.tenant_id == effective_tenant_id,
-            models.Product.tenant_id == effective_tenant_id,
+    cache_key = _public_web_home_cache_key("version", effective_tenant_id)
+    cached_version = _get_public_web_home_cache("version", effective_tenant_id)
+    if isinstance(cached_version, schemas.WebCatalogVersion):
+        return cached_version
+    try:
+        products_query = db.query(models.Product).filter(
+            models.Product.active.is_(True),
+            models.Product.web_published.is_(True),
         )
+        groups_query = (
+            db.query(models.ProductGroup)
+            .join(models.Product, models.Product.group_name == models.ProductGroup.path)
+            .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
+        )
+        if effective_tenant_id is not None:
+            products_query = products_query.filter(models.Product.tenant_id == effective_tenant_id)
+            groups_query = groups_query.filter(
+                models.ProductGroup.tenant_id == effective_tenant_id,
+                models.Product.tenant_id == effective_tenant_id,
+            )
 
-    products_updated_at = products_query.with_entities(func.max(models.Product.updated_at)).scalar()
-    groups_updated_at = groups_query.with_entities(func.max(models.ProductGroup.updated_at)).scalar()
-    updated_at = max(
-        [ts for ts in [products_updated_at, groups_updated_at] if ts is not None],
-        default=None,
-    )
-    products_count = int(products_query.with_entities(func.count(models.Product.id)).scalar() or 0)
-    groups_count = int(
-        groups_query.with_entities(func.count(func.distinct(models.ProductGroup.id))).scalar() or 0
-    )
-    return schemas.WebCatalogVersion(
-        updated_at=updated_at,
-        products_count=products_count,
-        groups_count=groups_count,
-    )
+        products_updated_at = products_query.with_entities(func.max(models.Product.updated_at)).scalar()
+        groups_updated_at = groups_query.with_entities(func.max(models.ProductGroup.updated_at)).scalar()
+        updated_at = max(
+            [ts for ts in [products_updated_at, groups_updated_at] if ts is not None],
+            default=None,
+        )
+        products_count = int(products_query.with_entities(func.count(models.Product.id)).scalar() or 0)
+        groups_count = int(
+            groups_query.with_entities(func.count(func.distinct(models.ProductGroup.id))).scalar() or 0
+        )
+        version = schemas.WebCatalogVersion(
+            updated_at=updated_at,
+            products_count=products_count,
+            groups_count=groups_count,
+        )
+        _set_public_web_home_cache("version", effective_tenant_id, version)
+        return version
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_version = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_version, schemas.WebCatalogVersion):
+            return stale_version
+        return schemas.WebCatalogVersion(updated_at=None, products_count=0, groups_count=0)
 
 
 def get_web_catalog_categories(
@@ -6187,182 +6271,216 @@ def get_web_catalog_products(
     page_size: int = 24,
 ) -> schemas.WebCatalogProductList:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    category_map = _build_public_default_category_map()
+    cache_key = _public_web_products_cache_key(
+        effective_tenant_id,
+        q,
+        category,
+        brands,
+        featured,
+        sort,
+        min_price,
+        max_price,
+        page,
+        page_size,
+    )
+    cached_result = _get_public_web_products_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
     try:
-        cached_categories = _get_public_web_categories_cache(effective_tenant_id)
-        if cached_categories is not None:
-            category_map = {
-                _normalize_web_catalog_category_key(item.key): item
-                for item in cached_categories
-                if _normalize_web_catalog_category_key(item.key)
-            }
-        else:
-            category_map = _get_tenant_web_catalog_category_map(
-                db,
-                tenant_id=effective_tenant_id,
-                include_inactive=True,
-                ensure_seeded=False,
-            )
-            if not category_map:
-                category_map = _build_public_default_category_map()
-            else:
-                _set_public_web_categories_cache(effective_tenant_id, list(category_map.values()))
-    except SQLAlchemyError:
         category_map = _build_public_default_category_map()
-    children_map = _build_web_catalog_category_children_map(list(category_map.values()))
-    inactive_category_keys = {
-        _normalize_web_catalog_category_key(item.key)
-        for item in category_map.values()
-        if not bool(item.is_active)
-    }
-    stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
+        try:
+            cached_categories = _get_public_web_categories_cache(effective_tenant_id)
+            if cached_categories is not None:
+                category_map = {
+                    _normalize_web_catalog_category_key(item.key): item
+                    for item in cached_categories
+                    if _normalize_web_catalog_category_key(item.key)
+                }
+            else:
+                category_map = _get_tenant_web_catalog_category_map(
+                    db,
+                    tenant_id=effective_tenant_id,
+                    include_inactive=True,
+                    ensure_seeded=False,
+                )
+                if not category_map:
+                    category_map = _build_public_default_category_map()
+                else:
+                    _set_public_web_categories_cache(effective_tenant_id, list(category_map.values()))
+        except SQLAlchemyError:
+            category_map = _build_public_default_category_map()
+        children_map = _build_web_catalog_category_children_map(list(category_map.values()))
+        inactive_category_keys = {
+            _normalize_web_catalog_category_key(item.key)
+            for item in category_map.values()
+            if not bool(item.is_active)
+        }
+        stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
 
-    query = (
-        db.query(
-            models.Product,
-            func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
-            models.ProductGroup.display_name.label("category_name"),
+        query = (
+            db.query(
+                models.Product,
+                func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+                models.ProductGroup.display_name.label("category_name"),
+            )
+            .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+            .outerjoin(
+                models.ProductGroup,
+                and_(
+                    models.ProductGroup.path == models.Product.group_name,
+                    models.ProductGroup.tenant_id == models.Product.tenant_id,
+                ),
+            )
+            .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
         )
-        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
-        .outerjoin(
-            models.ProductGroup,
-            and_(
-                models.ProductGroup.path == models.Product.group_name,
-                models.ProductGroup.tenant_id == models.Product.tenant_id,
+        if effective_tenant_id is not None:
+            query = query.filter(models.Product.tenant_id == effective_tenant_id)
+        if inactive_category_keys:
+            query = query.filter(
+                or_(
+                    models.Product.web_category_key.is_(None),
+                    ~models.Product.web_category_key.in_(inactive_category_keys),
+                )
+            )
+
+        term = (q or "").strip()
+        if term:
+            like = f"%{term}%"
+            query = query.filter(
+                or_(
+                    models.Product.name.ilike(like),
+                    models.Product.sku.ilike(like),
+                    models.Product.barcode.ilike(like),
+                    models.Product.brand.ilike(like),
+                    models.Product.group_name.ilike(like),
+                    models.Product.web_category_key.ilike(like),
+                    models.Product.web_short_description.ilike(like),
+                )
+            )
+        if category:
+            normalized_category = _normalize_web_catalog_category_key(category)
+            if normalized_category:
+                filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
+                if filter_keys:
+                    query = query.filter(models.Product.web_category_key.in_(filter_keys))
+        normalized_brands = [
+            item.strip().lower() for item in (brands or []) if isinstance(item, str) and item.strip()
+        ]
+        if normalized_brands:
+            query = query.filter(
+                models.Product.brand.isnot(None),
+                func.lower(func.trim(models.Product.brand)).in_(normalized_brands),
+            )
+        if featured is not None:
+            query = query.filter(models.Product.web_featured.is_(featured))
+
+        qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
+        web_sale_price_col = _build_web_sale_price_sql_expression()
+        if min_price is not None:
+            query = query.filter(
+                func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+                web_sale_price_col >= float(min_price),
+            )
+        if max_price is not None:
+            query = query.filter(
+                func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
+                web_sale_price_col <= float(max_price),
+            )
+        query = query.filter(
+            or_(
+                models.Product.web_visible_when_out_of_stock.is_(True),
+                models.Product.web_visible_when_out_of_stock.is_(None),
+                models.Product.service.is_(True),
+                qty_col > 0,
+            )
+        )
+        if sort == "price_asc":
+            query = query.order_by(web_sale_price_col.asc(), models.Product.name.asc())
+        elif sort == "price_desc":
+            query = query.order_by(web_sale_price_col.desc(), models.Product.name.asc())
+        elif sort == "name_desc":
+            query = query.order_by(models.Product.name.desc())
+        elif sort == "name_asc":
+            query = query.order_by(models.Product.name.asc())
+        else:
+            query = query.order_by(
+                models.Product.web_featured.desc(),
+                models.Product.web_sort_order.asc(),
+                case((qty_col > 0, 0), else_=1),
+                models.Product.name.asc(),
+            )
+
+        total = query.count()
+        skip = max(page - 1, 0) * page_size
+        rows = query.offset(skip).limit(page_size).all()
+        items: List[schemas.WebCatalogProductCard] = []
+        for product, qty_on_hand, category_name in rows:
+            category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
+            stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+                continue
+            price_mode = (product.web_price_mode or "visible").strip().lower()
+            sale_price = resolve_web_product_sale_price(product)
+            price = sale_price if price_mode == "visible" else None
+            items.append(
+                schemas.WebCatalogProductCard(
+                    id=product.id,
+                    sku=product.sku,
+                    slug=resolve_product_web_slug(product),
+                    name=resolve_product_web_name(product),
+                    badge_text=(product.web_badge_text or None),
+                    short_description=product.web_short_description,
+                    long_description=product.web_long_description,
+                    brand=product.brand,
+                    group_name=category_name or product.group_name,
+                    category_path=product.web_category_key,
+                    category_name=(category_def.name if category_def else None),
+                    image_url=product.image_url,
+                    image_thumb_url=product.image_thumb_url,
+                    gallery=_build_product_gallery_urls(product),
+                    video_url=product.web_video_url,
+                    price_mode=price_mode,
+                    price=price,
+                    compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
+                    stock_status=stock_status,
+                    featured=bool(product.web_featured),
+                )
+            )
+
+        filters = _build_web_catalog_filters(
+            db,
+            tenant_id=effective_tenant_id,
+            q=q,
+            category=category,
+            featured=featured,
+            min_price=min_price,
+            max_price=max_price,
+        )
+        result = schemas.WebCatalogProductList(
+            items=items,
+            total=int(total),
+            page=page,
+            page_size=page_size,
+            filters=filters,
+        )
+        _set_public_web_products_cache(cache_key, result)
+        return result
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_result = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_result, schemas.WebCatalogProductList):
+            return stale_result
+        return schemas.WebCatalogProductList(
+            items=[],
+            total=0,
+            page=page,
+            page_size=page_size,
+            filters=schemas.WebCatalogFilters(
+                categories=[],
+                brands=[],
+                price_min=0.0,
+                price_max=0.0,
             ),
         )
-        .filter(models.Product.active.is_(True), models.Product.web_published.is_(True))
-    )
-    if effective_tenant_id is not None:
-        query = query.filter(models.Product.tenant_id == effective_tenant_id)
-    if inactive_category_keys:
-        query = query.filter(
-            or_(
-                models.Product.web_category_key.is_(None),
-                ~models.Product.web_category_key.in_(inactive_category_keys),
-            )
-        )
-
-    term = (q or "").strip()
-    if term:
-        like = f"%{term}%"
-        query = query.filter(
-            or_(
-                models.Product.name.ilike(like),
-                models.Product.sku.ilike(like),
-                models.Product.barcode.ilike(like),
-                models.Product.brand.ilike(like),
-                models.Product.group_name.ilike(like),
-                models.Product.web_category_key.ilike(like),
-                models.Product.web_short_description.ilike(like),
-            )
-        )
-    if category:
-        normalized_category = _normalize_web_catalog_category_key(category)
-        if normalized_category:
-            filter_keys = _get_web_catalog_descendant_keys(normalized_category, children_map)
-            if filter_keys:
-                query = query.filter(models.Product.web_category_key.in_(filter_keys))
-    normalized_brands = [
-        item.strip().lower() for item in (brands or []) if isinstance(item, str) and item.strip()
-    ]
-    if normalized_brands:
-        query = query.filter(
-            models.Product.brand.isnot(None),
-            func.lower(func.trim(models.Product.brand)).in_(normalized_brands),
-        )
-    if featured is not None:
-        query = query.filter(models.Product.web_featured.is_(featured))
-
-    qty_col = func.coalesce(stock_subquery.c.qty_on_hand, 0)
-    web_sale_price_col = _build_web_sale_price_sql_expression()
-    if min_price is not None:
-        query = query.filter(
-            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
-            web_sale_price_col >= float(min_price),
-        )
-    if max_price is not None:
-        query = query.filter(
-            func.lower(func.coalesce(models.Product.web_price_mode, "visible")) == "visible",
-            web_sale_price_col <= float(max_price),
-        )
-    query = query.filter(
-        or_(
-            models.Product.web_visible_when_out_of_stock.is_(True),
-            models.Product.web_visible_when_out_of_stock.is_(None),
-            models.Product.service.is_(True),
-            qty_col > 0,
-        )
-    )
-    if sort == "price_asc":
-        query = query.order_by(web_sale_price_col.asc(), models.Product.name.asc())
-    elif sort == "price_desc":
-        query = query.order_by(web_sale_price_col.desc(), models.Product.name.asc())
-    elif sort == "name_desc":
-        query = query.order_by(models.Product.name.desc())
-    elif sort == "name_asc":
-        query = query.order_by(models.Product.name.asc())
-    else:
-        query = query.order_by(
-            models.Product.web_featured.desc(),
-            models.Product.web_sort_order.asc(),
-            case((qty_col > 0, 0), else_=1),
-            models.Product.name.asc(),
-        )
-
-    total = query.count()
-    skip = max(page - 1, 0) * page_size
-    rows = query.offset(skip).limit(page_size).all()
-    items: List[schemas.WebCatalogProductCard] = []
-    for product, qty_on_hand, category_name in rows:
-        category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
-        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
-            continue
-        price_mode = (product.web_price_mode or "visible").strip().lower()
-        sale_price = resolve_web_product_sale_price(product)
-        price = sale_price if price_mode == "visible" else None
-        items.append(
-            schemas.WebCatalogProductCard(
-                id=product.id,
-                sku=product.sku,
-                slug=resolve_product_web_slug(product),
-                name=resolve_product_web_name(product),
-                badge_text=(product.web_badge_text or None),
-                short_description=product.web_short_description,
-                long_description=product.web_long_description,
-                brand=product.brand,
-                group_name=category_name or product.group_name,
-                category_path=product.web_category_key,
-                category_name=(category_def.name if category_def else None),
-                image_url=product.image_url,
-                image_thumb_url=product.image_thumb_url,
-                gallery=_build_product_gallery_urls(product),
-                video_url=product.web_video_url,
-                price_mode=price_mode,
-                price=price,
-                compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
-                stock_status=stock_status,
-                featured=bool(product.web_featured),
-            )
-        )
-
-    filters = _build_web_catalog_filters(
-        db,
-        tenant_id=effective_tenant_id,
-        q=q,
-        category=category,
-        featured=featured,
-        min_price=min_price,
-        max_price=max_price,
-    )
-    return schemas.WebCatalogProductList(
-        items=items,
-        total=int(total),
-        page=page,
-        page_size=page_size,
-        filters=filters,
-    )
 
 
 def get_web_catalog_best_sellers(
