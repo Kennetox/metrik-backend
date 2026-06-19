@@ -46,8 +46,8 @@ def test_create_and_pay_separated_order(client: TestClient):
     product = _create_product()
     payload = {
         "payment_method": "cash",
-        "total": 10000.0,
-        "paid_amount": 10000.0,
+        "total": 584000.0,
+        "paid_amount": 400000.0,
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
@@ -59,7 +59,7 @@ def test_create_and_pay_separated_order(client: TestClient):
             {
                 "product_id": product.id,
                 "quantity": 1,
-                "unit_price": 50000.0,
+                "unit_price": 584000.0,
                 "product_sku": product.sku,
                 "product_name": product.name,
                 "product_barcode": product.barcode,
@@ -67,7 +67,8 @@ def test_create_and_pay_separated_order(client: TestClient):
             }
         ],
         "payments": [
-            {"method": "cash", "amount": 10000.0},
+            {"method": "cash", "amount": 150000.0},
+            {"method": "transfer", "amount": 250000.0, "reference": "BANCOL-001"},
         ],
         "due_date": datetime.utcnow().isoformat(),
     }
@@ -75,9 +76,14 @@ def test_create_and_pay_separated_order(client: TestClient):
     resp = client.post("/separated-orders", json=payload, headers=headers)
     assert resp.status_code == 201
     data = resp.json()
-    assert data["total_amount"] == 50000.0
-    assert data["initial_payment"] == 10000.0
-    assert data["balance"] == 40000.0
+    assert data["total_amount"] == 584000.0
+    assert data["initial_payment"] == 400000.0
+    assert data["balance"] == 184000.0
+    assert len(data["initial_payments"]) == 2
+    assert data["initial_payments"][0]["method"] == "cash"
+    assert data["initial_payments"][0]["amount"] == 150000.0
+    assert data["initial_payments"][1]["method"] == "transfer"
+    assert data["initial_payments"][1]["amount"] == 250000.0
     assert data["surcharge_amount"] == 0.0
     assert data["surcharge_label"] is None
     order_id = data["id"]
@@ -88,10 +94,9 @@ def test_create_and_pay_separated_order(client: TestClient):
     assert sale_resp.status_code == 200
     sale_data = sale_resp.json()
     assert sale_data["is_separated"] is True
-    assert sale_data["initial_payment_method"] == "cash"
-    assert sale_data["initial_payment_amount"] == 10000.0
+    assert sale_data["initial_payment_amount"] == 400000.0
     assert sale_data["total"] == data["total_amount"]
-    assert sale_data["paid_amount"] == 10000.0
+    assert sale_data["paid_amount"] == 400000.0
     assert sale_data["cart_discount_value"] == 0.0
     assert sale_data["cart_discount_percent"] == 0.0
     assert sale_data["balance"] == data["balance"]

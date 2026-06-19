@@ -296,7 +296,9 @@ def _build_sale_email_body(
     if item_discount_value <= 0:
         item_discount_value = sum(float(item.discount or 0.0) for item in (sale.items or []))
     surcharge_value = float(sale.surcharge_amount or 0.0)
-    total_value = float(sale.total or 0.0)
+    total_value = crud.calculate_sale_total_from_items(sale)
+    if total_value <= 0:
+        total_value = float(sale.total or 0.0)
     paid_value = float(sale.paid_amount or 0.0)
     change_value = float(sale.change_amount or 0.0)
     net_value = max(0.0, paid_value - change_value)
@@ -609,9 +611,14 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
     order = getattr(sale, "separated_order", None)
     if order:
         updates["is_separated"] = True
-        order_total = float(order.total_amount or sale_schema.total or 0.0)
+        order_total = crud.calculate_sale_total_from_items(sale)
+        if order_total <= 0:
+            order_total = float(order.total_amount or sale_schema.total or 0.0)
         updates["total"] = order_total
-        updates["balance"] = float(order.balance or 0.0)
+        updates["balance"] = max(
+            0.0,
+            order_total - float(order.initial_payment or sale_schema.initial_payment_amount or 0.0),
+        )
         updates["initial_payment_amount"] = float(
             order.initial_payment
             or sale_schema.initial_payment_amount
@@ -637,7 +644,11 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
         )
 
     if not order:
-        updates.setdefault("total", sale_schema.total)
+        computed_total = crud.calculate_sale_total_from_items(sale)
+        updates.setdefault(
+            "total",
+            computed_total if computed_total > 0 else sale_schema.total,
+        )
 
     cash_methods = {"cash", "efectivo"}
     has_cash_payment = False

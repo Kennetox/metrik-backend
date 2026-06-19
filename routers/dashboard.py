@@ -40,6 +40,10 @@ def _sale_cash_total(sale: models.Sale) -> float:
     return float(sale.total or 0.0)
 
 
+def _sale_reporting_total(sale: models.Sale) -> float:
+    return float(crud.calculate_sale_total_from_items(sale) or sale.total or 0.0)
+
+
 def _is_cash_method(method: str | None) -> bool:
     if not method:
         return False
@@ -197,10 +201,7 @@ def _collect_sales_aggregate_by_bucket(
 ):
     if bucket not in {"day", "month"}:
         raise ValueError("bucket inválido")
-    sale_base_total = case(
-        (models.SeparatedOrder.id.is_not(None), func.coalesce(models.Sale.paid_amount, 0.0)),
-        else_=func.coalesce(models.Sale.total, 0.0),
-    )
+    sale_base_total = func.coalesce(models.Sale.total, 0.0)
     adjustment_subquery = (
         db.query(
             models.DocumentAdjustment.doc_id.label("sale_id"),
@@ -613,7 +614,7 @@ def get_dashboard_summary(
 
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
-        cash_total = _sale_cash_total(sale)
+        cash_total = _sale_reporting_total(sale)
         delta = float(total_delta_by_sale.get(sale.id, 0.0))
         effective_total = cash_total + delta
         if effective_total > 0:
@@ -645,7 +646,7 @@ def get_dashboard_summary(
 
     for sale in sales_trend:
         day = _to_bogota_date(sale.created_at, bogota_tz)
-        cash_total = _sale_cash_total(sale)
+        cash_total = _sale_reporting_total(sale)
         delta = float(trend_total_delta_by_sale.get(sale.id, 0.0))
         effective_total = cash_total + delta
         if effective_total > 0:

@@ -4,6 +4,7 @@ import os
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import crud
 import models
 from services.pdf_utils import build_pdf_from_html, build_simple_pdf
 
@@ -568,11 +569,17 @@ def _format_quantity(quantity: Optional[float]) -> str:
 
 
 def _effective_total(sale: models.Sale) -> float:
+    calculated_total = crud.calculate_sale_total_from_items(sale)
+    if calculated_total > 0:
+        order = getattr(sale, "separated_order", None)
+        if order and float(order.total_amount or 0.0) > 0:
+            order_total = float(order.total_amount or 0.0)
+            if abs(order_total - calculated_total) <= 0.01:
+                return order_total
+        return calculated_total
     order = getattr(sale, "separated_order", None)
-    if order:
-        amount = float(order.total_amount or 0.0)
-        if amount:
-            return amount
+    if order and float(order.total_amount or 0.0) > 0:
+        return float(order.total_amount or 0.0)
     return float(sale.total or 0.0)
 
 

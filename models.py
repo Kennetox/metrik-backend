@@ -1825,6 +1825,13 @@ class SeparatedOrder(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def initial_payments(self):
+        sale = getattr(self, "sale", None)
+        if sale and getattr(sale, "payments", None):
+            return sale.payments
+        return []
+
 
 class SeparatedOrderPayment(Base):
     __tablename__ = "separated_order_payments"

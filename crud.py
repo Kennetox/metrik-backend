@@ -341,6 +341,83 @@ def _round_currency_to_unit(value: Any) -> float:
     return float(math.floor(float(value or 0.0) + 0.5))
 
 
+def _apply_separated_order_view_totals(order: models.SeparatedOrder) -> models.SeparatedOrder:
+    sale = getattr(order, "sale", None)
+    effective_total = calculate_sale_total_from_items(sale) if sale else 0.0
+    if effective_total <= 0:
+        effective_total = float(order.total_amount or 0.0)
+    initial_payment = float(
+        getattr(sale, "initial_payment_amount", None) or order.initial_payment or 0.0
+    )
+    later_payments = sum(
+        float(payment.amount or 0.0)
+        for payment in (order.payments or [])
+        if (payment.status or "active") != "voided"
+    )
+    order.total_amount = effective_total
+    order.initial_payment = initial_payment
+    order.balance = max(0.0, effective_total - initial_payment - later_payments)
+    return order
+
+
+def calculate_sale_total_from_items(sale_like: Any) -> float:
+    """
+    Recalcula el total neto de una venta a partir de los ítems persistidos.
+
+    La fuente de verdad son los totales netos por ítem, más descuentos de carrito
+    y recargos. Esto evita depender de un total enviado por el frontend que puede
+    quedar desfasado en flujos complejos o en ventas históricas.
+    """
+
+    sale_total = float(getattr(sale_like, "total", 0.0) or 0.0)
+    if sale_total > 0:
+        return _round_currency_to_unit(sale_total)
+
+    items = getattr(sale_like, "items", None) or []
+    item_totals = 0.0
+    item_has_data = False
+    for item in items:
+        quantity = float(getattr(item, "quantity", 0.0) or 0.0)
+        unit_price_original = float(
+            getattr(item, "unit_price_original", None) or getattr(item, "unit_price", 0.0) or 0.0
+        )
+        line_discount_value = float(
+            getattr(item, "line_discount_value", None)
+            if getattr(item, "line_discount_value", None) is not None
+            else getattr(item, "discount", 0.0)
+            or 0.0
+        )
+        if quantity > 0 and unit_price_original > 0:
+            item_has_data = True
+            item_totals += max(0.0, quantity * unit_price_original - line_discount_value)
+            continue
+        line_total = float(getattr(item, "total", 0.0) or 0.0)
+        if line_total > 0:
+            item_has_data = True
+            item_totals += line_total
+    if not item_has_data or item_totals <= 0:
+        return _round_currency_to_unit(sale_total)
+
+    cart_discount_value = max(
+        0.0,
+        float(getattr(sale_like, "cart_discount_value", 0.0) or 0.0),
+    )
+    cart_discount_percent = max(
+        0.0,
+        float(getattr(sale_like, "cart_discount_percent", 0.0) or 0.0),
+    )
+    surcharge_amount = max(
+        0.0,
+        float(getattr(sale_like, "surcharge_amount", 0.0) or 0.0),
+    )
+
+    discount_from_percent = (
+        item_totals * cart_discount_percent / 100.0 if cart_discount_percent > 0 else 0.0
+    )
+    effective_total = item_totals - cart_discount_value - discount_from_percent + surcharge_amount
+    return _round_currency_to_unit(max(0.0, effective_total))
+
+
 DEFAULT_PRODUCT_LABEL_FORMAT = "Kensar1"
 CABLES_PRODUCT_LABEL_FORMAT = "Cables_1"
 
@@ -7190,13 +7267,17 @@ def create_sale(
         ]:
             customer_payload[key] = _clean_field(customer_payload.get(key))
 
-    subtotal_after_lines = max(0.0, subtotal_items - total_discount)
     surcharge_amount = float(getattr(sale_in, "surcharge_amount", 0.0) or 0.0)
     if surcharge_amount < 0:
         surcharge_amount = 0.0
-    sale_total = max(0.0, float(sale_in.total))
-    effective_without_surcharge = max(0.0, sale_total - surcharge_amount)
-    cart_discount_value = max(0.0, subtotal_after_lines - effective_without_surcharge)
+    cart_discount_value = max(
+        0.0,
+        float(getattr(sale_in, "cart_discount_value", 0.0) or 0.0),
+    )
+    cart_discount_percent = float(
+        getattr(sale_in, "cart_discount_percent", 0.0) or 0.0
+    )
+    sale_total = calculate_sale_total_from_items(sale_in)
     surcharge_label = _clean_field(getattr(sale_in, "surcharge_label", None))
 
     change_amount = max(0.0, total_paid - sale_total)
@@ -7480,13 +7561,20 @@ def create_separated_order(
     if sale.separated_order:
         raise ValueError("La venta ya tiene un separado registrado")
 
-    calculated_total = sum(float(item.total or 0.0) for item in sale.items)
-    total_amount = calculated_total + float(sale.surcharge_amount or 0.0)
+    total_amount = calculate_sale_total_from_items(sale)
     if total_amount <= 0:
-        total_amount = float(sale.total or 0.0)
+        total_amount = _round_currency_to_unit(float(sale.total or 0.0))
     paid_amount = float(sale.paid_amount or 0.0)
     change_amount = float(sale.change_amount or 0.0)
-    initial_payment = max(0.0, min(total_amount, paid_amount - change_amount))
+    payment_amounts = [float(payment.amount or 0.0) for payment in (sale.payments or [])]
+    if payment_amounts:
+        initial_payment = sum(payment_amounts)
+    else:
+        initial_payment = max(0.0, min(total_amount, paid_amount - change_amount))
+    if initial_payment <= 0.01:
+        raise ValueError("El separado debe incluir un abono inicial mayor a cero")
+    if initial_payment - total_amount > 0.01:
+        raise ValueError("El abono inicial no puede superar el total de la venta")
     balance = max(0.0, total_amount - initial_payment)
     status = "pagado" if balance <= 0.01 else "reservado"
 
@@ -7516,6 +7604,7 @@ def create_separated_order(
     db.add(order)
     db.commit()
     db.refresh(order)
+    _apply_separated_order_view_totals(order)
     return order
 
 
@@ -7524,11 +7613,18 @@ def get_separated_order(
     order_id: int,
     tenant_id: Optional[int] = None,
 ) -> Optional[models.SeparatedOrder]:
-    query = db.query(models.SeparatedOrder).filter(models.SeparatedOrder.id == order_id)
+    query = db.query(models.SeparatedOrder).options(
+        selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.items),
+        selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.payments),
+        selectinload(models.SeparatedOrder.payments),
+    ).filter(models.SeparatedOrder.id == order_id)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.SeparatedOrder.tenant_id == effective_tenant_id)
-    return query.first()
+    order = query.first()
+    if order:
+        _apply_separated_order_view_totals(order)
+    return order
 
 
 def list_separated_orders(
@@ -7546,6 +7642,8 @@ def list_separated_orders(
     tenant_id: Optional[int] = None,
 ) -> List[models.SeparatedOrder]:
     query = db.query(models.SeparatedOrder).options(
+        selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.items),
+        selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.payments),
         selectinload(models.SeparatedOrder.payments)
     )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
@@ -7607,12 +7705,15 @@ def list_separated_orders(
         query = query.filter(created_clause)
     elif payment_clause is not None:
         query = query.filter(payment_clause)
-    return (
+    orders = (
         query.order_by(models.SeparatedOrder.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
+    for order in orders:
+        _apply_separated_order_view_totals(order)
+    return orders
 
 
 def add_separated_order_payment(
@@ -7620,6 +7721,7 @@ def add_separated_order_payment(
     order: models.SeparatedOrder,
     payment_in: schemas.SeparatedOrderPaymentCreate,
 ) -> models.SeparatedOrder:
+    _apply_separated_order_view_totals(order)
     if order.status == "cancelado":
         raise ValueError("No se pueden registrar abonos en un separado cancelado")
     if order.balance <= 0.01:
@@ -7633,7 +7735,8 @@ def add_separated_order_payment(
     if method_slug in forbidden:
         raise ValueError("El método de pago no está permitido para abonos")
 
-    if amount - float(order.balance or 0.0) > 0.01:
+    current_balance = float(order.balance or 0.0)
+    if amount - current_balance > 0.01:
         raise ValueError("El abono supera el saldo pendiente")
 
     effective_tenant_id = order.tenant_id if order.tenant_id is not None else get_default_tenant_id(db)
@@ -7666,7 +7769,7 @@ def add_separated_order_payment(
     )
     db.add(payment)
 
-    new_balance = max(0.0, float(order.balance or 0.0) - amount)
+    new_balance = max(0.0, current_balance - amount)
     order.balance = new_balance
     if new_balance <= 0.01:
         order.balance = 0.0
@@ -7682,6 +7785,7 @@ def complete_separated_order(
     order: models.SeparatedOrder,
     notes: Optional[str] = None,
 ) -> models.SeparatedOrder:
+    _apply_separated_order_view_totals(order)
     if order.status == "cancelado":
         raise ValueError("El separado está cancelado")
     if float(order.balance or 0.0) > 0.01:
@@ -7719,7 +7823,11 @@ def get_sales(
     date_to: Optional[datetime] = None,
     tenant_id: Optional[int] = None,
 ):
-    query = db.query(models.Sale)
+    query = db.query(models.Sale).options(
+        selectinload(models.Sale.items),
+        selectinload(models.Sale.payments),
+        selectinload(models.Sale.separated_order),
+    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.Sale.tenant_id == effective_tenant_id)
@@ -7747,7 +7855,11 @@ def get_sales_history_page(
     pos_name: Optional[str] = None,
     tenant_id: Optional[int] = None,
 ) -> tuple[list[models.Sale], int]:
-    query = db.query(models.Sale)
+    query = db.query(models.Sale).options(
+        selectinload(models.Sale.items),
+        selectinload(models.Sale.payments),
+        selectinload(models.Sale.separated_order),
+    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.Sale.tenant_id == effective_tenant_id)
@@ -8031,7 +8143,11 @@ def get_sale(
     sale_id: int,
     tenant_id: Optional[int] = None,
 ) -> Optional[models.Sale]:
-    query = db.query(models.Sale).filter(models.Sale.id == sale_id)
+    query = db.query(models.Sale).options(
+        selectinload(models.Sale.items),
+        selectinload(models.Sale.payments),
+        selectinload(models.Sale.separated_order),
+    ).filter(models.Sale.id == sale_id)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.Sale.tenant_id == effective_tenant_id)
@@ -8043,7 +8159,11 @@ def get_sale_by_document(
     document_number: str,
     tenant_id: Optional[int] = None,
 ) -> Optional[models.Sale]:
-    query = db.query(models.Sale).filter(models.Sale.document_number == document_number)
+    query = db.query(models.Sale).options(
+        selectinload(models.Sale.items),
+        selectinload(models.Sale.payments),
+        selectinload(models.Sale.separated_order),
+    ).filter(models.Sale.document_number == document_number)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.Sale.tenant_id == effective_tenant_id)
@@ -9124,6 +9244,7 @@ def void_separated_order_payment(
     order = payment.separated_order
     if not order:
         raise ValueError("No se encontró el separado asociado")
+    _apply_separated_order_view_totals(order)
 
     if payment.closure_id is None:
         payment.status = "voided"
@@ -13114,7 +13235,10 @@ def _build_pos_closure_snapshot(
         models.Sale.closure_id.is_(None),
         or_(models.Sale.status.is_(None), models.Sale.status != "voided"),
         models.Sale.created_at >= day_start,
-    ).options(selectinload(models.Sale.separated_order))
+    ).options(
+        selectinload(models.Sale.separated_order).selectinload(models.SeparatedOrder.payments),
+        selectinload(models.Sale.items),
+    )
     if scoped_station_ids:
         pending_sales_query = pending_sales_query.filter(
             models.Sale.station_id.in_(scoped_station_ids)
@@ -13590,14 +13714,14 @@ def _build_pos_closure_snapshot(
                 or sale.total
                 or 0.0
             )
-            order_balance = max(
-                float(
-                    (order_state["order_balance"] if order_state else None)
-                    or sale.balance
-                    or 0.0
-                ),
-                0.0,
+            initial_payment = float(
+                (order_state["order_initial_payment"] if order_state else None)
+                or sale.initial_payment_amount
+                or sale.paid_amount
+                or 0.0
             )
+            payments_total = float(order_state["payments_total"] if order_state else 0.0)
+            order_balance = max(order_total - initial_payment - payments_total, 0.0)
             is_same_day_separated = _is_same_closure_day(order_created_at)
             if is_same_day_separated:
                 tickets += 1
@@ -13618,7 +13742,12 @@ def _build_pos_closure_snapshot(
             if is_same_day_separated:
                 tickets += 1
                 reserved_total += max(float(order_state["order_total_amount"] or 0.0), 0.0)
-            order_balance = max(float(order_state["order_balance"] or 0.0), 0.0)
+            order_total = float(order_state["order_total_amount"] or 0.0)
+            initial_payment = float(order_state["order_initial_payment"] or 0.0)
+            order_balance = max(
+                order_total - initial_payment - float(order_state["payments_total"] or 0.0),
+                0.0,
+            )
             payments_total += max(float(order_state["payments_total"] or 0.0), 0.0)
             station_key = (
                 order_state["sale_station_id"]
@@ -13774,6 +13903,77 @@ def _build_pos_closure_snapshot(
     }
 
 
+def _normalize_pos_closure_view(closure: models.PosClosure) -> models.PosClosure:
+    if closure is None:
+        return closure
+
+    if not isinstance(closure.separated_summary, dict) and not getattr(closure, "sales", None):
+        return closure
+
+    separated_sales = [
+        sale
+        for sale in getattr(closure, "sales", []) or []
+        if bool(getattr(sale, "is_separated", False))
+    ]
+    if not separated_sales:
+        return closure
+
+    tickets = 0
+    reserved_total = 0.0
+    pending_total = 0.0
+    payments_total = 0.0
+    closure_opened_at = getattr(closure, "opened_at", None)
+    closure_closed_at = getattr(closure, "closed_at", None)
+
+    for sale in separated_sales:
+        separated_order = getattr(sale, "separated_order", None)
+        order_total = float(
+            calculate_sale_total_from_items(sale)
+            or getattr(separated_order, "total_amount", None)
+            or sale.total
+            or 0.0
+        )
+        initial_payment = float(
+            getattr(separated_order, "initial_payment", None)
+            or sale.initial_payment_amount
+            or sale.paid_amount
+            or 0.0
+        )
+        order_payments_total = sum(
+            float(payment.amount or 0.0)
+            for payment in getattr(separated_order, "payments", []) or []
+        )
+        order_balance = max(order_total - initial_payment - order_payments_total, 0.0)
+        pending_total += order_balance
+        payments_total += max(initial_payment + order_payments_total, 0.0)
+
+        created_at = getattr(separated_order, "created_at", None)
+        if (
+            created_at
+            and closure_opened_at
+            and closure_closed_at
+            and closure_opened_at <= created_at <= closure_closed_at
+        ):
+            tickets += 1
+            reserved_total += order_total
+
+    summary = dict(closure.separated_summary or {})
+    summary["tickets"] = tickets or int(summary.get("tickets") or 0)
+    summary["payments_total"] = round(payments_total, 2)
+    summary["reserved_total"] = round(reserved_total or float(summary.get("reserved_total") or 0.0), 2)
+    summary["pending_total"] = round(max(pending_total, 0.0), 2)
+    summary["day_collected_total"] = round(
+        float(summary.get("day_collected_total") or closure.net_amount or closure.total_amount or 0.0),
+        2,
+    )
+    summary["day_with_pending_total"] = round(
+        summary["day_collected_total"] + max(float(summary["pending_total"] or 0.0), 0.0),
+        2,
+    )
+    closure.separated_summary = summary
+    return closure
+
+
 def _acquire_pos_closure_lock(db: Session, user: models.PosUser) -> None:
     tenant_id = resolve_user_tenant_id(db, user)
     if tenant_id is not None:
@@ -13790,11 +13990,19 @@ def get_pos_closure(
     closure_id: int,
     tenant_id: Optional[int] = None,
 ) -> Optional[models.PosClosure]:
-    query = db.query(models.PosClosure).filter(models.PosClosure.id == closure_id)
+    query = db.query(models.PosClosure).options(
+        selectinload(models.PosClosure.sales)
+        .selectinload(models.Sale.separated_order)
+        .selectinload(models.SeparatedOrder.payments),
+        selectinload(models.PosClosure.sales).selectinload(models.Sale.items),
+    ).filter(models.PosClosure.id == closure_id)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.PosClosure.tenant_id == effective_tenant_id)
-    return query.first()
+    closure = query.first()
+    if closure:
+        closure = _normalize_pos_closure_view(closure)
+    return closure
 
 
 def list_pos_closures(
@@ -13806,7 +14014,12 @@ def list_pos_closures(
     date_to: Optional[datetime] = None,
     tenant_id: Optional[int] = None,
 ) -> List[models.PosClosure]:
-    query = db.query(models.PosClosure)
+    query = db.query(models.PosClosure).options(
+        selectinload(models.PosClosure.sales)
+        .selectinload(models.Sale.separated_order)
+        .selectinload(models.SeparatedOrder.payments),
+        selectinload(models.PosClosure.sales).selectinload(models.Sale.items),
+    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.PosClosure.tenant_id == effective_tenant_id)
@@ -13816,12 +14029,13 @@ def list_pos_closures(
         query = query.filter(models.PosClosure.closed_at >= date_from)
     if date_to:
         query = query.filter(models.PosClosure.closed_at <= date_to)
-    return (
+    closures = (
         query.order_by(models.PosClosure.closed_at.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
+    return [_normalize_pos_closure_view(closure) for closure in closures]
 
 
 def delete_pos_closure(db: Session, closure: models.PosClosure):

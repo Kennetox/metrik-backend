@@ -326,7 +326,7 @@ def test_closure_separated_clarification_totals(client: TestClient):
     product = models.Product(
         name="Producto separado cierre",
         sku="SEP-CLOSE-001",
-        price=50000.0,
+        price=62000.0,
         cost=20000.0,
         barcode="SEP-CLOSE-001",
         unit="UND",
@@ -346,8 +346,8 @@ def test_closure_separated_clarification_totals(client: TestClient):
 
     separated_payload = {
         "payment_method": "cash",
-        "total": 10000.0,
-        "paid_amount": 10000.0,
+        "total": 25000.0,
+        "paid_amount": 25000.0,
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
@@ -359,7 +359,7 @@ def test_closure_separated_clarification_totals(client: TestClient):
             {
                 "product_id": product.id,
                 "quantity": 1,
-                "unit_price": 50000.0,
+                "unit_price": 62000.0,
                 "product_sku": product.sku,
                 "product_name": product.name,
                 "product_barcode": product.barcode,
@@ -372,24 +372,49 @@ def test_closure_separated_clarification_totals(client: TestClient):
     separated_resp = client.post("/separated-orders", json=separated_payload, headers=headers)
     assert separated_resp.status_code == 201
     separated_data = separated_resp.json()
-    assert separated_data["total_amount"] == 50000.0
-    assert separated_data["initial_payment"] == 10000.0
-    assert separated_data["balance"] == 40000.0
+    assert separated_data["total_amount"] == 62000.0
+    assert separated_data["initial_payment"] == 25000.0
+    assert separated_data["balance"] == 37000.0
 
     closure_resp = client.post("/pos/closures", json=_closure_payload(), headers=headers)
     assert closure_resp.status_code == 201
     closure_data = closure_resp.json()
-    assert closure_data["net_amount"] == 50000.0
+    assert closure_data["net_amount"] == 25000.0
     assert closure_data["separated_summary"] is not None
     assert closure_data["separated_summary"]["tickets"] == 1
-    assert closure_data["separated_summary"]["payments_total"] == 10000.0
-    assert closure_data["separated_summary"]["reserved_total"] == 50000.0
-    assert closure_data["separated_summary"]["pending_total"] == 40000.0
-    assert closure_data["separated_summary"]["day_collected_total"] == 10000.0
-    assert closure_data["separated_summary"]["day_with_pending_total"] == 50000.0
+    assert closure_data["separated_summary"]["payments_total"] == 25000.0
+    assert closure_data["separated_summary"]["reserved_total"] == 62000.0
+    assert closure_data["separated_summary"]["pending_total"] == 37000.0
+    assert closure_data["separated_summary"]["day_collected_total"] == 25000.0
+    assert closure_data["separated_summary"]["day_with_pending_total"] == 62000.0
     assert closure_data["user_breakdown"]
     assert closure_data["user_breakdown"][0]["name"] == "Tester"
-    assert closure_data["user_breakdown"][0]["total"] == 10000.0
+    assert closure_data["user_breakdown"][0]["total"] == 25000.0
+
+    db = TestingSessionLocal()
+    closure_row = (
+        db.query(models.PosClosure)
+        .filter(models.PosClosure.id == closure_data["id"])
+        .first()
+    )
+    assert closure_row is not None
+    closure_row.separated_summary = {
+        "tickets": 1,
+        "payments_total": 25000.0,
+        "reserved_total": 62000.0,
+        "pending_total": 40000.0,
+        "day_collected_total": 25000.0,
+        "day_with_pending_total": 65000.0,
+    }
+    db.commit()
+    db.close()
+
+    reloaded = client.get(f"/pos/closures/{closure_data['id']}", headers=headers)
+    assert reloaded.status_code == 200
+    reloaded_data = reloaded.json()
+    assert reloaded_data["separated_summary"] is not None
+    assert reloaded_data["separated_summary"]["pending_total"] == 37000.0
+    assert reloaded_data["separated_summary"]["day_with_pending_total"] == 62000.0
 
 
 def test_customer_crud_and_sales_association(client: TestClient):

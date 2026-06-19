@@ -55,7 +55,7 @@ class ProductBase(BaseModel):
     web_badge_text: Optional[str] = None
     web_category_key: Optional[str] = None
     web_sort_order: int = 0
-    web_visible_when_out_of_stock: bool = True
+    web_visible_when_out_of_stock: bool = False
     web_price_mode: Literal["visible", "consultar"] = "visible"
     web_whatsapp_message: Optional[str] = None
     web_warranty_text: Optional[str] = None
@@ -342,7 +342,7 @@ class ComercioWebComboBase(BaseModel):
     published: bool = False
     featured: bool = False
     sort_order: int = 0
-    visible_when_out_of_stock: bool = True
+    visible_when_out_of_stock: bool = False
     active: bool = True
     warranty_text: Optional[str] = None
     technical_specs: List[Dict[str, str]] = Field(default_factory=list)
@@ -3697,6 +3697,7 @@ class SeparatedOrderRead(BaseModel):
     updated_at: datetime
     completed_at: Optional[datetime] = None
     cancelled_at: Optional[datetime] = None
+    initial_payments: List[SalePaymentRead] = Field(default_factory=list)
     payments: List[SeparatedOrderPaymentRead] = []
 
     class Config:
