@@ -7016,81 +7016,96 @@ def get_web_catalog_product_by_slug(
     tenant_id: Optional[int] = None,
 ) -> Optional[schemas.WebCatalogProductDetail]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
-    category_map = _get_tenant_web_catalog_category_map(
-        db,
-        tenant_id=effective_tenant_id,
-        include_inactive=True,
-        ensure_seeded=True,
-    )
-    inactive_category_keys = {
-        _normalize_web_catalog_category_key(item.key)
-        for item in category_map.values()
-        if not bool(item.is_active)
-    }
-    stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
-    rows = (
-        db.query(
-            models.Product,
-            func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
-            models.ProductGroup.display_name.label("category_name"),
+    try:
+        cached_categories = _get_public_web_categories_cache(effective_tenant_id)
+        if cached_categories is not None:
+            category_map = {
+                _normalize_web_catalog_category_key(item.key): item
+                for item in cached_categories
+                if _normalize_web_catalog_category_key(item.key)
+            }
+        else:
+            category_map = _get_tenant_web_catalog_category_map(
+                db,
+                tenant_id=effective_tenant_id,
+                include_inactive=True,
+                ensure_seeded=False,
+            )
+            if category_map:
+                _set_public_web_categories_cache(effective_tenant_id, list(category_map.values()))
+            else:
+                category_map = _build_public_default_category_map()
+        inactive_category_keys = {
+            _normalize_web_catalog_category_key(item.key)
+            for item in category_map.values()
+            if not bool(item.is_active)
+        }
+        stock_subquery = _get_catalog_stock_subquery(db, effective_tenant_id)
+        rows = (
+            db.query(
+                models.Product,
+                func.coalesce(stock_subquery.c.qty_on_hand, 0).label("qty_on_hand"),
+                models.ProductGroup.display_name.label("category_name"),
+            )
+            .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
+            .outerjoin(
+                models.ProductGroup,
+                and_(
+                    models.ProductGroup.path == models.Product.group_name,
+                    models.ProductGroup.tenant_id == models.Product.tenant_id,
+                ),
+            )
+            .filter(
+                models.Product.active.is_(True),
+                models.Product.web_published.is_(True),
+                models.Product.tenant_id == effective_tenant_id
+                if effective_tenant_id is not None
+                else true(),
+            )
+            .all()
         )
-        .outerjoin(stock_subquery, stock_subquery.c.product_id == models.Product.id)
-        .outerjoin(
-            models.ProductGroup,
-            and_(
-                models.ProductGroup.path == models.Product.group_name,
-                models.ProductGroup.tenant_id == models.Product.tenant_id,
-            ),
-        )
-        .filter(
-            models.Product.active.is_(True),
-            models.Product.web_published.is_(True),
-            models.Product.tenant_id == effective_tenant_id
-            if effective_tenant_id is not None
-            else true(),
-        )
-        .all()
-    )
-    normalized_slug = build_product_web_slug(slug)
-    for product, qty_on_hand, category_name in rows:
-        normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
-        if normalized_category_key and normalized_category_key in inactive_category_keys:
-            continue
-        category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
-        resolved_slug = resolve_product_web_slug(product)
-        if resolved_slug != normalized_slug:
-            continue
-        stock_status = resolve_web_product_stock_status(product, qty_on_hand)
-        if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
-            return None
-        price_mode = (product.web_price_mode or "visible").strip().lower()
-        sale_price = resolve_web_product_sale_price(product)
-        return schemas.WebCatalogProductDetail(
-            id=product.id,
-            sku=product.sku,
-            slug=resolved_slug,
-            name=resolve_product_web_name(product),
-            badge_text=(product.web_badge_text or None),
-            featured=bool(product.web_featured),
-            short_description=product.web_short_description,
-            long_description=product.web_long_description,
-            brand=product.brand,
-            group_name=category_name or product.group_name,
-            category_path=product.web_category_key,
-            category_name=(category_def.name if category_def else None),
-            image_url=product.image_url,
-            image_thumb_url=product.image_thumb_url,
-            gallery=_build_product_gallery_urls(product),
-            video_url=product.web_video_url,
-            price_mode=price_mode,
-            price=(sale_price if price_mode == "visible" else None),
-            compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
-            stock_status=stock_status,
-            warranty_text=product.web_warranty_text,
-            specs={},
-            whatsapp_message=product.web_whatsapp_message,
-        )
-    return None
+        normalized_slug = build_product_web_slug(slug)
+        for product, qty_on_hand, category_name in rows:
+            normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
+            if normalized_category_key and normalized_category_key in inactive_category_keys:
+                continue
+            category_def = category_map.get(_normalize_web_catalog_category_key(product.web_category_key))
+            resolved_slug = resolve_product_web_slug(product)
+            if resolved_slug != normalized_slug:
+                continue
+            stock_status = resolve_web_product_stock_status(product, qty_on_hand)
+            if stock_status == "out_of_stock" and product.web_visible_when_out_of_stock is False:
+                return None
+            price_mode = (product.web_price_mode or "visible").strip().lower()
+            sale_price = resolve_web_product_sale_price(product)
+            return schemas.WebCatalogProductDetail(
+                id=product.id,
+                sku=product.sku,
+                slug=resolved_slug,
+                name=resolve_product_web_name(product),
+                badge_text=(product.web_badge_text or None),
+                featured=bool(product.web_featured),
+                short_description=product.web_short_description,
+                long_description=product.web_long_description,
+                brand=product.brand,
+                group_name=category_name or product.group_name,
+                category_path=product.web_category_key,
+                category_name=(category_def.name if category_def else None),
+                image_url=product.image_url,
+                image_thumb_url=product.image_thumb_url,
+                gallery=_build_product_gallery_urls(product),
+                video_url=product.web_video_url,
+                price_mode=price_mode,
+                price=(sale_price if price_mode == "visible" else None),
+                compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
+                stock_status=stock_status,
+                warranty_text=product.web_warranty_text,
+                specs={},
+                whatsapp_message=product.web_whatsapp_message,
+            )
+        return None
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        return None
 
 
 def create_product_group(
