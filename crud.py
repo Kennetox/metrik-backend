@@ -93,6 +93,7 @@ _PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
 _PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
 _PUBLIC_WEB_CATEGORIES_CACHE: Dict[str, tuple[datetime, list[models.WebCatalogCategory]]] = {}
 _PUBLIC_WEB_PRODUCTS_CACHE: Dict[str, tuple[datetime, schemas.WebCatalogProductList]] = {}
+_PUBLIC_WEB_COMBOS_CACHE: Dict[str, tuple[datetime, list[schemas.ComercioWebComboRead] | schemas.ComercioWebComboRead]] = {}
 _PUBLIC_WEB_STALE_CACHE: Dict[str, Any] = {}
 
 
@@ -253,6 +254,62 @@ def _set_public_web_products_cache(cache_key: str, value: schemas.WebCatalogProd
     ttl_seconds = _public_web_home_cache_ttl_seconds()
     _PUBLIC_WEB_PRODUCTS_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
     _PUBLIC_WEB_STALE_CACHE[cache_key] = value
+
+
+def _public_web_combos_cache_key(
+    tenant_id: Optional[int],
+    *,
+    slug: Optional[str] = None,
+    q: Optional[str] = None,
+    published_only: Optional[bool] = None,
+    active_only: Optional[bool] = None,
+) -> str:
+    parts = [
+        f"tenant={tenant_id if tenant_id is not None else 'none'}",
+        f"slug={(slug or '').strip().lower()}",
+        f"q={(q or '').strip().lower()}",
+        f"published={published_only if published_only is not None else 'any'}",
+        f"active={active_only if active_only is not None else 'any'}",
+    ]
+    return "|".join(parts)
+
+
+def _get_public_web_combos_cache(
+    cache_key: str,
+) -> list[schemas.ComercioWebComboRead] | schemas.ComercioWebComboRead | None:
+    cache_entry = _PUBLIC_WEB_COMBOS_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_COMBOS_CACHE.pop(cache_key, None)
+        return None
+    return value
+
+
+def _set_public_web_combos_cache(
+    cache_key: str,
+    value: list[schemas.ComercioWebComboRead] | schemas.ComercioWebComboRead,
+) -> None:
+    ttl_seconds = _public_web_home_cache_ttl_seconds()
+    _PUBLIC_WEB_COMBOS_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+    _PUBLIC_WEB_STALE_CACHE[cache_key] = value
+
+
+def clear_public_web_combos_cache(tenant_id: Optional[int] = None) -> None:
+    if tenant_id is None:
+        _PUBLIC_WEB_COMBOS_CACHE.clear()
+        for key in list(_PUBLIC_WEB_STALE_CACHE.keys()):
+            if key.startswith("tenant="):
+                _PUBLIC_WEB_STALE_CACHE.pop(key, None)
+        return
+    suffix = f"tenant={tenant_id}|"
+    for key in list(_PUBLIC_WEB_COMBOS_CACHE.keys()):
+        if key.startswith(suffix):
+            _PUBLIC_WEB_COMBOS_CACHE.pop(key, None)
+    for key in list(_PUBLIC_WEB_STALE_CACHE.keys()):
+        if key.startswith(suffix):
+            _PUBLIC_WEB_STALE_CACHE.pop(key, None)
 
 
 def _strip_checkout_context_note_segment(notes: Optional[str]) -> Optional[str]:
@@ -4454,47 +4511,64 @@ def list_comercio_web_combos(
     published_only: Optional[bool] = None,
     active_only: Optional[bool] = None,
 ) -> list[schemas.ComercioWebComboRead]:
-    query = db.query(models.WebCatalogCombo).options(
-        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+    cache_key = _public_web_combos_cache_key(
+        tenant_id,
+        q=q,
+        published_only=published_only,
+        active_only=active_only,
     )
-    if tenant_id is not None:
-        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
-    if published_only is True:
-        query = query.filter(models.WebCatalogCombo.published.is_(True))
-    elif published_only is False:
-        query = query.filter(models.WebCatalogCombo.published.is_(False))
-    if active_only is True:
-        query = query.filter(models.WebCatalogCombo.active.is_(True))
-    elif active_only is False:
-        query = query.filter(models.WebCatalogCombo.active.is_(False))
-
-    term = (q or "").strip()
-    if term:
-        like = f"%{term}%"
-        query = query.filter(
-            or_(
-                models.WebCatalogCombo.name.ilike(like),
-                models.WebCatalogCombo.slug.ilike(like),
-                models.WebCatalogCombo.short_description.ilike(like),
-                models.WebCatalogCombo.badge_text.ilike(like),
-            )
+    cached_result = _get_public_web_combos_cache(cache_key)
+    if isinstance(cached_result, list):
+        return list(cached_result)
+    try:
+        query = db.query(models.WebCatalogCombo).options(
+            selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
         )
+        if tenant_id is not None:
+            query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+        if published_only is True:
+            query = query.filter(models.WebCatalogCombo.published.is_(True))
+        elif published_only is False:
+            query = query.filter(models.WebCatalogCombo.published.is_(False))
+        if active_only is True:
+            query = query.filter(models.WebCatalogCombo.active.is_(True))
+        elif active_only is False:
+            query = query.filter(models.WebCatalogCombo.active.is_(False))
 
-    rows = query.order_by(
-        models.WebCatalogCombo.featured.desc(),
-        models.WebCatalogCombo.sort_order.asc(),
-        models.WebCatalogCombo.updated_at.desc(),
-        models.WebCatalogCombo.id.desc(),
-    ).all()
-    stock_product_ids = list(
-        {
-            int(item.product_id)
-            for row in rows
-            for item in (getattr(row, "items", []) or [])
-        }
-    )
-    stock_by_product_id = _get_web_combo_stock_snapshot(db, tenant_id, stock_product_ids)
-    return [_serialize_web_combo(row, stock_by_product_id=stock_by_product_id) for row in rows]
+        term = (q or "").strip()
+        if term:
+            like = f"%{term}%"
+            query = query.filter(
+                or_(
+                    models.WebCatalogCombo.name.ilike(like),
+                    models.WebCatalogCombo.slug.ilike(like),
+                    models.WebCatalogCombo.short_description.ilike(like),
+                    models.WebCatalogCombo.badge_text.ilike(like),
+                )
+            )
+
+        rows = query.order_by(
+            models.WebCatalogCombo.featured.desc(),
+            models.WebCatalogCombo.sort_order.asc(),
+            models.WebCatalogCombo.updated_at.desc(),
+            models.WebCatalogCombo.id.desc(),
+        ).all()
+        stock_product_ids = list(
+            {
+                int(item.product_id)
+                for row in rows
+                for item in (getattr(row, "items", []) or [])
+            }
+        )
+        stock_by_product_id = _get_web_combo_stock_snapshot(db, tenant_id, stock_product_ids)
+        result = [_serialize_web_combo(row, stock_by_product_id=stock_by_product_id) for row in rows]
+        _set_public_web_combos_cache(cache_key, result)
+        return list(result)
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_result = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_result, list):
+            return list(stale_result)
+        return []
 
 
 def get_comercio_web_combo(
@@ -4503,20 +4577,32 @@ def get_comercio_web_combo(
     tenant_id: Optional[int] = None,
     combo_id: int,
 ) -> Optional[schemas.ComercioWebComboRead]:
-    query = db.query(models.WebCatalogCombo).options(
-        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
-    )
-    if tenant_id is not None:
-        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
-    row = query.filter(models.WebCatalogCombo.id == combo_id).first()
-    if not row:
+    cache_key = _public_web_combos_cache_key(tenant_id, slug=str(combo_id))
+    cached_result = _get_public_web_combos_cache(cache_key)
+    if isinstance(cached_result, schemas.ComercioWebComboRead):
+        return cached_result
+    try:
+        query = db.query(models.WebCatalogCombo).options(
+            selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+        )
+        if tenant_id is not None:
+            query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+        row = query.filter(models.WebCatalogCombo.id == combo_id).first()
+        if not row:
+            return None
+        stock_by_product_id = _get_web_combo_stock_snapshot(
+            db,
+            tenant_id,
+            [int(item.product_id) for item in (getattr(row, "items", []) or [])],
+        )
+        result = _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
+        _set_public_web_combos_cache(cache_key, result)
+        return result
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_result = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_result, schemas.ComercioWebComboRead):
+            return stale_result
         return None
-    stock_by_product_id = _get_web_combo_stock_snapshot(
-        db,
-        tenant_id,
-        [int(item.product_id) for item in (getattr(row, "items", []) or [])],
-    )
-    return _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
 
 
 def get_comercio_web_combo_by_slug(
@@ -4528,20 +4614,32 @@ def get_comercio_web_combo_by_slug(
     normalized_slug = (slug or "").strip()
     if not normalized_slug:
         return None
-    query = db.query(models.WebCatalogCombo).options(
-        selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
-    )
-    if tenant_id is not None:
-        query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
-    row = query.filter(models.WebCatalogCombo.slug == normalized_slug).first()
-    if not row:
+    cache_key = _public_web_combos_cache_key(tenant_id, slug=normalized_slug)
+    cached_result = _get_public_web_combos_cache(cache_key)
+    if isinstance(cached_result, schemas.ComercioWebComboRead):
+        return cached_result
+    try:
+        query = db.query(models.WebCatalogCombo).options(
+            selectinload(models.WebCatalogCombo.items).joinedload(models.WebCatalogComboItem.product)
+        )
+        if tenant_id is not None:
+            query = query.filter(models.WebCatalogCombo.tenant_id == tenant_id)
+        row = query.filter(models.WebCatalogCombo.slug == normalized_slug).first()
+        if not row:
+            return None
+        stock_by_product_id = _get_web_combo_stock_snapshot(
+            db,
+            tenant_id,
+            [int(item.product_id) for item in (getattr(row, "items", []) or [])],
+        )
+        result = _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
+        _set_public_web_combos_cache(cache_key, result)
+        return result
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_result = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_result, schemas.ComercioWebComboRead):
+            return stale_result
         return None
-    stock_by_product_id = _get_web_combo_stock_snapshot(
-        db,
-        tenant_id,
-        [int(item.product_id) for item in (getattr(row, "items", []) or [])],
-    )
-    return _serialize_web_combo(row, stock_by_product_id=stock_by_product_id)
 
 
 def create_comercio_web_combo(
@@ -4613,6 +4711,7 @@ def create_comercio_web_combo(
     db.add(row)
     db.commit()
     db.refresh(row)
+    clear_public_web_combos_cache(tenant_id=tenant_id)
     return get_comercio_web_combo(db, tenant_id=tenant_id, combo_id=row.id)  # type: ignore[return-value]
 
 
@@ -4719,6 +4818,7 @@ def update_comercio_web_combo(
     db.add(row)
     db.commit()
     db.refresh(row)
+    clear_public_web_combos_cache(tenant_id=tenant_id)
     return get_comercio_web_combo(db, tenant_id=tenant_id, combo_id=row.id)  # type: ignore[return-value]
 
 
@@ -4736,6 +4836,7 @@ def delete_comercio_web_combo(
         raise ValueError("Combo no encontrado")
     db.delete(row)
     db.commit()
+    clear_public_web_combos_cache(tenant_id=tenant_id)
 
 
 def _normalize_web_description_template_key(value: Optional[str]) -> str:
