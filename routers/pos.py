@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from html import escape
+import functools
+import inspect
 from typing import Any, List, Optional, Literal
 import base64
 import os
@@ -18,6 +20,7 @@ from fastapi import (
     Response,
 )
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -59,6 +62,72 @@ FREE_SALE_REASON_REQUIRED = (
     not in {"0", "false", "no", "off"}
 )
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
+_POS_QUERY_CACHE: dict[str, tuple[datetime, object]] = {}
+
+
+def _pos_cache_key(name: str, **params: object) -> str:
+    parts = [name]
+    for key in sorted(params.keys()):
+        value = params[key]
+        if isinstance(value, datetime):
+            rendered = value.isoformat()
+        elif isinstance(value, date):
+            rendered = value.isoformat()
+        else:
+            rendered = repr(value)
+        parts.append(f"{key}={rendered}")
+    return "|".join(parts)
+
+
+def _get_pos_cache(key: str):
+    cache_entry = _POS_QUERY_CACHE.get(key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        return None
+    return value
+
+
+def _get_pos_stale_cache(key: str):
+    cache_entry = _POS_QUERY_CACHE.get(key)
+    if not cache_entry:
+        return None
+    return cache_entry[1]
+
+
+def _set_pos_cache(key: str, value: object, ttl_seconds: int) -> None:
+    _POS_QUERY_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def _pos_cached(ttl_seconds: int, fallback_factory):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound_args = inspect.signature(func).bind_partial(*args, **kwargs)
+            bound_args.apply_defaults()
+            cache_params = {
+                key: value
+                for key, value in bound_args.arguments.items()
+                if key not in {"db", "current_user"}
+            }
+            cache_key = _pos_cache_key(func.__name__, **cache_params)
+            cached = _get_pos_cache(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                result = func(*args, **kwargs)
+            except (SQLAlchemyTimeoutError, SQLAlchemyError):
+                stale = _get_pos_stale_cache(cache_key)
+                if stale is not None:
+                    return stale
+                return fallback_factory()
+            _set_pos_cache(cache_key, result, ttl_seconds)
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -1064,6 +1133,7 @@ def create_sale(
 
 
 @router.get("/sales", response_model=List[schemas.SaleRead])
+@_pos_cached(ttl_seconds=10, fallback_factory=list)
 def list_sales(
     skip: int = 0,
     limit: int = 100,
@@ -1133,6 +1203,10 @@ def list_sales(
 
 
 @router.get("/sales/history", response_model=schemas.SalesHistoryPage)
+@_pos_cached(
+    ttl_seconds=10,
+    fallback_factory=lambda: schemas.SalesHistoryPage(total=0, skip=0, limit=0, items=[]),
+)
 def list_sales_history(
     skip: int = 0,
     limit: int = Query(default=100, ge=1, le=500),
@@ -1723,6 +1797,7 @@ def view_sale_document(
 
 
 @router.get("/returns", response_model=List[schemas.SaleReturnRead])
+@_pos_cached(ttl_seconds=10, fallback_factory=list)
 def list_returns(
     skip: int = 0,
     limit: int = 100,
@@ -1744,6 +1819,7 @@ def list_returns(
 
 
 @router.get("/changes", response_model=List[schemas.SaleChangeRead])
+@_pos_cached(ttl_seconds=10, fallback_factory=list)
 def list_changes(
     skip: int = 0,
     limit: int = 100,

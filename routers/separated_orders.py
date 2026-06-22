@@ -1,10 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import functools
+import inspect
 from typing import List, Optional
 import unicodedata
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 import crud, models, schemas
 from database import get_db
@@ -26,6 +29,70 @@ FREE_SALE_REASON_REQUIRED = (
     os.getenv("FREE_SALE_REASON_REQUIRED", "true").strip().lower()
     not in {"0", "false", "no", "off"}
 )
+_SEPARATED_ORDERS_CACHE: dict[str, tuple[datetime, object]] = {}
+
+
+def _separated_cache_key(name: str, **params: object) -> str:
+    parts = [name]
+    for key in sorted(params.keys()):
+        value = params[key]
+        if isinstance(value, datetime):
+            rendered = value.isoformat()
+        else:
+            rendered = repr(value)
+        parts.append(f"{key}={rendered}")
+    return "|".join(parts)
+
+
+def _get_separated_cache(key: str):
+    cache_entry = _SEPARATED_ORDERS_CACHE.get(key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        return None
+    return value
+
+
+def _get_separated_stale_cache(key: str):
+    cache_entry = _SEPARATED_ORDERS_CACHE.get(key)
+    if not cache_entry:
+        return None
+    return cache_entry[1]
+
+
+def _set_separated_cache(key: str, value: object, ttl_seconds: int) -> None:
+    _SEPARATED_ORDERS_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def _separated_cached(ttl_seconds: int, fallback_factory):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound_args = inspect.signature(func).bind_partial(*args, **kwargs)
+            bound_args.apply_defaults()
+            cache_params = {
+                key: value
+                for key, value in bound_args.arguments.items()
+                if key not in {"db", "current_user"}
+            }
+            cache_key = _separated_cache_key(func.__name__, **cache_params)
+            cached = _get_separated_cache(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                result = func(*args, **kwargs)
+            except (SQLAlchemyTimeoutError, SQLAlchemyError):
+                stale = _get_separated_stale_cache(cache_key)
+                if stale is not None:
+                    return stale
+                return fallback_factory()
+            _set_separated_cache(cache_key, result, ttl_seconds)
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -113,6 +180,7 @@ def create_separated_order(
 
 
 @router.get("", response_model=List[schemas.SeparatedOrderRead])
+@_separated_cached(ttl_seconds=10, fallback_factory=list)
 def list_separated_orders(
     barcode: Optional[str] = Query(default=None),
     sale_number: Optional[int] = Query(default=None),
