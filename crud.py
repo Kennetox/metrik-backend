@@ -94,6 +94,7 @@ _PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
 _PUBLIC_WEB_CATEGORIES_CACHE: Dict[str, tuple[datetime, list[models.WebCatalogCategory]]] = {}
 _PUBLIC_WEB_PRODUCTS_CACHE: Dict[str, tuple[datetime, schemas.WebCatalogProductList]] = {}
 _PUBLIC_WEB_PRODUCT_DETAIL_CACHE: Dict[str, tuple[datetime, Any]] = {}
+_PUBLIC_WEB_PRODUCT_SLUGS_CACHE: Dict[str, tuple[datetime, set[str]]] = {}
 _PUBLIC_WEB_COMBOS_CACHE: Dict[str, tuple[datetime, list[schemas.ComercioWebComboRead] | schemas.ComercioWebComboRead]] = {}
 _PUBLIC_WEB_STALE_CACHE: Dict[str, Any] = {}
 
@@ -271,6 +272,28 @@ def _get_public_web_product_detail_cache(cache_key: str) -> Any:
 def _set_public_web_product_detail_cache(cache_key: str, value: Any) -> None:
     ttl_seconds = _env_int("PUBLIC_WEB_PRODUCT_DETAIL_CACHE_TTL_SECONDS", 60, min_value=10, max_value=15 * 60)
     _PUBLIC_WEB_PRODUCT_DETAIL_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def _public_web_product_slugs_cache_ttl_seconds() -> int:
+    return _env_int("PUBLIC_WEB_PRODUCT_SLUGS_CACHE_TTL_SECONDS", 300, min_value=30, max_value=30 * 60)
+
+
+def _get_public_web_product_slugs_cache(tenant_id: Optional[int]) -> Optional[set[str]]:
+    cache_key = _public_web_home_cache_key("product-slugs", tenant_id)
+    cache_entry = _PUBLIC_WEB_PRODUCT_SLUGS_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_PRODUCT_SLUGS_CACHE.pop(cache_key, None)
+        return None
+    return set(value)
+
+
+def _set_public_web_product_slugs_cache(tenant_id: Optional[int], value: set[str]) -> None:
+    cache_key = _public_web_home_cache_key("product-slugs", tenant_id)
+    ttl_seconds = _public_web_product_slugs_cache_ttl_seconds()
+    _PUBLIC_WEB_PRODUCT_SLUGS_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), set(value))
 
 
 def _public_web_combos_cache_key(
@@ -7141,6 +7164,10 @@ def get_web_catalog_product_by_slug(
         if cached_result is False:
             return None
         return cached_result
+    cached_slugs = _get_public_web_product_slugs_cache(effective_tenant_id)
+    if cached_slugs is not None and normalized_slug not in cached_slugs:
+        _set_public_web_product_detail_cache(cache_key, False)
+        return None
     try:
         cached_categories = _get_public_web_categories_cache(effective_tenant_id)
         if cached_categories is not None:
@@ -7160,6 +7187,31 @@ def get_web_catalog_product_by_slug(
                 _set_public_web_categories_cache(effective_tenant_id, list(category_map.values()))
             else:
                 category_map = _build_public_default_category_map()
+        try:
+            if cached_slugs is None:
+                slug_rows = (
+                    db.query(models.Product.web_slug, models.Product.name, models.Product.sku)
+                    .filter(models.Product.active.is_(True))
+                    .filter(models.Product.web_published.is_(True))
+                )
+                if effective_tenant_id is not None:
+                    slug_rows = slug_rows.filter(models.Product.tenant_id == effective_tenant_id)
+                slug_values: set[str] = set()
+                for manual_slug, product_name, product_sku in slug_rows.all():
+                    if isinstance(manual_slug, str) and manual_slug.strip():
+                        slug_values.add(build_product_web_slug(manual_slug))
+                    generated_slug = build_product_web_slug(product_name, product_sku)
+                    if generated_slug:
+                        slug_values.add(generated_slug)
+                _set_public_web_product_slugs_cache(effective_tenant_id, slug_values)
+                cached_slugs = slug_values
+                if normalized_slug not in slug_values:
+                    _set_public_web_product_detail_cache(cache_key, False)
+                    return None
+        except (SQLAlchemyTimeoutError, SQLAlchemyError):
+            if cached_slugs is not None and normalized_slug not in cached_slugs:
+                _set_public_web_product_detail_cache(cache_key, False)
+                return None
         inactive_category_keys = {
             _normalize_web_catalog_category_key(item.key)
             for item in category_map.values()
