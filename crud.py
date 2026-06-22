@@ -93,6 +93,7 @@ _PUBLIC_CATALOG_TENANT_ID: Optional[int] = None
 _PUBLIC_WEB_HOME_CACHE: Dict[str, tuple[datetime, Any]] = {}
 _PUBLIC_WEB_CATEGORIES_CACHE: Dict[str, tuple[datetime, list[models.WebCatalogCategory]]] = {}
 _PUBLIC_WEB_PRODUCTS_CACHE: Dict[str, tuple[datetime, schemas.WebCatalogProductList]] = {}
+_PUBLIC_WEB_PRODUCT_DETAIL_CACHE: Dict[str, tuple[datetime, Any]] = {}
 _PUBLIC_WEB_COMBOS_CACHE: Dict[str, tuple[datetime, list[schemas.ComercioWebComboRead] | schemas.ComercioWebComboRead]] = {}
 _PUBLIC_WEB_STALE_CACHE: Dict[str, Any] = {}
 
@@ -254,6 +255,22 @@ def _set_public_web_products_cache(cache_key: str, value: schemas.WebCatalogProd
     ttl_seconds = _public_web_home_cache_ttl_seconds()
     _PUBLIC_WEB_PRODUCTS_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
     _PUBLIC_WEB_STALE_CACHE[cache_key] = value
+
+
+def _get_public_web_product_detail_cache(cache_key: str) -> Any:
+    cache_entry = _PUBLIC_WEB_PRODUCT_DETAIL_CACHE.get(cache_key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        _PUBLIC_WEB_PRODUCT_DETAIL_CACHE.pop(cache_key, None)
+        return None
+    return value
+
+
+def _set_public_web_product_detail_cache(cache_key: str, value: Any) -> None:
+    ttl_seconds = _env_int("PUBLIC_WEB_PRODUCT_DETAIL_CACHE_TTL_SECONDS", 60, min_value=10, max_value=15 * 60)
+    _PUBLIC_WEB_PRODUCT_DETAIL_CACHE[cache_key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
 
 
 def _public_web_combos_cache_key(
@@ -7117,6 +7134,13 @@ def get_web_catalog_product_by_slug(
     tenant_id: Optional[int] = None,
 ) -> Optional[schemas.WebCatalogProductDetail]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    normalized_slug = build_product_web_slug(slug)
+    cache_key = f"tenant={effective_tenant_id if effective_tenant_id is not None else 'none'}|slug={normalized_slug}"
+    cached_result = _get_public_web_product_detail_cache(cache_key)
+    if cached_result is not None:
+        if cached_result is False:
+            return None
+        return cached_result
     try:
         cached_categories = _get_public_web_categories_cache(effective_tenant_id)
         if cached_categories is not None:
@@ -7165,7 +7189,6 @@ def get_web_catalog_product_by_slug(
             )
             .all()
         )
-        normalized_slug = build_product_web_slug(slug)
         for product, qty_on_hand, category_name in rows:
             normalized_category_key = _normalize_web_catalog_category_key(product.web_category_key)
             if normalized_category_key and normalized_category_key in inactive_category_keys:
@@ -7204,8 +7227,16 @@ def get_web_catalog_product_by_slug(
                 specs={},
                 whatsapp_message=product.web_whatsapp_message,
             )
+            _set_public_web_product_detail_cache(cache_key, result)
+            return result
+        _set_public_web_product_detail_cache(cache_key, False)
         return None
     except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_result = _get_public_web_product_detail_cache(cache_key)
+        if stale_result is False:
+            return None
+        if isinstance(stale_result, schemas.WebCatalogProductDetail):
+            return stale_result
         return None
 
 

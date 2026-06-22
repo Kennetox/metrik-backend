@@ -120,7 +120,7 @@ async def readyz():
             "ready": False,
             "maintenance": True,
         }
-        _set_readyz_cache(503, payload, ttl_seconds=5)
+        _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
 
     db = SessionLocal()
@@ -133,7 +133,7 @@ async def readyz():
             "ready": False,
             "maintenance": False,
         }
-        _set_readyz_cache(503, payload, ttl_seconds=5)
+        _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
     finally:
         db.close()
