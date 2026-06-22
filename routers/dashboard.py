@@ -1,11 +1,14 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+import functools
+import inspect
 import re
 from zoneinfo import ZoneInfo
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Date, case, cast, func, or_
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session, load_only, selectinload
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
@@ -23,6 +26,105 @@ router = APIRouter(
     tags=["dashboard"],
     dependencies=[Depends(require_permission("dashboard.view"))],
 )
+
+_DASHBOARD_CACHE: dict[str, tuple[datetime, object]] = {}
+
+
+def _dashboard_cache_key(name: str, tenant_id: int, **params: object) -> str:
+    parts = [name, f"tenant={tenant_id}"]
+    for key in sorted(params.keys()):
+        value = params[key]
+        parts.append(f"{key}={value}")
+    return "|".join(parts)
+
+
+def _get_dashboard_cache(key: str):
+    cache_entry = _DASHBOARD_CACHE.get(key)
+    if not cache_entry:
+        return None
+    expires_at, value = cache_entry
+    if expires_at <= datetime.utcnow():
+        return None
+    return value
+
+
+def _get_dashboard_stale_cache(key: str):
+    cache_entry = _DASHBOARD_CACHE.get(key)
+    if not cache_entry:
+        return None
+    return cache_entry[1]
+
+
+def _set_dashboard_cache(key: str, value: object, ttl_seconds: int) -> None:
+    _DASHBOARD_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
+
+
+def _dashboard_cache_key_from_call(func_name: str, bound_args: inspect.BoundArguments) -> str:
+    parts = [func_name]
+    for key in sorted(bound_args.arguments.keys()):
+        if key == "db":
+            continue
+        value = bound_args.arguments[key]
+        if isinstance(value, datetime):
+            rendered = value.isoformat()
+        elif isinstance(value, date):
+            rendered = value.isoformat()
+        else:
+            rendered = repr(value)
+        parts.append(f"{key}={rendered}")
+    return "|".join(parts)
+
+
+def _dashboard_cached(ttl_seconds: int, fallback_factory: Callable[[], object]):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound_args = inspect.signature(func).bind_partial(*args, **kwargs)
+            bound_args.apply_defaults()
+            cache_key = _dashboard_cache_key_from_call(func.__name__, bound_args)
+            cached = _get_dashboard_cache(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                result = func(*args, **kwargs)
+            except (SQLAlchemyTimeoutError, SQLAlchemyError):
+                stale = _get_dashboard_stale_cache(cache_key)
+                if stale is not None:
+                    return stale
+                return fallback_factory()
+            _set_dashboard_cache(cache_key, result, ttl_seconds)
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def _empty_dashboard_summary() -> schemas.DashboardSummary:
+    return schemas.DashboardSummary(
+        today_sales_total=0.0,
+        today_tickets=0,
+        today_avg_ticket=0.0,
+        today_change_count=0,
+        today_change_extra_total=0.0,
+        today_change_refund_total=0.0,
+        month_sales_total=0.0,
+        month_tickets=0,
+        month_avg_ticket=0.0,
+        month_change_count=0,
+        month_change_extra_total=0.0,
+        month_change_refund_total=0.0,
+        payment_methods=[],
+        last_7_days=[],
+        trend_days=[],
+    )
+
+
+def _empty_monthly_sales() -> List[schemas.MonthlySalesPoint]:
+    return [
+        schemas.MonthlySalesPoint(month=month, total=0.0, tickets=0)
+        for month in range(1, 13)
+    ]
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -257,165 +359,182 @@ def get_payment_methods_summary(
                 status_code=400, detail="start_date debe ser YYYY-MM-DD"
             ) from exc
     range_key = range.lower().strip()
+    cache_key = _dashboard_cache_key(
+        "payment-methods",
+        tenant_id,
+        range=range_key,
+        start_date=parsed_start.isoformat() if parsed_start else "",
+    )
+    cached = _get_dashboard_cache(cache_key)
+    if isinstance(cached, schemas.PaymentMethodsSummary):
+        return cached
     start_dt, end_dt = _resolve_range_bounds(range_key, bogota_tz, parsed_start)
     start_utc = start_dt.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = end_dt.astimezone(timezone.utc).replace(tzinfo=None)
-    payment_method_aliases = _build_payment_method_alias_map(db, tenant_id)
+    try:
+        payment_method_aliases = _build_payment_method_alias_map(db, tenant_id)
 
-    sales = (
-        db.query(models.Sale)
-        .options(
-            load_only(
-                models.Sale.id,
-                models.Sale.total,
-                models.Sale.paid_amount,
-                models.Sale.change_amount,
-            ),
-            selectinload(models.Sale.payments).load_only(
-                models.SalePayment.method,
-                models.SalePayment.amount,
-            ),
-            selectinload(models.Sale.separated_order).load_only(
-                models.SeparatedOrder.id
-            ),
-        )
-        .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(models.Sale.created_at >= start_utc)
-        .filter(models.Sale.created_at <= end_utc)
-        .all()
-    )
-    returns = (
-        db.query(models.SaleReturn)
-        .options(
-            load_only(models.SaleReturn.id),
-            selectinload(models.SaleReturn.payments).load_only(
-                models.SaleReturnPayment.method,
-                models.SaleReturnPayment.amount,
-            ),
-        )
-        .filter(models.SaleReturn.tenant_id == tenant_id)
-        .filter(models.SaleReturn.created_at >= start_utc)
-        .filter(models.SaleReturn.created_at <= end_utc)
-        .filter(models.SaleReturn.status == "confirmed")
-        .filter(models.SaleReturn.adjustment_reference.is_(None))
-        .all()
-    )
-    changes = (
-        db.query(models.SaleChange)
-        .options(
-            load_only(models.SaleChange.id, models.SaleChange.refund_due),
-            selectinload(models.SaleChange.payments).load_only(
-                models.SaleChangePayment.method,
-                models.SaleChangePayment.amount,
-            ),
-        )
-        .filter(models.SaleChange.tenant_id == tenant_id)
-        .filter(models.SaleChange.created_at >= start_utc)
-        .filter(models.SaleChange.created_at <= end_utc)
-        .filter(models.SaleChange.status == "confirmed")
-        .all()
-    )
-    separated_payments = (
-        db.query(models.SeparatedOrderPayment)
-        .join(
-            models.SeparatedOrder,
-            models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
-        )
-        .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
-        .filter(models.Sale.tenant_id == tenant_id)
-        .filter(
-            or_(
-                models.SeparatedOrderPayment.status.is_(None),
-                models.SeparatedOrderPayment.status != "voided",
+        sales = (
+            db.query(models.Sale)
+            .options(
+                load_only(
+                    models.Sale.id,
+                    models.Sale.total,
+                    models.Sale.paid_amount,
+                    models.Sale.change_amount,
+                ),
+                selectinload(models.Sale.payments).load_only(
+                    models.SalePayment.method,
+                    models.SalePayment.amount,
+                ),
+                selectinload(models.Sale.separated_order).load_only(
+                    models.SeparatedOrder.id
+                ),
             )
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at <= end_utc)
+            .all()
         )
-        .filter(models.SeparatedOrder.status != "cancelado")
-        .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
-        .filter(models.SeparatedOrderPayment.paid_at <= end_utc)
-        .all()
-    )
-
-    payment_totals = defaultdict(float)
-    payment_ticket_sets = defaultdict(set)
-    payment_adjustments, _ = _collect_sale_adjustments(
-        db, [sale.id for sale in sales], tenant_id
-    )
-
-    for sale in sales:
-        sale_total = float(sale.total or 0.0)
-        cash_total = _sale_cash_total(sale)
-        if sale_total <= 0 or cash_total <= 0:
-            continue
-        paid_amount = float(sale.paid_amount or 0.0)
-        change_amount = float(sale.change_amount or 0.0)
-        if change_amount <= 0 and paid_amount > 0:
-            change_amount = max(0.0, paid_amount - sale_total)
-        adjustment = payment_adjustments.get(sale.id)
-        adjusted_payments = (
-            _parse_adjustment_payments(adjustment.payload)
-            if adjustment
-            else []
-        )
-        change_remaining = 0.0 if adjusted_payments else change_amount
-        payment_iter = (
-            adjusted_payments
-            if adjusted_payments
-            else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
-        )
-        for method, payment_amount in payment_iter:
-            method = _normalize_payment_method_for_summary(
-                method,
-                payment_method_aliases,
+        returns = (
+            db.query(models.SaleReturn)
+            .options(
+                load_only(models.SaleReturn.id),
+                selectinload(models.SaleReturn.payments).load_only(
+                    models.SaleReturnPayment.method,
+                    models.SaleReturnPayment.amount,
+                ),
             )
-            if payment_amount <= 0:
+            .filter(models.SaleReturn.tenant_id == tenant_id)
+            .filter(models.SaleReturn.created_at >= start_utc)
+            .filter(models.SaleReturn.created_at <= end_utc)
+            .filter(models.SaleReturn.status == "confirmed")
+            .filter(models.SaleReturn.adjustment_reference.is_(None))
+            .all()
+        )
+        changes = (
+            db.query(models.SaleChange)
+            .options(
+                load_only(models.SaleChange.id, models.SaleChange.refund_due),
+                selectinload(models.SaleChange.payments).load_only(
+                    models.SaleChangePayment.method,
+                    models.SaleChangePayment.amount,
+                ),
+            )
+            .filter(models.SaleChange.tenant_id == tenant_id)
+            .filter(models.SaleChange.created_at >= start_utc)
+            .filter(models.SaleChange.created_at <= end_utc)
+            .filter(models.SaleChange.status == "confirmed")
+            .all()
+        )
+        separated_payments = (
+            db.query(models.SeparatedOrderPayment)
+            .join(
+                models.SeparatedOrder,
+                models.SeparatedOrderPayment.separated_order_id == models.SeparatedOrder.id,
+            )
+            .join(models.Sale, models.SeparatedOrder.sale_id == models.Sale.id)
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(
+                or_(
+                    models.SeparatedOrderPayment.status.is_(None),
+                    models.SeparatedOrderPayment.status != "voided",
+                )
+            )
+            .filter(models.SeparatedOrder.status != "cancelado")
+            .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
+            .filter(models.SeparatedOrderPayment.paid_at <= end_utc)
+            .all()
+        )
+
+        payment_totals = defaultdict(float)
+        payment_ticket_sets = defaultdict(set)
+        payment_adjustments, _ = _collect_sale_adjustments(
+            db, [sale.id for sale in sales], tenant_id
+        )
+
+        for sale in sales:
+            sale_total = float(sale.total or 0.0)
+            cash_total = _sale_cash_total(sale)
+            if sale_total <= 0 or cash_total <= 0:
                 continue
-            if change_remaining > 0 and _is_cash_method(method):
-                applied = min(change_remaining, payment_amount)
-                payment_amount = max(0.0, payment_amount - applied)
-                change_remaining -= applied
-            if payment_amount <= 0:
-                continue
-            payment_totals[method] += payment_amount
-            payment_ticket_sets[method].add(sale.id)
-
-    for payment in separated_payments:
-        method = _normalize_payment_method_for_summary(
-            payment.method,
-            payment_method_aliases,
-        )
-        payment_totals[method] += float(payment.amount or 0.0)
-
-    for ret in returns:
-        for payment in ret.payments:
-            method = _normalize_payment_method_for_summary(
-                payment.method,
-                payment_method_aliases,
+            paid_amount = float(sale.paid_amount or 0.0)
+            change_amount = float(sale.change_amount or 0.0)
+            if change_amount <= 0 and paid_amount > 0:
+                change_amount = max(0.0, paid_amount - sale_total)
+            adjustment = payment_adjustments.get(sale.id)
+            adjusted_payments = (
+                _parse_adjustment_payments(adjustment.payload)
+                if adjustment
+                else []
             )
-            payment_totals[method] -= float(payment.amount or 0.0)
+            change_remaining = 0.0 if adjusted_payments else change_amount
+            payment_iter = (
+                adjusted_payments
+                if adjusted_payments
+                else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
+            )
+            for method, payment_amount in payment_iter:
+                method = _normalize_payment_method_for_summary(
+                    method,
+                    payment_method_aliases,
+                )
+                if payment_amount <= 0:
+                    continue
+                if change_remaining > 0 and _is_cash_method(method):
+                    applied = min(change_remaining, payment_amount)
+                    payment_amount = max(0.0, payment_amount - applied)
+                    change_remaining -= applied
+                if payment_amount <= 0:
+                    continue
+                payment_totals[method] += payment_amount
+                payment_ticket_sets[method].add(sale.id)
 
-    for change in changes:
-        for payment in change.payments:
+        for payment in separated_payments:
             method = _normalize_payment_method_for_summary(
                 payment.method,
                 payment_method_aliases,
             )
             payment_totals[method] += float(payment.amount or 0.0)
-        if float(change.refund_due or 0.0) > 0:
-            payment_totals["cash"] -= float(change.refund_due or 0.0)
 
-    payment_methods: List[schemas.PaymentMethodSummary] = []
-    for method, total in payment_totals.items():
-        payment_methods.append(
-            schemas.PaymentMethodSummary(
-                method=method,
-                total=float(total),
-                tickets=len(payment_ticket_sets.get(method, set())),
+        for ret in returns:
+            for payment in ret.payments:
+                method = _normalize_payment_method_for_summary(
+                    payment.method,
+                    payment_method_aliases,
+                )
+                payment_totals[method] -= float(payment.amount or 0.0)
+
+        for change in changes:
+            for payment in change.payments:
+                method = _normalize_payment_method_for_summary(
+                    payment.method,
+                    payment_method_aliases,
+                )
+                payment_totals[method] += float(payment.amount or 0.0)
+            if float(change.refund_due or 0.0) > 0:
+                payment_totals["cash"] -= float(change.refund_due or 0.0)
+
+        payment_methods: List[schemas.PaymentMethodSummary] = []
+        for method, total in payment_totals.items():
+            payment_methods.append(
+                schemas.PaymentMethodSummary(
+                    method=method,
+                    total=float(total),
+                    tickets=len(payment_ticket_sets.get(method, set())),
+                )
             )
-        )
 
-    payment_methods.sort(key=lambda entry: entry.total, reverse=True)
-    return schemas.PaymentMethodsSummary(methods=payment_methods)
+        payment_methods.sort(key=lambda entry: entry.total, reverse=True)
+        result = schemas.PaymentMethodsSummary(methods=payment_methods)
+        _set_dashboard_cache(cache_key, result, ttl_seconds=20)
+        return result
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        cached = _get_dashboard_stale_cache(cache_key)
+        if isinstance(cached, schemas.PaymentMethodsSummary):
+            return cached
+        return schemas.PaymentMethodsSummary(methods=[])
 
 
 def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: datetime.date):
@@ -426,6 +545,7 @@ def _summarize_sales(totals_by_day: dict, tickets_by_day: dict, start_date: date
 
 
 @router.get("/summary", response_model=schemas.DashboardSummary)
+@_dashboard_cached(ttl_seconds=10, fallback_factory=_empty_dashboard_summary)
 def get_dashboard_summary(
     source: str = Query(default="metrik"),
     tenant_id: int = Depends(get_current_tenant_id),
@@ -924,6 +1044,7 @@ def export_documents_excel(
     "/monthly-sales",
     response_model=List[schemas.MonthlySalesPoint],
 )
+@_dashboard_cached(ttl_seconds=60, fallback_factory=_empty_monthly_sales)
 def get_monthly_sales(
     year: Optional[int] = None,
     source: str = Query(default="metrik"),
@@ -1061,6 +1182,7 @@ def get_monthly_sales(
     "/daily-sales",
     response_model=List[schemas.SalesTrendPoint],
 )
+@_dashboard_cached(ttl_seconds=30, fallback_factory=list)
 def get_daily_sales(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
