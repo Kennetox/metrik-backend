@@ -309,6 +309,40 @@ class InventoryRecountLine(Base):
     counted_by = relationship("PosUser")
 
 
+class InventoryRecountDraft(Base):
+    __tablename__ = "inventory_recount_drafts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "recount_id",
+            "user_id",
+            name="uq_inventory_recount_drafts_user_scope",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    recount_id = Column(
+        Integer,
+        ForeignKey("inventory_recounts.id"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    counted_draft = Column(JSON, nullable=False, default=dict)
+    free_count_draft = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    recount = relationship("InventoryRecount")
+    user = relationship("PosUser")
+
+
 class ReceivingLot(Base):
     __tablename__ = "receiving_lots"
 

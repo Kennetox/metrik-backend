@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as html_escape
+import re
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -543,6 +544,50 @@ def _build_recount_read(
     )
 
 
+def _normalize_recount_draft_map(raw_value: object) -> dict[int, str]:
+    if not isinstance(raw_value, dict):
+        return {}
+    cleaned: dict[int, str] = {}
+    for raw_key, raw_entry in raw_value.items():
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        if key <= 0:
+            continue
+        if not isinstance(raw_entry, str):
+            continue
+        normalized = re.sub(r"[^\d]", "", raw_entry.strip())
+        if not normalized:
+            continue
+        cleaned[key] = normalized
+    return cleaned
+
+
+def _draft_state_from_record(
+    recount_id: int,
+    record: models.InventoryRecountDraft | None,
+) -> schemas.InventoryRecountDraftState:
+    if not record:
+        return schemas.InventoryRecountDraftState(
+            recount_id=recount_id,
+            counted_draft={},
+            free_count_draft={},
+            saved_at_ms=0,
+        )
+    saved_at_ms = (
+        int(record.updated_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        if record.updated_at
+        else 0
+    )
+    return schemas.InventoryRecountDraftState(
+        recount_id=recount_id,
+        counted_draft=_normalize_recount_draft_map(record.counted_draft),
+        free_count_draft=_normalize_recount_draft_map(record.free_count_draft),
+        saved_at_ms=saved_at_ms,
+    )
+
+
 def _get_recount_or_404(
     db: Session,
     recount_id: int,
@@ -792,6 +837,120 @@ def get_inventory_recount_detail(
     )
 
 
+@router.get(
+    "/recounts/{recount_id}/draft",
+    response_model=schemas.InventoryRecountDraftState,
+)
+def get_inventory_recount_draft(
+    recount_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    recount = _get_recount_or_404(db, recount_id, tenant_id)
+    draft = (
+        db.query(models.InventoryRecountDraft)
+        .filter(models.InventoryRecountDraft.recount_id == recount.id)
+        .filter(models.InventoryRecountDraft.user_id == current_user.id)
+        .filter(
+            models.InventoryRecountDraft.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
+    return _draft_state_from_record(recount.id, draft)
+
+
+@router.put(
+    "/recounts/{recount_id}/draft",
+    response_model=schemas.InventoryRecountDraftState,
+)
+def upsert_inventory_recount_draft(
+    recount_id: int,
+    payload: schemas.InventoryRecountDraftUpsert,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    recount = _get_recount_or_404(db, recount_id, tenant_id)
+    if recount.status in ("applied", "cancelled"):
+        raise HTTPException(status_code=400, detail="Este recuento ya no acepta cambios.")
+
+    counted_draft = _normalize_recount_draft_map(payload.counted_draft)
+    free_count_draft = _normalize_recount_draft_map(payload.free_count_draft)
+    draft = (
+        db.query(models.InventoryRecountDraft)
+        .filter(models.InventoryRecountDraft.recount_id == recount.id)
+        .filter(models.InventoryRecountDraft.user_id == current_user.id)
+        .filter(
+            models.InventoryRecountDraft.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
+    if not counted_draft and not free_count_draft:
+        if draft:
+            db.delete(draft)
+            db.commit()
+        return schemas.InventoryRecountDraftState(
+            recount_id=recount.id,
+            counted_draft={},
+            free_count_draft={},
+            saved_at_ms=0,
+        )
+
+    if not draft:
+        draft = models.InventoryRecountDraft(
+            tenant_id=tenant_id,
+            recount_id=recount.id,
+            user_id=current_user.id,
+            counted_draft=counted_draft,
+            free_count_draft=free_count_draft,
+        )
+        db.add(draft)
+    else:
+        draft.counted_draft = counted_draft
+        draft.free_count_draft = free_count_draft
+    db.commit()
+    db.refresh(draft)
+    return _draft_state_from_record(recount.id, draft)
+
+
+@router.delete(
+    "/recounts/{recount_id}/draft",
+    response_model=schemas.InventoryRecountDraftState,
+)
+def delete_inventory_recount_draft(
+    recount_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    recount = _get_recount_or_404(db, recount_id, tenant_id)
+    draft = (
+        db.query(models.InventoryRecountDraft)
+        .filter(models.InventoryRecountDraft.recount_id == recount.id)
+        .filter(models.InventoryRecountDraft.user_id == current_user.id)
+        .filter(
+            models.InventoryRecountDraft.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
+    if draft:
+        db.delete(draft)
+        db.commit()
+    return schemas.InventoryRecountDraftState(
+        recount_id=recount.id,
+        counted_draft={},
+        free_count_draft={},
+        saved_at_ms=0,
+    )
+
+
 @router.post(
     "/recounts/{recount_id}/lines",
     response_model=schemas.InventoryRecountLineRead,
@@ -974,6 +1133,19 @@ def cancel_inventory_recount(
 
     recount.status = "cancelled"
     recount.cancelled_at = datetime.utcnow()
+    draft = (
+        db.query(models.InventoryRecountDraft)
+        .filter(models.InventoryRecountDraft.recount_id == recount.id)
+        .filter(models.InventoryRecountDraft.user_id == current_user.id)
+        .filter(
+            models.InventoryRecountDraft.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
+    if draft:
+        db.delete(draft)
     db.commit()
     db.refresh(recount)
     return _build_recount_read(db, recount, tenant_id)
@@ -1031,6 +1203,19 @@ def apply_inventory_recount(
     if recount.closed_at is None:
         recount.closed_at = recount.applied_at
         recount.closed_by_user_id = current_user.id
+    draft = (
+        db.query(models.InventoryRecountDraft)
+        .filter(models.InventoryRecountDraft.recount_id == recount.id)
+        .filter(models.InventoryRecountDraft.user_id == current_user.id)
+        .filter(
+            models.InventoryRecountDraft.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .first()
+    )
+    if draft:
+        db.delete(draft)
     db.commit()
     db.refresh(recount)
     return _build_recount_read(db, recount, tenant_id)

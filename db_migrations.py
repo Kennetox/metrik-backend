@@ -436,6 +436,98 @@ def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
         )
 
 
+def _ensure_inventory_recount_drafts_schema(connection, backend: str) -> None:
+    table = "inventory_recount_drafts"
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS inventory_recount_drafts (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER REFERENCES tenants(id),
+                    recount_id INTEGER NOT NULL REFERENCES inventory_recounts(id),
+                    user_id INTEGER NOT NULL REFERENCES pos_users(id),
+                    counted_draft JSON NOT NULL DEFAULT '{}'::json,
+                    free_count_draft JSON NOT NULL DEFAULT '{}'::json,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_recount_drafts_user_scope
+                ON inventory_recount_drafts (tenant_id, recount_id, user_id)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_tenant_id "
+                "ON inventory_recount_drafts (tenant_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_recount_id "
+                "ON inventory_recount_drafts (recount_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_user_id "
+                "ON inventory_recount_drafts (user_id)"
+            )
+        )
+        return
+
+    if not _table_exists(connection, table):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE inventory_recount_drafts (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
+                    recount_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    counted_draft TEXT NOT NULL DEFAULT '{}',
+                    free_count_draft TEXT NOT NULL DEFAULT '{}',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    connection.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_recount_drafts_user_scope
+            ON inventory_recount_drafts (tenant_id, recount_id, user_id)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_tenant_id "
+            "ON inventory_recount_drafts (tenant_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_recount_id "
+            "ON inventory_recount_drafts (recount_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_inventory_recount_drafts_user_id "
+            "ON inventory_recount_drafts (user_id)"
+        )
+    )
+
+
 def _table_exists_postgres(connection, table: str) -> bool:
     row = connection.execute(
         text(
@@ -1691,6 +1783,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_description_template_schema(connection, backend="postgresql")
                 _ensure_web_catalog_home_slider_schema(connection, backend="postgresql")
                 _ensure_web_catalog_combo_schema(connection, backend="postgresql")
+                _ensure_inventory_recount_drafts_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
@@ -2854,6 +2947,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_description_template_schema(connection, backend="sqlite")
                 _ensure_web_catalog_home_slider_schema(connection, backend="sqlite")
                 _ensure_web_catalog_combo_schema(connection, backend="sqlite")
+                _ensure_inventory_recount_drafts_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:

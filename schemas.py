@@ -1237,6 +1237,18 @@ class InventoryRecountDetail(BaseModel):
     lines: List[InventoryRecountLineRead]
 
 
+class InventoryRecountDraftState(BaseModel):
+    recount_id: int
+    counted_draft: Dict[int, str] = Field(default_factory=dict)
+    free_count_draft: Dict[int, str] = Field(default_factory=dict)
+    saved_at_ms: int = 0
+
+
+class InventoryRecountDraftUpsert(BaseModel):
+    counted_draft: Dict[int, str] = Field(default_factory=dict)
+    free_count_draft: Dict[int, str] = Field(default_factory=dict)
+
+
 # ===================== RECEIVING =====================
 
 
