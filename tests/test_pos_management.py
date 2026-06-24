@@ -417,6 +417,65 @@ def test_closure_separated_clarification_totals(client: TestClient):
     assert reloaded_data["separated_summary"]["day_with_pending_total"] == 62000.0
 
 
+def test_dashboard_summary_matches_collected_closure_total(client: TestClient):
+    headers = _auth_headers(client)
+    db = TestingSessionLocal()
+    product = models.Product(
+        name="Producto dashboard cierre",
+        sku="DASH-CLOSE-001",
+        price=62000.0,
+        cost=20000.0,
+        barcode="DASH-CLOSE-001",
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    db.close()
+
+    separated_payload = {
+        "payment_method": "cash",
+        "total": 25000.0,
+        "paid_amount": 25000.0,
+        "change_amount": 0.0,
+        "cart_discount_value": 0.0,
+        "cart_discount_percent": 0.0,
+        "customer_name": "Cliente Dashboard",
+        "notes": "Caso de prueba dashboard",
+        "pos_name": "POS 1",
+        "vendor_name": "Tester",
+        "items": [
+            {
+                "product_id": product.id,
+                "quantity": 1,
+                "unit_price": 62000.0,
+                "product_sku": product.sku,
+                "product_name": product.name,
+                "product_barcode": product.barcode,
+                "discount": 0.0,
+            }
+        ],
+        "payments": [{"method": "cash", "amount": 10000.0}],
+        "due_date": datetime.utcnow().isoformat(),
+    }
+    separated_resp = client.post("/separated-orders", json=separated_payload, headers=headers)
+    assert separated_resp.status_code == 201
+
+    summary_resp = client.get("/dashboard/summary?source=metrik", headers=headers)
+    assert summary_resp.status_code == 200
+    summary = summary_resp.json()
+    assert summary["today_sales_total"] == 25000.0
+    assert summary["today_tickets"] == 1
+
+
 def test_customer_crud_and_sales_association(client: TestClient):
     headers = _auth_headers(client)
     payload = {

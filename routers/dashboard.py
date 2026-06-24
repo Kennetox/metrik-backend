@@ -147,6 +147,52 @@ def _sale_reporting_total(sale: models.Sale) -> float:
     return float(crud.calculate_sale_total_from_items(sale) or sale.total or 0.0)
 
 
+def _sale_collected_total_for_summary(
+    sale: models.Sale,
+    payment_adjustment: models.DocumentAdjustment | None,
+) -> float:
+    """
+    Calcula el valor efectivamente cobrado por una venta para el resumen.
+
+    Esto evita inflar el dashboard con el total reservado de separadas.
+    """
+
+    paid_amount = float(sale.paid_amount or 0.0)
+    sale_total = float(sale.total or 0.0)
+    change_amount = float(sale.change_amount or 0.0)
+    if change_amount <= 0 and paid_amount > 0:
+        change_amount = max(0.0, paid_amount - sale_total)
+
+    adjusted_payments = (
+        _parse_adjustment_payments(payment_adjustment.payload)
+        if payment_adjustment
+        else []
+    )
+    payment_iter = (
+        adjusted_payments
+        if adjusted_payments
+        else [(p.method, float(p.amount or 0.0)) for p in sale.payments]
+    )
+    if not payment_iter and not bool(getattr(sale, "is_separated", False)):
+        return max(0.0, sale_total)
+
+    change_remaining = 0.0 if adjusted_payments else change_amount
+    collected_total = 0.0
+    for method, payment_amount in payment_iter:
+        amount = float(payment_amount or 0.0)
+        if amount <= 0:
+            continue
+        if change_remaining > 0 and _is_cash_method(method):
+            applied = min(change_remaining, amount)
+            amount = max(0.0, amount - applied)
+            change_remaining -= applied
+        if amount <= 0:
+            continue
+        collected_total += amount
+
+    return collected_total
+
+
 def _is_cash_method(method: str | None) -> bool:
     if not method:
         return False
@@ -667,6 +713,10 @@ def get_dashboard_summary(
                 models.Sale.total,
                 models.Sale.paid_amount,
             ),
+            selectinload(models.Sale.payments).load_only(
+                models.SalePayment.method,
+                models.SalePayment.amount,
+            ),
             selectinload(models.Sale.separated_order).load_only(
                 models.SeparatedOrder.id
             ),
@@ -735,9 +785,12 @@ def get_dashboard_summary(
 
     for sale in sales_month:
         day = _to_bogota_date(sale.created_at, bogota_tz)
-        cash_total = _sale_reporting_total(sale)
+        collected_total = _sale_collected_total_for_summary(
+            sale,
+            payment_adjustments.get(sale.id),
+        )
         delta = float(total_delta_by_sale.get(sale.id, 0.0))
-        effective_total = cash_total + delta
+        effective_total = collected_total + delta
         if effective_total > 0:
             totals_by_day[day] += effective_total
             tickets_by_day[day] += 1
@@ -761,15 +814,18 @@ def get_dashboard_summary(
     trend_refunds_by_day = defaultdict(float)
     trend_change_extra_by_day = defaultdict(float)
     trend_change_refund_by_day = defaultdict(float)
-    _, trend_total_delta_by_sale = _collect_sale_adjustments(
+    trend_payment_adjustments, trend_total_delta_by_sale = _collect_sale_adjustments(
         db, [sale.id for sale in sales_trend], tenant_id
     ) if sales_trend else ({}, {})
 
     for sale in sales_trend:
         day = _to_bogota_date(sale.created_at, bogota_tz)
-        cash_total = _sale_reporting_total(sale)
+        collected_total = _sale_collected_total_for_summary(
+            sale,
+            trend_payment_adjustments.get(sale.id),
+        )
         delta = float(trend_total_delta_by_sale.get(sale.id, 0.0))
-        effective_total = cash_total + delta
+        effective_total = collected_total + delta
         if effective_total > 0:
             trend_totals_by_day[day] += effective_total
             trend_tickets_by_day[day] += 1
@@ -1073,18 +1129,44 @@ def get_monthly_sales(
 
     monthly = {month: {"total": 0.0, "tickets": 0} for month in range(1, 13)}
     if include_metrik:
-        sales_monthly_rows = _collect_sales_aggregate_by_bucket(
-            db,
-            tenant_id=tenant_id,
-            created_at_column=models.Sale.created_at,
-            bucket="month",
-            start_utc=year_start,
-            end_utc=year_end,
+        sales_monthly = (
+            db.query(models.Sale)
+            .options(
+                load_only(
+                    models.Sale.id,
+                    models.Sale.created_at,
+                    models.Sale.total,
+                    models.Sale.paid_amount,
+                    models.Sale.change_amount,
+                ),
+                selectinload(models.Sale.payments).load_only(
+                    models.SalePayment.method,
+                    models.SalePayment.amount,
+                ),
+                selectinload(models.Sale.separated_order).load_only(
+                    models.SeparatedOrder.id
+                ),
+            )
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= year_start)
+            .filter(models.Sale.created_at < year_end)
+            .all()
         )
-        for row in sales_monthly_rows:
-            month = int(row.bucket.month)
-            monthly[month]["total"] += float(row.total or 0.0)
-            monthly[month]["tickets"] += int(row.tickets or 0)
+        payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
+            db, [sale.id for sale in sales_monthly], tenant_id
+        ) if sales_monthly else ({}, {})
+        for sale in sales_monthly:
+            month = _to_bogota_date(sale.created_at, bogota_tz).month
+            collected_total = _sale_collected_total_for_summary(
+                sale,
+                payment_adjustments.get(sale.id),
+            )
+            effective_total = collected_total + float(total_delta_by_sale.get(sale.id, 0.0))
+            if effective_total <= 0:
+                continue
+            monthly[month]["total"] += effective_total
+            monthly[month]["tickets"] += 1
 
         separated_monthly_rows = (
             db.query(
@@ -1229,18 +1311,44 @@ def get_daily_sales(
     change_extra_by_day = defaultdict(float)
     change_refund_by_day = defaultdict(float)
     if include_metrik:
-        sales_daily_rows = _collect_sales_aggregate_by_bucket(
-            db,
-            tenant_id=tenant_id,
-            created_at_column=models.Sale.created_at,
-            bucket="day",
-            start_utc=start_utc,
-            end_utc=end_utc,
+        sales_daily = (
+            db.query(models.Sale)
+            .options(
+                load_only(
+                    models.Sale.id,
+                    models.Sale.created_at,
+                    models.Sale.total,
+                    models.Sale.paid_amount,
+                    models.Sale.change_amount,
+                ),
+                selectinload(models.Sale.payments).load_only(
+                    models.SalePayment.method,
+                    models.SalePayment.amount,
+                ),
+                selectinload(models.Sale.separated_order).load_only(
+                    models.SeparatedOrder.id
+                ),
+            )
+            .filter(or_(models.Sale.status.is_(None), models.Sale.status != "voided"))
+            .filter(models.Sale.tenant_id == tenant_id)
+            .filter(models.Sale.created_at >= start_utc)
+            .filter(models.Sale.created_at < end_utc)
+            .all()
         )
-        for row in sales_daily_rows:
-            day = row.bucket
-            totals_by_day[day] += float(row.total or 0.0)
-            tickets_by_day[day] += int(row.tickets or 0)
+        payment_adjustments, total_delta_by_sale = _collect_sale_adjustments(
+            db, [sale.id for sale in sales_daily], tenant_id
+        ) if sales_daily else ({}, {})
+        for sale in sales_daily:
+            day = _to_bogota_date(sale.created_at, bogota_tz)
+            collected_total = _sale_collected_total_for_summary(
+                sale,
+                payment_adjustments.get(sale.id),
+            )
+            effective_total = collected_total + float(total_delta_by_sale.get(sale.id, 0.0))
+            if effective_total <= 0:
+                continue
+            totals_by_day[day] += effective_total
+            tickets_by_day[day] += 1
 
         separated_daily_rows = (
             db.query(
