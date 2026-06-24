@@ -935,12 +935,12 @@ def _build_restock_forecast_response(
 
     summary_lines = [
         (
-            f"Miré ventas de hoy y solo incluí productos realmente vendidos que ya están cerca del punto de aviso."
+            "Revisé las ventas de hoy y dejé solo productos realmente vendidos que ya están cerca del punto de aviso."
             if mode == "today"
-            else f"Miré ventas de los últimos {lookback_days} días y la cobertura estimada por producto."
+            else f"Revisé las ventas de los últimos {lookback_days} días y calculé la cobertura estimada por producto."
         ),
-        f"Top prioridad: {high_count} críticas, {medium_count} en vigilancia y {low_count} bajas.",
-        "La sugerencia mezcla rotación reciente, stock actual y el patrón de reposición aprendido de movimientos.",
+        f"Prioridad: {high_count} críticas, {medium_count} en vigilancia y {low_count} bajas.",
+        "Cruzo rotación reciente, stock actual y el patrón de reposición aprendido de movimientos.",
         "Dejé fuera productos con rotación demasiado baja para no llenar la lista con ruido.",
     ]
 
@@ -952,7 +952,7 @@ def _build_restock_forecast_response(
 
     conversation_starters = [
         "¿Cuál de estos debería reponer primero?",
-        "Muéstrame el detalle de uno de ellos",
+        "Muéstrame el detalle completo",
         "¿Qué cambiaría si revisamos 7 días en vez de 30?",
     ]
 
