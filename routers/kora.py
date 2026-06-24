@@ -777,6 +777,7 @@ def _build_restock_forecast_response(
         )
         strong_rotation = rotation_volume >= 6 or units_lookback >= 6 or units_7d >= 2
         has_learned_signal = bool(restock_before_levels or low_touch_levels)
+        coverage_days = qty / daily_rate if daily_rate > 0 else None
         if mode == "today" and units_today <= 0:
             continue
         daily_restock_limit = max(
@@ -802,7 +803,6 @@ def _build_restock_forecast_response(
         buffer_target = max(configured_threshold, effective_threshold)
         target_qty = max(projected_demand + buffer_target, float(buffer_target))
         suggested_qty = max(int(ceil(target_qty - qty)), 0)
-        coverage_days = qty / daily_rate if daily_rate > 0 else None
 
         urgency = "low"
         reason_parts: list[str] = []
