@@ -244,6 +244,14 @@ def _is_consumption_movement(movement: models.InventoryMovement) -> bool:
     return reason in _CONSUMPTION_REASONS or reference_type in _CONSUMPTION_REASONS
 
 
+def _format_days(value: float | None) -> str:
+    if value is None:
+        return "sin cobertura"
+    if value < 1:
+        return "< 1 día"
+    return f"{round(value)} días"
+
+
 def _reverse_stock_path(
     current_qty: float, movements: list[models.InventoryMovement]
 ) -> list[tuple[models.InventoryMovement, float, float]]:
@@ -818,10 +826,10 @@ def _build_restock_forecast_response(
                 reason_parts.append(f"ya tocó el umbral de reposición configurado ({effective_threshold} unidades)")
         elif coverage_days is not None and coverage_days <= horizon_days:
             urgency = "high"
-            reason_parts.append(f"solo alcanza para {coverage_days:.1f} días")
+            reason_parts.append(f"solo alcanza para {_format_days(coverage_days)}")
         elif coverage_days is not None and coverage_days <= horizon_days * 2:
             urgency = "medium"
-            reason_parts.append(f"tiene cobertura aproximada de {coverage_days:.1f} días")
+            reason_parts.append(f"tiene cobertura aproximada de {_format_days(coverage_days)}")
         elif units_lookback > 0:
             urgency = "low"
             reason_parts.append("tiene rotación reciente")
