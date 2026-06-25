@@ -467,9 +467,6 @@ def calculate_sale_total_from_items(sale_like: Any) -> float:
     """
 
     sale_total = float(getattr(sale_like, "total", 0.0) or 0.0)
-    if sale_total > 0:
-        return _round_currency_to_unit(sale_total)
-
     items = getattr(sale_like, "items", None) or []
     item_totals = 0.0
     item_has_data = False

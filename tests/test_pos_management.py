@@ -298,6 +298,63 @@ def test_sale_with_surcharge_fields(client: TestClient):
     assert data["paid_amount"] == 115.5
 
 
+def test_sale_total_is_recomputed_from_discounted_items(client: TestClient):
+    headers = _auth_headers(client)
+    db = TestingSessionLocal()
+    product = models.Product(
+        name="Producto descuento total",
+        price=100.0,
+        cost=50.0,
+        barcode=None,
+        unit="UND",
+        stock_min=0,
+        preferred_qty=0,
+        reorder_point=0,
+        low_stock_alert=False,
+        allow_price_change=False,
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+
+    sale_in = schemas.SaleCreate(
+        payment_method="cash",
+        total=100.0,
+        paid_amount=85.0,
+        change_amount=0.0,
+        cart_discount_value=5.0,
+        cart_discount_percent=0.0,
+        customer_name="Cliente prueba",
+        notes=None,
+        pos_name="POS 1",
+        vendor_name="Tester",
+        items=[
+            schemas.SaleItemCreate(
+                product_id=product.id,
+                quantity=1,
+                unit_price=100.0,
+                product_sku=product.sku,
+                product_name=product.name,
+                product_barcode=product.barcode,
+                discount=10.0,
+            )
+        ],
+        payments=[schemas.SalePaymentCreate(method="cash", amount=85.0)],
+    )
+    sale = crud.create_sale(db, sale_in)
+    db.close()
+
+    assert sale.total == 85.0
+    assert sale.paid_amount == 85.0
+    assert sale.change_amount == 0.0
+    assert sale.cart_discount_value == 5.0
+    assert sale.items[0].line_discount_value == 10.0
+    assert sale.items[0].total == 90.0
+
+
 def test_closure_accumulates_surcharge(client: TestClient):
     headers = _auth_headers(client)
     isolated_pos_name = "POS SURCHARGE TEST"
