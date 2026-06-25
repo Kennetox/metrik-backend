@@ -702,7 +702,7 @@ def _build_restock_forecast_response(
 
     scored_items: list[tuple[float, KoraRestockForecastItem]] = []
     for row in product_rows:
-        qty = max(0.0, float(row.qty_on_hand or 0.0))
+        qty = float(row.qty_on_hand or 0.0)
         units_lookback = max(0.0, float(row.units_lookback or 0.0))
         units_7d = max(0.0, float(row.units_7d or 0.0))
         units_today = max(0.0, float(row.units_today or 0.0))
