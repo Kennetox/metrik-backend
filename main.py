@@ -94,6 +94,41 @@ def _maintenance_enabled() -> bool:
     return _flag_enabled(os.getenv("MAINTENANCE_MODE"), default=False)
 
 
+def _schema_bootstrap_enabled() -> bool:
+    raw = os.getenv("BOOTSTRAP_SCHEMA_ON_STARTUP")
+    if raw is not None:
+        return _flag_enabled(raw, default=False)
+
+    # En producción preferimos un arranque liviano; en SQLite/local conservamos
+    # el bootstrap automático para no romper flujos de desarrollo.
+    database_url = (os.getenv("DATABASE_URL") or "").strip().lower()
+    return database_url.startswith("sqlite")
+
+
+def _bootstrap_database_schema() -> None:
+    if not _schema_bootstrap_enabled():
+        return
+
+    # Esta rutina puede ser costosa en PostgreSQL, por eso queda opt-in.
+    Base.metadata.create_all(bind=engine)
+    run_schema_upgrades(engine)
+
+    platform_owner_email = os.getenv("PLATFORM_OWNER_EMAIL")
+    platform_owner_password = os.getenv("PLATFORM_OWNER_PASSWORD")
+    platform_owner_name = os.getenv("PLATFORM_OWNER_NAME", "Metrik Platform Admin")
+    if platform_owner_email and platform_owner_password:
+        bootstrap_db = SessionLocal()
+        try:
+            crud.ensure_platform_user(
+                bootstrap_db,
+                email=platform_owner_email,
+                password=platform_owner_password,
+                name=platform_owner_name,
+            )
+        finally:
+            bootstrap_db.close()
+
+
 @app.get("/healthz")
 async def healthz():
     # Liveness probe: solo confirma que el proceso HTTP está vivo.
@@ -163,26 +198,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Crear tablas en la BD
-Base.metadata.create_all(bind=engine)
-# Aplicamos parches de schema para SQLite y Postgres.
-run_schema_upgrades(engine)
-
-platform_owner_email = os.getenv("PLATFORM_OWNER_EMAIL")
-platform_owner_password = os.getenv("PLATFORM_OWNER_PASSWORD")
-platform_owner_name = os.getenv("PLATFORM_OWNER_NAME", "Metrik Platform Admin")
-if platform_owner_email and platform_owner_password:
-    bootstrap_db = SessionLocal()
-    try:
-        crud.ensure_platform_user(
-            bootstrap_db,
-            email=platform_owner_email,
-            password=platform_owner_password,
-            name=platform_owner_name,
-        )
-    finally:
-        bootstrap_db.close()
 
 logger = logging.getLogger("kensar.validation")
 scheduler_logger = logging.getLogger("kensar.scheduler")
@@ -303,6 +318,7 @@ async def _payment_reconciliation_loop():
 @app.on_event("startup")
 async def _start_monthly_report_scheduler():
     global _monthly_report_task, _payment_reconciliation_task
+    _bootstrap_database_schema()
     if not _monthly_report_scheduler_enabled():
         _monthly_report_task = None
     else:
