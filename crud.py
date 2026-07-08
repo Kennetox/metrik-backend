@@ -1573,7 +1573,7 @@ def _hydrate_web_personalization_bindings(
             product_sale_price = resolve_web_product_sale_price(product)
             binding["product_id"] = str(product.id)
             binding["product_sku"] = (product.sku or "").strip()
-            binding["product_name"] = resolve_web_product_name(product)
+            binding["product_name"] = resolve_product_web_name(product)
             binding["product_slug"] = resolve_product_web_slug(product)
             binding["product_price"] = product_sale_price
             binding["product_compare_price"] = resolve_web_compare_price(
@@ -1585,7 +1585,7 @@ def _hydrate_web_personalization_bindings(
             service_sale_price = resolve_web_product_sale_price(service)
             binding["service_id"] = str(service.id)
             binding["service_sku"] = (service.sku or "").strip()
-            binding["service_name"] = resolve_web_product_name(service)
+            binding["service_name"] = resolve_product_web_name(service)
             binding["service_price"] = service_sale_price
             binding["service_compare_price"] = resolve_web_compare_price(
                 service,
@@ -3533,8 +3533,15 @@ def search_comercio_web_catalog_products(
             )
         )
 
+    search_priority = case(
+        (models.Product.sku == term, 0),
+        (models.Product.id == (int(term) if term.isdigit() else -1), 1),
+        else_=2,
+    )
+
     products = (
         query.order_by(
+            search_priority.asc(),
             models.Product.web_published.desc(),
             models.Product.web_featured.desc(),
             models.Product.updated_at.desc(),
@@ -3723,6 +3730,11 @@ def list_comercio_web_publications_page(
             query = query.filter(models.Product.id == -1)
 
     normalized_order = (order or "newest").strip().lower()
+    search_priority = case(
+        (models.Product.sku == term, 0),
+        (models.Product.id == (int(term) if term.isdigit() else -1), 1),
+        else_=2,
+    )
     web_price_expr = case(
         (
             func.lower(func.coalesce(models.Product.web_price_source, "base")) == "fixed",
@@ -3771,6 +3783,7 @@ def list_comercio_web_publications_page(
         ]
     else:
         order_by = [
+            search_priority.asc(),
             publication_created_null_order.asc(),
             models.Product.web_published_at.desc(),
             models.Product.id.desc(),
