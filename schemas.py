@@ -1568,6 +1568,7 @@ class SaleItemBase(BaseModel):
     product_sku: Optional[str] = None
     product_name: str
     product_barcode: Optional[str] = None
+    combo_context_json: Optional[List[Dict[str, Any]]] = None
 
     # 🔵 Descuento específico de esta línea
     discount: float = 0.0  # compatibilidad legacy
@@ -1616,9 +1617,13 @@ class WebPersonalizationBindingEntry(BaseModel):
     product_sku: Optional[str] = None
     product_name: Optional[str] = None
     product_slug: Optional[str] = None
+    product_price: Optional[float] = None
+    product_compare_price: Optional[float] = None
     service_id: Optional[str] = None
     service_sku: Optional[str] = None
     service_name: Optional[str] = None
+    service_price: Optional[float] = None
+    service_compare_price: Optional[float] = None
 
 
 class WebPersonalizationBindings(BaseModel):
@@ -2338,6 +2343,7 @@ class WebCartItemMutationRequest(BaseModel):
     product_id: int
     quantity: float = Field(gt=0)
     unit_price_snapshot: Optional[float] = None
+    combo_context_json: Optional[List[Dict[str, Any]]] = None
 
 
 class WebCartItemUpdateRequest(BaseModel):
@@ -2361,6 +2367,7 @@ class WebCartItemRead(BaseModel):
     unit_price: float
     compare_price: Optional[float] = None
     line_total: float
+    combo_context_json: Optional[List[Dict[str, Any]]] = None
 
 
 class WebCartRead(BaseModel):
@@ -2411,6 +2418,7 @@ class WebOrderItemRead(BaseModel):
     unit_price: float
     line_discount_value: float
     line_total: float
+    combo_context_json: Optional[List[Dict[str, Any]]] = None
 
 
 class WebOrderPaymentRead(BaseModel):

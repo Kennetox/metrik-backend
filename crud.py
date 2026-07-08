@@ -1508,6 +1508,92 @@ def _normalize_web_personalization_bindings(value: Any) -> dict[str, dict[str, s
     return result
 
 
+def _lookup_web_personalization_product(
+    db: Session,
+    binding: dict[str, str],
+    *,
+    tenant_id: Optional[int],
+) -> Optional[models.Product]:
+    raw_id = (binding.get("product_id") or "").strip()
+    if raw_id.isdigit():
+        product = get_product(db, int(raw_id), tenant_id=tenant_id)
+        if product:
+            return product
+
+    raw_sku = (binding.get("product_sku") or "").strip()
+    if raw_sku:
+        product = get_product_by_sku(db, raw_sku, tenant_id=tenant_id)
+        if product:
+            return product
+
+    raw_slug = (binding.get("product_slug") or "").strip()
+    if raw_slug:
+        query = db.query(models.Product).filter(models.Product.web_slug == raw_slug)
+        effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+        if effective_tenant_id is not None:
+            query = query.filter(models.Product.tenant_id == effective_tenant_id)
+        product = query.first()
+        if product:
+            return product
+
+    return None
+
+
+def _lookup_web_personalization_service(
+    db: Session,
+    binding: dict[str, str],
+    *,
+    tenant_id: Optional[int],
+) -> Optional[models.Product]:
+    raw_id = (binding.get("service_id") or "").strip()
+    if raw_id.isdigit():
+        service = get_product(db, int(raw_id), tenant_id=tenant_id)
+        if service:
+            return service
+
+    raw_sku = (binding.get("service_sku") or "").strip()
+    if raw_sku:
+        service = get_product_by_sku(db, raw_sku, tenant_id=tenant_id)
+        if service:
+            return service
+
+    return None
+
+
+def _hydrate_web_personalization_bindings(
+    db: Session,
+    bindings: dict[str, dict[str, str]],
+    *,
+    tenant_id: Optional[int],
+) -> dict[str, dict[str, Any]]:
+    hydrated = _normalize_web_personalization_bindings(bindings)
+    for variant_key, binding in hydrated.items():
+        product = _lookup_web_personalization_product(db, binding, tenant_id=tenant_id)
+        if product:
+            product_sale_price = resolve_web_product_sale_price(product)
+            binding["product_id"] = str(product.id)
+            binding["product_sku"] = (product.sku or "").strip()
+            binding["product_name"] = resolve_web_product_name(product)
+            binding["product_slug"] = resolve_product_web_slug(product)
+            binding["product_price"] = product_sale_price
+            binding["product_compare_price"] = resolve_web_compare_price(
+                product,
+                sale_price=product_sale_price,
+            )
+        service = _lookup_web_personalization_service(db, binding, tenant_id=tenant_id)
+        if service:
+            service_sale_price = resolve_web_product_sale_price(service)
+            binding["service_id"] = str(service.id)
+            binding["service_sku"] = (service.sku or "").strip()
+            binding["service_name"] = resolve_web_product_name(service)
+            binding["service_price"] = service_sale_price
+            binding["service_compare_price"] = resolve_web_compare_price(
+                service,
+                sale_price=service_sale_price,
+            )
+    return hydrated
+
+
 def _normalize_web_personalization_home_images(value: Any) -> dict[str, dict[str, str]]:
     result: dict[str, dict[str, str]] = {
         key: dict(default_value) for key, default_value in _DEFAULT_WEB_PERSONALIZATION_HOME_IMAGES.items()
@@ -1555,7 +1641,7 @@ def _normalize_web_home_sections_mode(value: Any) -> str:
 def get_public_web_personalization_bindings(
     db: Session,
     tenant_id: Optional[int] = None,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
     try:
         settings = (
@@ -1565,8 +1651,11 @@ def get_public_web_personalization_bindings(
         )
     except SQLAlchemyError:
         return {}
-    return _normalize_web_personalization_bindings(
+    return _hydrate_web_personalization_bindings(
+        db,
         getattr(settings, "web_personalization_bindings", None) if settings else None
+        or {},
+        tenant_id=effective_tenant_id,
     )
 
 
@@ -9560,7 +9649,11 @@ def get_pos_settings(
         settings.station_closure_email_overrides or {}
     )
     settings.web_personalization_bindings = (
-        settings.web_personalization_bindings or {}
+        _hydrate_web_personalization_bindings(
+            db,
+            settings.web_personalization_bindings or {},
+            tenant_id=tenant_id,
+        )
     )
     settings.web_personalization_home_images = (
         settings.web_personalization_home_images or {}
@@ -9590,6 +9683,11 @@ def update_pos_settings(
         settings.notifications = notifications
     db.commit()
     db.refresh(settings)
+    settings.web_personalization_bindings = _hydrate_web_personalization_bindings(
+        db,
+        settings.web_personalization_bindings or {},
+        tenant_id=settings.tenant_id,
+    )
     clear_public_web_home_cache(tenant_id=settings.tenant_id)
     return settings
 
