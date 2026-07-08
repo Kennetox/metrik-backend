@@ -111,6 +111,23 @@ def _ensure_web_order_coupon_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "coupon_consumed_at", "DATETIME")
 
 
+def _ensure_combo_context_schema(connection, backend: str) -> None:
+    targets = {
+        "web_cart_items": "combo_context_json",
+        "web_order_items": "combo_context_json",
+        "sale_items": "combo_context_json",
+    }
+    for table, column in targets.items():
+        if backend == "postgresql":
+            if not _table_exists_postgres(connection, table):
+                continue
+            _ensure_column_postgres(connection, table, column, "JSON")
+            continue
+        if not _table_exists(connection, table):
+            continue
+        _ensure_column(connection, table, column, "JSON")
+
+
 def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
     table = "web_catalog_categories"
     if backend == "postgresql":
@@ -1766,6 +1783,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_sent_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_last_error", "TEXT")
                 _ensure_column_postgres(connection, "web_orders", "checkout_context_json", "JSON")
+                _ensure_combo_context_schema(connection, backend="postgresql")
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_products_updated_at_trigger(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
@@ -2541,6 +2559,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 "line_discount_value",
                 "FLOAT DEFAULT 0",
             )
+            _ensure_combo_context_schema(connection, backend="sqlite")
 
             if not _table_exists(connection, "pos_customers"):
                 connection.execute(

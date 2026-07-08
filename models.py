@@ -687,6 +687,7 @@ class SaleItem(Base):
 
     # Total final de la línea (ya con descuento aplicado)
     total = Column(Float, nullable=False, default=0)
+    combo_context_json = Column(JSON, nullable=True)
 
     sale = relationship("Sale", back_populates="items")
 
@@ -989,6 +990,7 @@ class WebCartItem(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     quantity = Column(Float, nullable=False, default=1)
     unit_price_snapshot = Column(Float, nullable=False, default=0)
+    combo_context_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,
@@ -1283,6 +1285,7 @@ class WebOrderItem(Base):
     quantity = Column(Float, nullable=False, default=1)
     line_discount_value = Column(Float, nullable=False, default=0)
     line_total = Column(Float, nullable=False, default=0)
+    combo_context_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     order = relationship("WebOrder", back_populates="items")
