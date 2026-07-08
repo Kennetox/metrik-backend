@@ -44,7 +44,9 @@ def update_cart_item(
     try:
         return crud.update_web_cart_item_quantity(db, account, product_id, payload.quantity)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        message = str(exc)
+        status_code = 400 if "combo" in message.lower() or "editar" in message.lower() else 404
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 @router.delete("/items/{product_id}", response_model=schemas.WebCartRead)

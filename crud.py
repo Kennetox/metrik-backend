@@ -35,6 +35,60 @@ def _clean_field(value):
     return value
 
 
+def _normalize_combo_context_json(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    normalized: list[dict[str, Any]] = []
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            payload = json.loads(json.dumps(entry, ensure_ascii=False))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            normalized.append(payload)
+    return normalized
+
+
+def _merge_combo_context_json(*values: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for value in values:
+        merged.extend(_normalize_combo_context_json(value))
+    return merged
+
+
+def _extract_combo_group_ids(value: Any) -> set[str]:
+    group_ids: set[str] = set()
+    for entry in _normalize_combo_context_json(value):
+        group_id = str(entry.get("combo_group_id") or "").strip()
+        if group_id:
+            group_ids.add(group_id)
+    return group_ids
+
+
+def _is_combo_cart_item(item: models.WebCartItem) -> bool:
+    return bool(_extract_combo_group_ids(getattr(item, "combo_context_json", None)))
+
+
+def _delete_web_cart_items_by_combo_group_ids(
+    db: Session,
+    cart: models.WebCart,
+    group_ids: set[str],
+) -> bool:
+    if not group_ids:
+        return False
+
+    deleted = False
+    for cart_item in list(cart.items or []):
+        if not _extract_combo_group_ids(getattr(cart_item, "combo_context_json", None)).intersection(group_ids):
+            continue
+        db.delete(cart_item)
+        deleted = True
+    return deleted
+
+
 def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 60 * 24 * 365) -> int:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -7419,6 +7473,7 @@ def create_sale(
                 "discount": line_discount,
                 "line_discount_value": line_discount,
                 "total": line_net,
+                "combo_context_json": _normalize_combo_context_json(getattr(item_in, "combo_context_json", None)),
             }
         )
 
@@ -7696,6 +7751,7 @@ def create_sale(
             discount=item_data["discount"],
             line_discount_value=item_data["line_discount_value"],
             total=item_data["total"],
+            combo_context_json=_normalize_combo_context_json(item_data.get("combo_context_json")),
         )
         db.add(db_item)
 
@@ -11944,6 +12000,7 @@ def _serialize_web_cart(
                 unit_price=unit_price,
                 compare_price=resolve_web_compare_price(product, sale_price=unit_price),
                 line_total=line_total,
+                combo_context_json=_normalize_combo_context_json(item.combo_context_json),
             )
         )
 
@@ -12010,6 +12067,10 @@ def add_item_to_web_cart(
         combined_total = (previous_quantity * previous_unit_price) + (allowed_quantity * float(web_unit_price or 0.0))
         existing.quantity = combined_quantity
         existing.unit_price_snapshot = (combined_total / combined_quantity) if combined_quantity > 0 else float(web_unit_price or 0.0)
+        existing.combo_context_json = _merge_combo_context_json(
+            existing.combo_context_json,
+            getattr(payload, "combo_context_json", None),
+        )
     else:
         existing = models.WebCartItem(
             tenant_id=cart.tenant_id,
@@ -12017,6 +12078,7 @@ def add_item_to_web_cart(
             product_id=product.id,
             quantity=float(payload.quantity),
             unit_price_snapshot=float(web_unit_price or 0.0),
+            combo_context_json=_normalize_combo_context_json(getattr(payload, "combo_context_json", None)),
         )
         db.add(existing)
 
@@ -12037,7 +12099,13 @@ def update_web_cart_item_quantity(
     if not item:
         raise ValueError("Producto no existe en el carrito")
 
-    if quantity <= 0:
+    if _is_combo_cart_item(item):
+        combo_group_ids = _extract_combo_group_ids(item.combo_context_json)
+        if quantity <= 0:
+            _delete_web_cart_items_by_combo_group_ids(db, cart, combo_group_ids)
+        elif abs(float(quantity) - float(item.quantity or 0.0)) > 0.0001:
+            raise ValueError("Los productos de un combo no se pueden editar por separado. Elimina el combo completo.")
+    elif quantity <= 0:
         db.delete(item)
     else:
         item.quantity = float(quantity)
@@ -12428,6 +12496,7 @@ def _serialize_web_order(
             unit_price=float(item.unit_price_snapshot or 0.0),
             line_discount_value=float(item.line_discount_value or 0.0),
             line_total=float(item.line_total or 0.0),
+            combo_context_json=_normalize_combo_context_json(item.combo_context_json),
         )
         for item in (order.items or [])
     ]
@@ -12937,6 +13006,7 @@ def convert_web_order_to_sale(
                 product_barcode=item.product_barcode_snapshot,
                 discount=float(item.line_discount_value or 0.0),
                 line_discount_value=float(item.line_discount_value or 0.0),
+                combo_context_json=_normalize_combo_context_json(item.combo_context_json),
             )
             for item in order.items
         ],
@@ -13017,6 +13087,7 @@ def create_web_order_from_cart(
                 "quantity": quantity,
                 "line_discount_value": 0.0,
                 "line_total": line_total,
+                "combo_context_json": _normalize_combo_context_json(getattr(cart_item, "combo_context_json", None)),
             }
         )
     if subtotal_base <= 0 or not line_items_payload:
@@ -13156,6 +13227,7 @@ def create_web_order_from_cart(
                 quantity=float(line["quantity"]),
                 line_discount_value=line_discount_value,
                 line_total=line_total,
+                combo_context_json=_normalize_combo_context_json(line.get("combo_context_json")),
             )
         )
 
