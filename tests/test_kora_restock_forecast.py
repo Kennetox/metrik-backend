@@ -149,9 +149,8 @@ def test_restock_today_skips_healthy_stock_with_light_today_sales():
         )
 
         item = next((row for row in report.items if row.product_id == product.id), None)
-        assert item is None or item.urgency == "low"
-        if item is not None:
-            assert report.state == "watch"
+        assert item is None
+        assert report.state == "calm"
     finally:
         db.close()
 
@@ -169,7 +168,7 @@ def test_restock_today_keeps_low_stock_with_real_today_pressure():
             reorder_point=0,
             low_stock_alert=False,
         )
-        _add_inventory_stock(db, tenant_id=tenant.id, product_id=product.id, qty=2)
+        _add_inventory_stock(db, tenant_id=tenant.id, product_id=product.id, qty=1)
 
         now = datetime.now(tz=BOGOTA)
         for offset in range(3):
@@ -177,7 +176,7 @@ def test_restock_today_keeps_low_stock_with_real_today_pressure():
                 db,
                 tenant_id=tenant.id,
                 product=product,
-                created_at=now - timedelta(days=offset),
+                created_at=now if offset == 0 else now - timedelta(days=offset),
                 quantity=1,
             )
 
@@ -191,7 +190,60 @@ def test_restock_today_keeps_low_stock_with_real_today_pressure():
 
         item = next((row for row in report.items if row.product_id == product.id), None)
         assert item is not None
-        assert item.urgency in {"high", "medium"}
+        assert item.urgency == "high"
         assert item.units_today >= 1
+    finally:
+        db.close()
+
+
+def test_restock_today_does_not_overstate_positive_stock_spikes():
+    db = TestingSessionLocal()
+    try:
+        tenant = _ensure_tenant(db, "kora-restock-positive-stock-check")
+        product_a = _create_product(
+            db,
+            tenant_id=tenant.id,
+            sku="1634",
+            name="Convertidor de 3.5mm A Plug 1/4 Monofonico Plastico",
+            preferred_qty=0,
+            reorder_point=0,
+            low_stock_alert=False,
+        )
+        product_b = _create_product(
+            db,
+            tenant_id=tenant.id,
+            sku="854",
+            name="Broche para Pila 9V",
+            preferred_qty=0,
+            reorder_point=0,
+            low_stock_alert=False,
+        )
+        _add_inventory_stock(db, tenant_id=tenant.id, product_id=product_a.id, qty=2)
+        _add_inventory_stock(db, tenant_id=tenant.id, product_id=product_b.id, qty=6)
+
+        now = datetime.now(tz=BOGOTA)
+        for offset in range(4):
+            _add_sale(db, tenant_id=tenant.id, product=product_a, created_at=now - timedelta(days=offset), quantity=1)
+        for offset in range(4, 8):
+            _add_sale(db, tenant_id=tenant.id, product=product_a, created_at=now - timedelta(days=offset), quantity=1)
+
+        for offset in range(4):
+            _add_sale(db, tenant_id=tenant.id, product=product_b, created_at=now - timedelta(days=offset), quantity=1)
+        for offset in range(8, 11):
+            _add_sale(db, tenant_id=tenant.id, product=product_b, created_at=now - timedelta(days=offset), quantity=1)
+
+        report = _build_restock_forecast_response(
+            db=db,
+            tenant_id=tenant.id,
+            mode="today",
+            horizon_days=2,
+            lookback_days=30,
+        )
+
+        item_a = next((row for row in report.items if row.product_id == product_a.id), None)
+        item_b = next((row for row in report.items if row.product_id == product_b.id), None)
+        assert item_a is None
+        assert item_b is None
+        assert report.state == "calm"
     finally:
         db.close()

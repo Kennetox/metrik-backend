@@ -382,9 +382,6 @@ def _build_restock_forecast_response(
         else:
             daily_rate = rate_7d
 
-        if mode == "today" and units_today > daily_rate:
-            daily_rate = max(daily_rate, (daily_rate * 0.55) + (units_today * 0.45))
-
         projected_demand = daily_rate * horizon_days
         configured_threshold = max(
             int(row.stock_min or 0) if bool(row.low_stock_alert) else 0,
@@ -510,7 +507,9 @@ def _build_restock_forecast_response(
                     f"tocó el umbral historico, pero aun tiene cobertura de {_format_days(coverage_days)}"
                 )
             else:
-                if qty <= 1 or effective_threshold <= 2 or units_lookback >= 8:
+                if mode == "today" and coverage_days is not None and coverage_days > horizon_days and qty > 1:
+                    urgency = "medium"
+                elif qty <= 1 or effective_threshold <= 2 or units_lookback >= 8:
                     urgency = "high"
                 else:
                     urgency = "medium"
@@ -618,6 +617,9 @@ def _build_restock_forecast_response(
             )
         )
 
+    if mode == "today":
+        scored_items = [item for item in scored_items if item[1].urgency == "high"]
+
     scored_items.sort(key=lambda item: item[0], reverse=True)
     items = [item for _, item in scored_items[:max_items]]
 
@@ -625,7 +627,9 @@ def _build_restock_forecast_response(
     medium_count = sum(1 for item in items if item.urgency == "medium")
     low_count = sum(1 for item in items if item.urgency == "low")
     state: Literal["alert", "watch", "calm"]
-    if high_count > 0:
+    if mode == "today":
+        state = "alert" if high_count > 0 else "calm"
+    elif high_count > 0:
         state = "alert"
     elif medium_count > 0 or low_count > 0:
         state = "watch"
@@ -647,17 +651,25 @@ def _build_restock_forecast_response(
 
     summary_lines = [
         (
-            "Revisé las ventas de hoy y dejé solo productos realmente vendidos que ya están cerca del punto de aviso."
+            "Revisé las ventas de hoy y dejé solo los productos que de verdad ameritan reposición para mañana."
             if mode == "today"
             else f"Revisé las ventas de los últimos {lookback_days} días y calculé la cobertura estimada por producto."
         ),
-        f"Prioridad: {high_count} críticas, {medium_count} en vigilancia y {low_count} bajas.",
+        (
+            f"Encontré {high_count} productos urgentes."
+            if mode == "today"
+            else f"Prioridad: {high_count} críticas, {medium_count} en vigilancia y {low_count} bajas."
+        ),
         "Cruzo rotación reciente, stock actual y el patrón de reposición aprendido de movimientos.",
-        "Dejé fuera productos con rotación demasiado baja para no llenar la lista con ruido.",
+        (
+            "Dejé fuera productos que todavía no muestran presión suficiente para reposición inmediata."
+            if mode == "today"
+            else "Dejé fuera productos con rotación demasiado baja para no llenar la lista con ruido."
+        ),
     ]
     if mode == "today":
         summary_lines.append(
-            "En este reporte separo alertas reales de vigilancia suave: una venta aislada no basta si el stock todavía cubre el horizonte."
+            "En este reporte solo muestro urgencias reales: si aún hay cobertura suficiente, no aparece."
         )
 
     recommended_actions = _dedupe_actions(
