@@ -25,17 +25,9 @@ from dependencies import (
     require_permission,
 )
 
-from routers.dashboard import get_dashboard_summary
-from routers.inventory import get_inventory_overview
-
-
 class KoraAskContext(BaseModel):
     topic: str | None = None
     path: str | None = None
-    briefing_headline: str | None = None
-    briefing_state: str | None = None
-    briefing_summary_lines: list[str] = Field(default_factory=list)
-    briefing_signals: list[str] = Field(default_factory=list)
 
 
 class KoraAskRequest(BaseModel):
@@ -48,6 +40,18 @@ class KoraActionOut(BaseModel):
     href: str | None = None
 
 
+def _dedupe_actions(*actions: KoraActionOut) -> list[KoraActionOut]:
+    seen: set[tuple[str, str | None]] = set()
+    result: list[KoraActionOut] = []
+    for action in actions:
+        key = (action.label, action.href)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(action)
+    return result[:4]
+
+
 class KoraAskResponse(BaseModel):
     handled: bool
     answer: str
@@ -56,27 +60,6 @@ class KoraAskResponse(BaseModel):
     actions: list[KoraActionOut] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     generated_at: datetime
-
-
-class KoraBriefingSignal(BaseModel):
-    key: str
-    title: str
-    detail: str
-    priority: Literal["high", "medium", "low"]
-    actions: list[KoraActionOut] = Field(default_factory=list)
-
-
-class KoraBriefingResponse(BaseModel):
-    generated_at: datetime
-    source: Literal["briefing-v1"]
-    state: Literal["alert", "watch", "calm"]
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "unknown"]
-    role_focus: list[str]
-    headline: str
-    summary_lines: list[str]
-    signals: list[KoraBriefingSignal]
-    recommended_actions: list[KoraActionOut]
-    conversation_starters: list[str]
 
 
 class KoraRestockForecastItem(BaseModel):
@@ -198,26 +181,6 @@ def _sanitize_suggestions(raw: object) -> list[str]:
     return suggestions
 
 
-def _briefing_actions(*actions: KoraActionOut) -> list[KoraActionOut]:
-    seen: set[tuple[str, str | None]] = set()
-    result: list[KoraActionOut] = []
-    for action in actions:
-        key = (action.label, action.href)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(action)
-    return result[:4]
-
-
-def _compute_briefing_state(priority_counts: dict[str, int]) -> Literal["alert", "watch", "calm"]:
-    if priority_counts.get("high", 0) > 0:
-        return "alert"
-    if priority_counts.get("medium", 0) > 0:
-        return "watch"
-    return "calm"
-
-
 _REPLENISHMENT_REASONS = {"purchase", "transfer_in", "stock_initial"}
 _CONSUMPTION_REASONS = {"sale", "transfer_out", "loss", "damage"}
 
@@ -275,302 +238,6 @@ def _looks_like_sparse_rotation(
     if restock_before_levels or low_touch_levels:
         return False
     return units_lookback < 3 and units_7d < 1
-
-
-def _build_briefing_response(
-    *,
-    summary: schemas.DashboardSummary,
-    inventory: schemas.InventoryOverview,
-    web_orders: list[models.WebOrder],
-    role: str | None,
-) -> KoraBriefingResponse:
-    now_bogota = datetime.now(ZoneInfo("America/Bogota"))
-    day_of_month = max(now_bogota.day, 1)
-    month_avg_daily_sales = summary.month_sales_total / day_of_month if day_of_month else 0.0
-    month_avg_daily_tickets = summary.month_tickets / day_of_month if day_of_month else 0.0
-    sales_gap_pct = (
-        ((summary.today_sales_total - month_avg_daily_sales) / month_avg_daily_sales) * 100
-        if month_avg_daily_sales > 0
-        else 0.0
-    )
-    tickets_gap_pct = (
-        ((summary.today_tickets - month_avg_daily_tickets) / month_avg_daily_tickets) * 100
-        if month_avg_daily_tickets > 0
-        else 0.0
-    )
-
-    pending_payment = 0
-    processing = 0
-    ready = 0
-    cancelled = 0
-    payment_failed = 0
-    for order in web_orders:
-        if order.payment_status == "pending":
-            pending_payment += 1
-        if order.fulfillment_status == "processing":
-            processing += 1
-        if order.fulfillment_status == "ready":
-            ready += 1
-        if order.status == "cancelled":
-            cancelled += 1
-        if order.payment_status == "failed":
-            payment_failed += 1
-
-    critical_rows = inventory.status_rows[:3]
-    low_rows = [row for row in inventory.status_rows if row.status == "low"][:3]
-    critical_count = int(inventory.summary.critical_count or 0)
-    low_stock_count = int(inventory.summary.low_stock_count or 0)
-    reorder_count = int(inventory.summary.reorder_count or 0)
-
-    signals: list[KoraBriefingSignal] = []
-    if sales_gap_pct <= -15 or tickets_gap_pct <= -15:
-        signals.append(
-            KoraBriefingSignal(
-                key="sales-drop",
-                title="Caída de ritmo comercial",
-                detail=(
-                    f"Hoy vas {sales_gap_pct:+.1f}% en ventas y {tickets_gap_pct:+.1f}% en tickets "
-                    f"vs el ritmo promedio diario del mes."
-                ),
-                priority="high",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
-                    KoraActionOut(label="Abrir Historial de ventas", href="/dashboard/sales"),
-                ),
-            )
-        )
-    elif sales_gap_pct >= 15 or tickets_gap_pct >= 15:
-        signals.append(
-            KoraBriefingSignal(
-                key="sales-up",
-                title="Buen momento de ventas",
-                detail=(
-                    f"Hoy vas {sales_gap_pct:+.1f}% en ventas y {tickets_gap_pct:+.1f}% en tickets "
-                    f"vs el ritmo promedio diario del mes."
-                ),
-                priority="low",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
-                    KoraActionOut(label="Ver ventas de hoy", href="/dashboard/sales"),
-                ),
-            )
-        )
-
-    if critical_count > 0:
-        critical_names = ", ".join(row.product_name for row in critical_rows) or "varios productos"
-        signals.append(
-            KoraBriefingSignal(
-                key="inventory-critical",
-                title="Inventario crítico",
-                detail=f"{critical_count} productos están en crítico. Revisa primero {critical_names}.",
-                priority="high",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Movimientos", href="/dashboard/movements"),
-                    KoraActionOut(label="Abrir Productos", href="/dashboard/products"),
-                ),
-            )
-        )
-
-    if low_stock_count > 0:
-        low_names = ", ".join(row.product_name for row in low_rows) or "varios productos"
-        signals.append(
-            KoraBriefingSignal(
-                key="inventory-low",
-                title="Bajo stock detectado",
-                detail=f"{low_stock_count} productos están cerca del mínimo. Mira {low_names}.",
-                priority="medium",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Productos", href="/dashboard/products"),
-                    KoraActionOut(label="Abrir Movimientos", href="/dashboard/movements"),
-                ),
-            )
-        )
-
-    if reorder_count > 0 and critical_count == 0:
-        signals.append(
-            KoraBriefingSignal(
-                key="inventory-reorder",
-                title="Reposición sugerida",
-                detail=f"{reorder_count} productos ya están en umbral de reposición.",
-                priority="medium",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Productos", href="/dashboard/products"),
-                    KoraActionOut(label="Abrir Movimientos", href="/dashboard/movements"),
-                ),
-            )
-        )
-
-    if pending_payment > 0 or processing > 0 or ready > 0 or payment_failed > 0:
-        detail_parts = []
-        if pending_payment > 0:
-            detail_parts.append(f"{pending_payment} pendientes de pago")
-        if processing > 0:
-            detail_parts.append(f"{processing} en procesamiento")
-        if ready > 0:
-            detail_parts.append(f"{ready} listas para entregar")
-        if payment_failed > 0:
-            detail_parts.append(f"{payment_failed} con pago fallido")
-        if cancelled > 0:
-            detail_parts.append(f"{cancelled} canceladas")
-        signals.append(
-            KoraBriefingSignal(
-                key="web-queue",
-                title="Comercio web en movimiento",
-                detail=" y ".join(detail_parts).capitalize() + ".",
-                priority="high" if pending_payment > 0 or payment_failed > 0 else "medium",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Comercio web", href="/dashboard/comercio-web"),
-                    KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
-                ),
-            )
-        )
-
-    if summary.month_change_count > 0:
-        signals.append(
-            KoraBriefingSignal(
-                key="sales-changes",
-                title="Cambios de venta en el mes",
-                detail=f"Este mes hay {summary.month_change_count} cambios registrados y conviene revisar su impacto.",
-                priority="low",
-                actions=_briefing_actions(
-                    KoraActionOut(label="Abrir Historial de ventas", href="/dashboard/sales"),
-                    KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
-                ),
-            )
-        )
-
-    role_key = role if role in {"Administrador", "Supervisor", "Vendedor", "Auditor"} else "unknown"
-    role_priority_bonus = {
-        "Administrador": {
-            "sales-drop": 30,
-            "inventory-critical": 20,
-            "inventory-low": 10,
-            "inventory-reorder": 12,
-            "web-queue": 16,
-            "sales-changes": 8,
-        },
-        "Supervisor": {
-            "sales-drop": 28,
-            "inventory-critical": 20,
-            "inventory-low": 14,
-            "inventory-reorder": 14,
-            "web-queue": 18,
-            "sales-changes": 10,
-        },
-        "Vendedor": {
-            "sales-drop": 22,
-            "inventory-critical": 10,
-            "inventory-low": 18,
-            "inventory-reorder": 16,
-            "web-queue": 14,
-            "sales-changes": 6,
-        },
-        "Auditor": {
-            "sales-drop": 14,
-            "inventory-critical": 12,
-            "inventory-low": 8,
-            "inventory-reorder": 6,
-            "web-queue": 10,
-            "sales-changes": 24,
-        },
-        "unknown": {},
-    }.get(role_key, {})
-
-    signals.sort(
-        key=lambda item: (
-            {"high": 0, "medium": 1, "low": 2}[item.priority] * 100
-            - role_priority_bonus.get(item.key, 0)
-        )
-    )
-    signals = signals[:4]
-    priority_counts = {
-        "high": sum(1 for signal in signals if signal.priority == "high"),
-        "medium": sum(1 for signal in signals if signal.priority == "medium"),
-        "low": sum(1 for signal in signals if signal.priority == "low"),
-    }
-    state = _compute_briefing_state(priority_counts)
-
-    summary_lines = [
-        f"Hoy llevas {summary.today_sales_total:,.0f} en ventas y {summary.today_tickets} tickets.",
-        f"Ticket promedio de hoy: {summary.today_avg_ticket:,.0f}. Ritmo del mes: {month_avg_daily_sales:,.0f} por día.",
-        f"Inventario: {critical_count} críticos, {low_stock_count} en bajo stock y {reorder_count} en reposición.",
-        f"Comercio web: {pending_payment} pendientes de pago, {processing} en procesamiento, {ready} listas y {cancelled} canceladas.",
-    ]
-
-    if not signals:
-        headline = "El negocio está estable y sin alertas fuertes."
-        state: Literal["alert", "watch", "calm"] = "calm"
-    else:
-        strongest = signals[0]
-        if strongest.priority == "high":
-            headline = f"Hay cosas importantes para revisar: {strongest.title.lower()}."
-            state = "alert"
-        elif strongest.priority == "medium":
-            headline = f"Hay señales para vigilar: {strongest.title.lower()}."
-            state = "watch"
-        else:
-            headline = f"Buen ritmo general. {strongest.title}."
-            state = "calm"
-
-    recommended_actions = _briefing_actions(
-        *[action for signal in signals for action in signal.actions][:4],
-        KoraActionOut(label="Abrir Inicio", href="/dashboard"),
-        KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
-    )
-
-    if state == "alert":
-        conversation_starters = [
-            "¿Qué debo revisar primero?",
-            "Dime lo más urgente del negocio",
-            "¿Qué está frenando hoy?",
-        ]
-    elif state == "watch":
-        conversation_starters = [
-            "¿Qué conviene vigilar hoy?",
-            "Dime la lectura rápida del negocio",
-            "¿Qué oportunidad ves ahora?",
-        ]
-    else:
-        conversation_starters = [
-            "¿Qué está andando bien hoy?",
-            "Dime una lectura rápida del negocio",
-            "¿Qué oportunidad ves ahora?",
-        ]
-
-    return KoraBriefingResponse(
-        generated_at=datetime.utcnow(),
-        source="briefing-v1",
-        state=state,
-        role=role_key,
-        role_focus=[
-            "Cierre de ventas y ritmo comercial" if role_key in {"Administrador", "Supervisor"} else "Seguimiento comercial del día",
-            "Inventario y reposición" if role_key != "Auditor" else "Trazabilidad y control",
-            "Comercio web" if pending_payment > 0 or processing > 0 or ready > 0 else "Estado operativo general",
-        ],
-        headline=headline,
-        summary_lines=summary_lines,
-        signals=signals,
-        recommended_actions=recommended_actions,
-        conversation_starters=conversation_starters,
-    )
-
-
-@router.get("/briefing", response_model=KoraBriefingResponse)
-def get_kora_briefing(
-    source: str = Query(default="metrik"),
-    db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
-    current_user: models.PosUser = Depends(get_current_active_user),
-):
-    summary = get_dashboard_summary(source=source, tenant_id=tenant_id, db=db)
-    inventory = get_inventory_overview(status_limit=6, db=db, current_user=current_user)
-    web_orders = crud.list_backoffice_web_orders(db, tenant_id=tenant_id, limit=120)
-    return _build_briefing_response(
-        summary=summary,
-        inventory=inventory,
-        web_orders=web_orders,
-        role=current_user.role,
-    )
 
 
 def _build_restock_forecast_response(
@@ -778,6 +445,25 @@ def _build_restock_forecast_response(
         strong_rotation = rotation_volume >= 6 or units_lookback >= 6 or units_7d >= 2
         has_learned_signal = bool(restock_before_levels or low_touch_levels)
         coverage_days = qty / daily_rate if daily_rate > 0 else None
+        today_signal_strength = max(units_today, projected_demand)
+        today_conservative_floor = max(2.0, projected_demand + 1.0)
+        today_has_minimum_signal = (
+            units_today >= 2
+            or (coverage_days is not None and coverage_days <= horizon_days)
+            or qty <= float(effective_threshold)
+            or today_signal_strength >= 3.0
+            or strong_rotation
+        )
+        today_is_still_healthy = (
+            mode == "today"
+            and coverage_days is not None
+            and coverage_days > horizon_days * 2
+            and today_signal_strength < 3.0
+            and qty > today_conservative_floor
+            and not strong_rotation
+        )
+        if mode == "today" and (not today_has_minimum_signal or today_is_still_healthy):
+            continue
         if mode == "today" and units_today <= 0:
             continue
         daily_restock_limit = max(
@@ -806,24 +492,41 @@ def _build_restock_forecast_response(
 
         urgency = "low"
         reason_parts: list[str] = []
+        today_historical_bonus = 0.0
         if qty <= 0 and (units_lookback > 0 or units_today > 0 or buffer_target > 0):
             urgency = "high"
             reason_parts.append("hoy está sin stock")
         elif effective_threshold > 0 and qty <= float(effective_threshold):
-            if qty <= 1 or effective_threshold <= 2 or units_lookback >= 8:
-                urgency = "high"
-            else:
-                urgency = "medium"
-            if threshold_source == "inferred":
+            today_threshold_is_too_soft = (
+                mode == "today"
+                and coverage_days is not None
+                and coverage_days > horizon_days * 1.5
+                and units_today < 2
+                and not strong_rotation
+            )
+            if today_threshold_is_too_soft:
+                urgency = "low"
                 reason_parts.append(
-                    f"ya tocó el punto de aviso aprendido de los movimientos ({effective_threshold} unidades)"
-                )
-            elif threshold_source == "mixed":
-                reason_parts.append(
-                    f"ya tocó el punto de aviso mezclando configuración y movimientos ({effective_threshold} unidades)"
+                    f"tocó el umbral historico, pero aun tiene cobertura de {_format_days(coverage_days)}"
                 )
             else:
-                reason_parts.append(f"ya tocó el umbral de reposición configurado ({effective_threshold} unidades)")
+                if qty <= 1 or effective_threshold <= 2 or units_lookback >= 8:
+                    urgency = "high"
+                else:
+                    urgency = "medium"
+                if threshold_source == "inferred":
+                    reason_parts.append(
+                        f"ya tocó el punto de aviso aprendido de los movimientos ({effective_threshold} unidades)"
+                    )
+                    today_historical_bonus = 3.0 if mode == "today" else 0.0
+                elif threshold_source == "mixed":
+                    reason_parts.append(
+                        f"ya tocó el punto de aviso mezclando configuración y movimientos ({effective_threshold} unidades)"
+                    )
+                    today_historical_bonus = 5.0 if mode == "today" else 0.0
+                else:
+                    reason_parts.append(f"ya tocó el umbral de reposición configurado ({effective_threshold} unidades)")
+                    today_historical_bonus = 8.0 if mode == "today" else 0.0
         elif coverage_days is not None and coverage_days <= horizon_days:
             urgency = "high"
             reason_parts.append(f"solo alcanza para {_format_days(coverage_days)}")
@@ -867,6 +570,7 @@ def _build_restock_forecast_response(
         score += min(units_7d, 70.0) * 2.5
         if coverage_days is not None:
             score += max(0.0, 20.0 - min(coverage_days, 20.0))
+        score += today_historical_bonus
 
         if units_lookback <= 0 and qty > buffer_target:
             score *= 0.25
@@ -923,7 +627,7 @@ def _build_restock_forecast_response(
     state: Literal["alert", "watch", "calm"]
     if high_count > 0:
         state = "alert"
-    elif medium_count > 0:
+    elif medium_count > 0 or low_count > 0:
         state = "watch"
     else:
         state = "calm"
@@ -951,8 +655,12 @@ def _build_restock_forecast_response(
         "Cruzo rotación reciente, stock actual y el patrón de reposición aprendido de movimientos.",
         "Dejé fuera productos con rotación demasiado baja para no llenar la lista con ruido.",
     ]
+    if mode == "today":
+        summary_lines.append(
+            "En este reporte separo alertas reales de vigilancia suave: una venta aislada no basta si el stock todavía cubre el horizonte."
+        )
 
-    recommended_actions = _briefing_actions(
+    recommended_actions = _dedupe_actions(
         KoraActionOut(label="Abrir Productos", href="/dashboard/products"),
         KoraActionOut(label="Abrir Movimientos", href="/dashboard/movements"),
         KoraActionOut(label="Abrir Reportes", href="/dashboard/reports"),
@@ -1127,9 +835,6 @@ def _ask_openai(query: str, context: KoraAskContext | None, user: models.PosUser
         f"Usuario: {user.name or 'Operador'}\n"
         f"Rol: {user.role}\n"
         f"Contexto: topic={context.topic if context else ''}, path={context.path if context else ''}\n"
-        f"Briefing: headline={context.briefing_headline if context else ''}, state={context.briefing_state if context else ''}\n"
-        f"Resumen: {json.dumps(context.briefing_summary_lines if context else [], ensure_ascii=False)}\n"
-        f"Señales: {json.dumps(context.briefing_signals if context else [], ensure_ascii=False)}\n"
         f"Consulta: {query}\n"
         "Devuelve solo JSON."
     )

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from html import escape as html_escape
 import re
 from typing import Dict, List
@@ -261,6 +261,102 @@ def get_inventory_overview(
         recent_movements=recent_movements,
         status_rows=status_rows_sorted,
     )
+
+
+@router.get("/stock-trend", response_model=List[schemas.InventoryStockTrendPoint])
+def get_inventory_stock_trend(
+    days: int = Query(default=7, ge=2, le=31),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.view")),
+):
+    """Rebuild daily stock closes using current product sale prices."""
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    now = datetime.utcnow()
+    first_date = now.date() - timedelta(days=days - 1)
+
+    products = (
+        db.query(models.Product.id, models.Product.price)
+        .filter(models.Product.service.is_(False))
+        .filter(models.Product.active.is_(True))
+        .filter(
+            models.Product.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .all()
+    )
+    if not products:
+        return [
+            schemas.InventoryStockTrendPoint(
+                date=first_date + timedelta(days=index),
+                stock_units=0.0,
+                stock_sale_value=0.0,
+            )
+            for index in range(days)
+        ]
+
+    product_ids = [row.id for row in products]
+    prices = {row.id: float(row.price or 0.0) for row in products}
+    current_rows = (
+        db.query(
+            models.InventoryMovement.product_id,
+            func.coalesce(func.sum(models.InventoryMovement.qty_delta), 0).label("qty"),
+        )
+        .filter(models.InventoryMovement.product_id.in_(product_ids))
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .group_by(models.InventoryMovement.product_id)
+        .all()
+    )
+    current_qty = {product_id: 0.0 for product_id in product_ids}
+    for row in current_rows:
+        current_qty[row.product_id] = float(row.qty or 0.0)
+
+    first_close = datetime.combine(first_date + timedelta(days=1), time.min)
+    recent_movements = (
+        db.query(
+            models.InventoryMovement.product_id,
+            models.InventoryMovement.qty_delta,
+            models.InventoryMovement.created_at,
+        )
+        .filter(models.InventoryMovement.product_id.in_(product_ids))
+        .filter(models.InventoryMovement.created_at >= first_close)
+        .filter(
+            models.InventoryMovement.tenant_id == tenant_id
+            if tenant_id is not None
+            else true()
+        )
+        .all()
+    )
+
+    points: List[schemas.InventoryStockTrendPoint] = []
+    for index in range(days):
+        point_date = first_date + timedelta(days=index)
+        is_today = point_date == now.date()
+        boundary = now if is_today else datetime.combine(point_date + timedelta(days=1), time.min)
+        quantities = current_qty.copy()
+        if not is_today:
+            for movement in recent_movements:
+                if movement.created_at >= boundary:
+                    quantities[movement.product_id] -= float(movement.qty_delta or 0.0)
+
+        stock_units = sum(quantities.values())
+        stock_sale_value = sum(
+            qty * prices.get(product_id, 0.0)
+            for product_id, qty in quantities.items()
+        )
+        points.append(
+            schemas.InventoryStockTrendPoint(
+                date=point_date,
+                stock_units=stock_units,
+                stock_sale_value=stock_sale_value,
+            )
+        )
+
+    return points
 
 
 @router.get("/movements", response_model=List[schemas.InventoryMovementRead])

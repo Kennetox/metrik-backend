@@ -888,6 +888,12 @@ class InventorySummary(BaseModel):
     reorder_count: int
 
 
+class InventoryStockTrendPoint(BaseModel):
+    date: date
+    stock_units: float
+    stock_sale_value: float
+
+
 class InventoryStatusRow(BaseModel):
     product_id: int
     product_name: str
