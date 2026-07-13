@@ -433,7 +433,7 @@ def list_latest_inventory_entries(
     entries: List[schemas.InventoryLatestEntryRead] = []
 
     include_manual = source in (None, "all", "manual")
-    include_app = source in (None, "all", "app")
+    include_receiving = source in (None, "all", "app", "manual")
 
     if include_manual:
         manual_rows = (
@@ -472,8 +472,8 @@ def list_latest_inventory_entries(
                 )
             )
 
-    if include_app:
-        app_rows = (
+    if include_receiving:
+        receiving_query = (
             db.query(
                 models.ReceivingLotItem,
                 models.ReceivingLot.id.label("lot_id"),
@@ -493,12 +493,26 @@ def list_latest_inventory_entries(
                 if tenant_id is not None
                 else true()
             )
+        )
+
+        normalized_origin = func.lower(func.coalesce(models.ReceivingLot.origin_name, ""))
+        web_origin = or_(
+            normalized_origin.like("%web%"),
+            normalized_origin.like("%metrik%"),
+        )
+        if source == "manual":
+            receiving_query = receiving_query.filter(web_origin)
+        elif source == "app":
+            receiving_query = receiving_query.filter(~web_origin)
+
+        receiving_rows = (
+            receiving_query
             .order_by(models.ReceivingLot.closed_at.desc(), models.ReceivingLotItem.id.desc())
             .limit(limit * 3)
             .all()
         )
 
-        for item, lot_id, lot_number, closed_at, origin_name in app_rows:
+        for item, lot_id, lot_number, closed_at, origin_name in receiving_rows:
             created_at = closed_at or item.created_at
             resolved_source = _resolve_receiving_entry_source(origin_name)
             entries.append(
