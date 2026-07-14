@@ -247,3 +247,45 @@ def test_restock_today_does_not_overstate_positive_stock_spikes():
         assert report.state == "calm"
     finally:
         db.close()
+
+
+def test_restock_today_skips_overstocked_items_with_long_coverage():
+    db = TestingSessionLocal()
+    try:
+        tenant = _ensure_tenant(db, "kora-restock-overstock-check")
+        product = _create_product(
+            db,
+            tenant_id=tenant.id,
+            sku="907",
+            name="Cables Jumper Colores",
+            preferred_qty=0,
+            reorder_point=0,
+            low_stock_alert=False,
+        )
+        _add_inventory_stock(db, tenant_id=tenant.id, product_id=product.id, qty=355)
+
+        now = datetime.now(tz=BOGOTA)
+        for offset in range(6):
+            _add_sale(db, tenant_id=tenant.id, product=product, created_at=now, quantity=1)
+        for offset in range(6, 49):
+            _add_sale(
+                db,
+                tenant_id=tenant.id,
+                product=product,
+                created_at=now - timedelta(days=offset % 30),
+                quantity=1,
+            )
+
+        report = _build_restock_forecast_response(
+            db=db,
+            tenant_id=tenant.id,
+            mode="today",
+            horizon_days=2,
+            lookback_days=30,
+        )
+
+        item = next((row for row in report.items if row.product_id == product.id), None)
+        assert item is None
+        assert report.state == "calm"
+    finally:
+        db.close()

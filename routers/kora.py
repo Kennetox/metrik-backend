@@ -459,7 +459,13 @@ def _build_restock_forecast_response(
             and qty > today_conservative_floor
             and not strong_rotation
         )
-        if mode == "today" and (not today_has_minimum_signal or today_is_still_healthy):
+        today_is_overstocked = (
+            mode == "today"
+            and coverage_days is not None
+            and coverage_days > max(horizon_days * 4, 30)
+            and qty > max(10.0, units_today * 8.0)
+        )
+        if mode == "today" and (not today_has_minimum_signal or today_is_still_healthy or today_is_overstocked):
             continue
         if mode == "today" and units_today <= 0:
             continue
