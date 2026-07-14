@@ -75,6 +75,109 @@ def _sale_context_by_id(
     return out
 
 
+def _movement_reference_labels(
+    db: Session,
+    movements: List[models.InventoryMovement],
+    tenant_id: int | None,
+) -> Dict[tuple[str, int], str]:
+    ids_by_type: Dict[str, set[int]] = {}
+    for movement in movements:
+        if movement.reference_id is None:
+            continue
+        reference_type = (movement.reference_type or "").strip().lower()
+        if not reference_type:
+            continue
+        ids_by_type.setdefault(reference_type, set()).add(int(movement.reference_id))
+
+    labels: Dict[tuple[str, int], str] = {}
+
+    sale_ids = ids_by_type.get("sale", set())
+    if sale_ids:
+        rows = (
+            db.query(models.Sale.id, models.Sale.document_number, models.Sale.sale_number)
+            .filter(models.Sale.id.in_(sale_ids))
+            .filter(models.Sale.tenant_id == tenant_id if tenant_id is not None else true())
+            .all()
+        )
+        for row in rows:
+            labels[("sale", row.id)] = (
+                row.document_number
+                or (f"Ticket #{row.sale_number}" if row.sale_number is not None else f"Venta #{row.id}")
+            )
+
+    return_ids = ids_by_type.get("sale_return", set())
+    if return_ids:
+        rows = (
+            db.query(models.SaleReturn.id, models.SaleReturn.document_number)
+            .filter(models.SaleReturn.id.in_(return_ids))
+            .filter(models.SaleReturn.tenant_id == tenant_id if tenant_id is not None else true())
+            .all()
+        )
+        for row in rows:
+            labels[("sale_return", row.id)] = row.document_number or f"Devolución #{row.id}"
+
+    change_ids = ids_by_type.get("sale_change", set())
+    if change_ids:
+        rows = (
+            db.query(models.SaleChange.id, models.SaleChange.document_number)
+            .filter(models.SaleChange.id.in_(change_ids))
+            .filter(models.SaleChange.tenant_id == tenant_id if tenant_id is not None else true())
+            .all()
+        )
+        for row in rows:
+            labels[("sale_change", row.id)] = row.document_number or f"Cambio #{row.id}"
+
+    lot_ids = ids_by_type.get("receiving_lot", set())
+    if lot_ids:
+        rows = (
+            db.query(models.ReceivingLot.id, models.ReceivingLot.lot_number)
+            .filter(models.ReceivingLot.id.in_(lot_ids))
+            .filter(models.ReceivingLot.tenant_id == tenant_id if tenant_id is not None else true())
+            .all()
+        )
+        for row in rows:
+            labels[("receiving_lot", row.id)] = row.lot_number or f"Lote #{row.id}"
+
+    manual_types = {"salida_manual", "venta_manual", "ajuste", "perdida_dano"}
+    manual_ids = set().union(*(ids_by_type.get(kind, set()) for kind in manual_types))
+    if manual_ids:
+        rows = (
+            db.query(models.ManualMovementDocument.id, models.ManualMovementDocument.document_number)
+            .filter(models.ManualMovementDocument.id.in_(manual_ids))
+            .filter(
+                models.ManualMovementDocument.tenant_id == tenant_id
+                if tenant_id is not None
+                else true()
+            )
+            .all()
+        )
+        label_by_id = {
+            row.id: row.document_number or f"Documento #{row.id}"
+            for row in rows
+        }
+        for kind in manual_types:
+            for document_id in ids_by_type.get(kind, set()):
+                if document_id in label_by_id:
+                    labels[(kind, document_id)] = label_by_id[document_id]
+
+    recount_ids = ids_by_type.get("recount", set())
+    if recount_ids:
+        rows = (
+            db.query(models.InventoryRecount.id, models.InventoryRecount.code)
+            .filter(models.InventoryRecount.id.in_(recount_ids))
+            .filter(
+                models.InventoryRecount.tenant_id == tenant_id
+                if tenant_id is not None
+                else true()
+            )
+            .all()
+        )
+        for row in rows:
+            labels[("recount", row.id)] = row.code or f"Recuento #{row.id}"
+
+    return labels
+
+
 def _resolve_receiving_entry_source(origin_name: str | None) -> str:
     normalized = (origin_name or "").strip().lower()
     if "web" in normalized or "metrik" in normalized:
@@ -223,6 +326,11 @@ def get_inventory_overview(
         if movement.reference_type == "sale" and movement.reference_id is not None
     ]
     sale_context = _sale_context_by_id(db, sale_ids, tenant_id)
+    reference_labels = _movement_reference_labels(
+        db,
+        [movement for movement, _, _ in movement_rows],
+        tenant_id,
+    )
 
     for movement, product_name, product_sku in movement_rows:
         sale_meta = (
@@ -245,6 +353,9 @@ def get_inventory_overview(
                 created_by_user_id=movement.created_by_user_id,
                 sale_pos_name=(sale_meta or {}).get("sale_pos_name"),
                 sale_seller_name=(sale_meta or {}).get("sale_seller_name"),
+                reference_label=reference_labels.get(
+                    ((movement.reference_type or "").strip().lower(), int(movement.reference_id))
+                ) if movement.reference_id is not None else None,
             )
         )
 
@@ -393,6 +504,11 @@ def list_inventory_movements(
         if movement.reference_type == "sale" and movement.reference_id is not None
     ]
     sale_context = _sale_context_by_id(db, sale_ids, tenant_id)
+    reference_labels = _movement_reference_labels(
+        db,
+        [movement for movement, _, _ in movement_rows],
+        tenant_id,
+    )
 
     for movement, product_name, product_sku in movement_rows:
         sale_meta = (
@@ -415,6 +531,9 @@ def list_inventory_movements(
                 created_by_user_id=movement.created_by_user_id,
                 sale_pos_name=(sale_meta or {}).get("sale_pos_name"),
                 sale_seller_name=(sale_meta or {}).get("sale_seller_name"),
+                reference_label=reference_labels.get(
+                    ((movement.reference_type or "").strip().lower(), int(movement.reference_id))
+                ) if movement.reference_id is not None else None,
             )
         )
 

@@ -4834,6 +4834,51 @@ def _ensure_products_by_target_indexes(connection, backend: str) -> None:
             "CREATE INDEX IF NOT EXISTS legacy_sale_items_tenant_sku_sale_idx "
             "ON legacy_sale_items (tenant_id, product_sku, legacy_sale_id)",
         ),
+        (
+            "web_orders",
+            "CREATE INDEX IF NOT EXISTS web_orders_tenant_created_at_idx "
+            "ON web_orders (tenant_id, created_at DESC, id DESC)",
+        ),
+        (
+            "sale_returns",
+            "CREATE INDEX IF NOT EXISTS sale_returns_tenant_created_at_idx "
+            "ON sale_returns (tenant_id, created_at DESC, id DESC)",
+        ),
+        (
+            "sale_changes",
+            "CREATE INDEX IF NOT EXISTS sale_changes_tenant_created_at_idx "
+            "ON sale_changes (tenant_id, created_at DESC, id DESC)",
+        ),
+        (
+            "pos_closures",
+            "CREATE INDEX IF NOT EXISTS pos_closures_tenant_closed_at_idx "
+            "ON pos_closures (tenant_id, closed_at DESC, id DESC)",
+        ),
+        (
+            "separated_orders",
+            "CREATE INDEX IF NOT EXISTS separated_orders_tenant_created_at_idx "
+            "ON separated_orders (tenant_id, created_at DESC, id DESC)",
+        ),
+        (
+            "separated_order_payments",
+            "CREATE INDEX IF NOT EXISTS separated_payments_tenant_paid_at_idx "
+            "ON separated_order_payments (tenant_id, paid_at DESC, id DESC)",
+        ),
+        (
+            "receiving_lots",
+            "CREATE INDEX IF NOT EXISTS receiving_lots_tenant_closed_at_idx "
+            "ON receiving_lots (tenant_id, closed_at DESC, id DESC)",
+        ),
+        (
+            "manual_movement_documents",
+            "CREATE INDEX IF NOT EXISTS manual_docs_tenant_closed_at_idx "
+            "ON manual_movement_documents (tenant_id, closed_at DESC, id DESC)",
+        ),
+        (
+            "inventory_recounts",
+            "CREATE INDEX IF NOT EXISTS recounts_tenant_status_applied_idx "
+            "ON inventory_recounts (tenant_id, status, applied_at DESC, id DESC)",
+        ),
     ]
 
     for table_name, sql in statements:

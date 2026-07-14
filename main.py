@@ -44,6 +44,7 @@ from routers import (
     investment as investment_router,
     kora as kora_router,
     legacy_imports as legacy_imports_router,
+    documents as documents_router,
 )
 
 app = FastAPI(
@@ -413,6 +414,7 @@ app.include_router(platform_router.router)
 app.include_router(investment_router.router)
 app.include_router(kora_router.router)
 app.include_router(legacy_imports_router.router)
+app.include_router(documents_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
 

@@ -875,6 +875,7 @@ class InventoryMovementRead(InventoryMovementBase):
     created_by_user_id: Optional[int] = None
     sale_pos_name: Optional[str] = None
     sale_seller_name: Optional[str] = None
+    reference_label: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -3317,6 +3318,45 @@ class DocumentExportRow(BaseModel):
     reference: str
     status: str
     created_at: str
+
+
+class DocumentSearchItem(BaseModel):
+    id: str
+    type: Literal[
+        "venta",
+        "orden_web",
+        "devolucion",
+        "cambio",
+        "cierre",
+        "abono",
+        "recepcion",
+        "movimiento_manual",
+        "recuento",
+    ]
+    record_id: int
+    sale_id: Optional[int] = None
+    occurred_at: datetime
+    document_number: str
+    reference: str
+    detail: str
+    total: float = 0.0
+    payment_method: Optional[str] = None
+    payment_stage: Optional[Literal["initial", "posterior"]] = None
+    is_separated: bool = False
+    customer: Optional[str] = None
+    pos: Optional[str] = None
+    vendor: Optional[str] = None
+    status: Optional[str] = None
+    payment_status: Optional[str] = None
+    closure_id: Optional[int] = None
+    source_system: str = "metrik"
+
+
+class DocumentSearchPage(BaseModel):
+    items: List[DocumentSearchItem]
+    skip: int
+    limit: int
+    has_more: bool
 
 
 class DocumentExportRequest(BaseModel):
