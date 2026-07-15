@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import String, cast, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 import crud
 import models
@@ -715,6 +715,8 @@ def list_receiving_documents(
     tenant_id = _require_tenant_id(db, current_user)
     parsed_date_from = _parse_iso_datetime(date_from, "date_from")
     parsed_date_to = _parse_iso_datetime(date_to, "date_to")
+    creator_user = aliased(models.PosUser)
+    closer_user = aliased(models.PosUser)
     query = (
         db.query(
             models.ReceivingLot.id.label("id"),
@@ -724,7 +726,10 @@ def list_receiving_documents(
             models.ReceivingLot.origin_name.label("origin_name"),
             models.ReceivingLot.stock_device_id.label("stock_device_id"),
             models.ReceivingLot.stock_device_name.label("stock_device_name"),
+            models.ReceivingLot.created_by_user_id.label("created_by_user_id"),
             models.ReceivingLot.created_at.label("created_at"),
+            creator_user.name.label("created_by_user_name"),
+            models.ReceivingLot.closed_by_user_id.label("closed_by_user_id"),
             models.ReceivingLot.closed_at.label("closed_at"),
             models.ReceivingLot.supplier_name.label("supplier_name"),
             models.ReceivingLot.invoice_reference.label("invoice_reference"),
@@ -732,12 +737,13 @@ def list_receiving_documents(
             models.ReceivingLot.support_file_name.label("support_file_name"),
             models.ReceivingLot.support_file_url.label("support_file_url"),
             models.ReceivingLot.support_file_size.label("support_file_size"),
-            models.PosUser.name.label("closed_by_user_name"),
+            closer_user.name.label("closed_by_user_name"),
             func.count(models.ReceivingLotItem.id).label("lines_count"),
             func.coalesce(func.sum(models.ReceivingLotItem.qty_received), 0.0).label("units_total"),
         )
         .outerjoin(models.ReceivingLotItem, models.ReceivingLotItem.lot_id == models.ReceivingLot.id)
-        .outerjoin(models.PosUser, models.PosUser.id == models.ReceivingLot.closed_by_user_id)
+        .outerjoin(creator_user, creator_user.id == models.ReceivingLot.created_by_user_id)
+        .outerjoin(closer_user, closer_user.id == models.ReceivingLot.closed_by_user_id)
         .filter(models.ReceivingLot.status == "closed")
         .filter(models.ReceivingLot.tenant_id == tenant_id)
     )
@@ -755,7 +761,10 @@ def list_receiving_documents(
         models.ReceivingLot.origin_name,
         models.ReceivingLot.stock_device_id,
         models.ReceivingLot.stock_device_name,
+        models.ReceivingLot.created_by_user_id,
         models.ReceivingLot.created_at,
+        creator_user.name,
+        models.ReceivingLot.closed_by_user_id,
         models.ReceivingLot.closed_at,
         models.ReceivingLot.supplier_name,
         models.ReceivingLot.invoice_reference,
@@ -763,7 +772,7 @@ def list_receiving_documents(
         models.ReceivingLot.support_file_name,
         models.ReceivingLot.support_file_url,
         models.ReceivingLot.support_file_size,
-        models.PosUser.name,
+        closer_user.name,
     )
 
     total = grouped.count()
@@ -786,6 +795,9 @@ def list_receiving_documents(
             stock_device_name=row.stock_device_name,
             lines_count=int(row.lines_count or 0),
             units_total=float(row.units_total or 0.0),
+            created_by_user_id=row.created_by_user_id,
+            created_by_user_name=row.created_by_user_name,
+            closed_by_user_id=row.closed_by_user_id,
             created_at=row.created_at,
             closed_at=row.closed_at,
             closed_by_user_name=row.closed_by_user_name,

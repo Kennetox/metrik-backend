@@ -1408,6 +1408,9 @@ class ReceivingDocumentRead(BaseModel):
     stock_device_name: Optional[str] = None
     lines_count: int
     units_total: float
+    created_by_user_id: Optional[int] = None
+    created_by_user_name: Optional[str] = None
+    closed_by_user_id: Optional[int] = None
     created_at: datetime
     closed_at: Optional[datetime] = None
     closed_by_user_name: Optional[str] = None

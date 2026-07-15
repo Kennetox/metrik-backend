@@ -11250,6 +11250,46 @@ def consume_stock_device_setup_code(
     return device
 
 
+def get_stock_device_usage_summary(
+    db: Session,
+    device: models.StockDevice,
+) -> dict[str, int]:
+    receiving_lots = int(
+        db.query(func.count(models.ReceivingLot.id))
+        .filter(models.ReceivingLot.stock_device_id == device.id)
+        .scalar()
+        or 0
+    )
+    recounts = int(
+        db.query(func.count(models.InventoryRecount.id))
+        .filter(models.InventoryRecount.stock_device_id == device.id)
+        .scalar()
+        or 0
+    )
+    return {
+        "receiving_lots": receiving_lots,
+        "recounts": recounts,
+    }
+
+
+def delete_stock_device(
+    db: Session,
+    device: models.StockDevice,
+) -> None:
+    if device.is_active:
+        raise ValueError("Primero desactiva el dispositivo antes de eliminarlo")
+
+    usage = get_stock_device_usage_summary(db, device)
+    if usage["receiving_lots"] or usage["recounts"]:
+        raise ValueError(
+            "No se puede eliminar porque este dispositivo tiene historial asociado. "
+            "Déjalo desactivado para conservar la trazabilidad."
+        )
+
+    db.delete(device)
+    db.commit()
+
+
 def get_pos_station_by_email(
     db: Session,
     station_email: str,

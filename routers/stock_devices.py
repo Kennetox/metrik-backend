@@ -89,6 +89,25 @@ def update_stock_device(
         ) from exc
 
 
+@router.delete("/{stock_device_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_stock_device(
+    stock_device_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
+):
+    tenant_id = _require_tenant_id(db, current_user)
+    device = crud.get_stock_device(db, stock_device_id, tenant_id=tenant_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+    try:
+        crud.delete_stock_device(db, device)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
 @router.post(
     "/setup-code",
     response_model=schemas.StockDeviceSetupCodeResponse,

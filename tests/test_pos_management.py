@@ -287,6 +287,111 @@ def test_mobile_stock_legacy_email_flow_still_works(client: TestClient):
     assert payload["user"]["email"] == "operario.legacy@example.com"
 
 
+def test_delete_inactive_stock_device_without_history(client: TestClient):
+    headers = _auth_headers(client)
+
+    setup_response = client.post(
+        "/stock/devices/setup-code",
+        json={"name": "Tablet temporal borrable"},
+        headers=headers,
+    )
+    assert setup_response.status_code == 201
+    stock_device_id = setup_response.json()["device"]["id"]
+
+    deactivate_response = client.patch(
+        f"/stock/devices/{stock_device_id}",
+        json={"is_active": False},
+        headers=headers,
+    )
+    assert deactivate_response.status_code == 200
+
+    delete_response = client.delete(
+        f"/stock/devices/{stock_device_id}",
+        headers=headers,
+    )
+    assert delete_response.status_code == 204
+
+
+def test_cannot_delete_active_stock_device(client: TestClient):
+    headers = _auth_headers(client)
+
+    setup_response = client.post(
+        "/stock/devices/setup-code",
+        json={"name": "Tablet activa no borrable"},
+        headers=headers,
+    )
+    assert setup_response.status_code == 201
+    stock_device_id = setup_response.json()["device"]["id"]
+
+    delete_response = client.delete(
+        f"/stock/devices/{stock_device_id}",
+        headers=headers,
+    )
+    assert delete_response.status_code == 409
+    assert "desactiva" in delete_response.json()["detail"].lower()
+
+
+def test_receiving_documents_include_opening_and_closing_user_names(client: TestClient):
+    headers = _auth_headers(client)
+
+    creator_response = client.post(
+        "/pos/users",
+        json={
+            "name": "Operario Apertura",
+            "email": "operario.apertura@example.com",
+            "role": "Vendedor",
+            "password": "test1234",
+            "pin_plain": "2468",
+        },
+        headers=headers,
+    )
+    assert creator_response.status_code == 201
+    creator_id = creator_response.json()["id"]
+
+    closer_response = client.post(
+        "/pos/users",
+        json={
+            "name": "Operario Cierre",
+            "email": "operario.cierre@example.com",
+            "role": "Supervisor",
+            "password": "test5678",
+            "pin_plain": "9753",
+        },
+        headers=headers,
+    )
+    assert closer_response.status_code == 201
+    closer_id = closer_response.json()["id"]
+
+    db = TestingSessionLocal()
+    try:
+        tenant_id = crud.get_default_tenant_id(db)
+        lot = models.ReceivingLot(
+            tenant_id=tenant_id,
+            lot_number="LOT-TRACE-001",
+            status="closed",
+            purchase_type="cash",
+            origin_name="Tablet recepción principal",
+            created_by_user_id=creator_id,
+            closed_by_user_id=closer_id,
+            created_at=datetime(2026, 7, 15, 8, 0, 0),
+            closed_at=datetime(2026, 7, 15, 9, 0, 0),
+        )
+        db.add(lot)
+        db.commit()
+        db.refresh(lot)
+    finally:
+        db.close()
+
+    response = client.get("/receiving/documents", headers=headers)
+    assert response.status_code == 200
+    items = response.json()["items"]
+    payload = next(item for item in items if item["lot_number"] == "LOT-TRACE-001")
+    assert payload["created_by_user_id"] == creator_id
+    assert payload["created_by_user_name"] == "Operario Apertura"
+    assert payload["closed_by_user_id"] == closer_id
+    assert payload["closed_by_user_name"] == "Operario Cierre"
+
+
 def _create_sale_record(
     customer_id=None,
     surcharge_amount: float = 0.0,
