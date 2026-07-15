@@ -264,6 +264,14 @@ class InventoryRecount(Base):
         return self.created_by.name if self.created_by else None
 
     @property
+    def has_pending_setup_code(self) -> bool:
+        return bool(
+            self.setup_code_hash
+            and self.setup_code_expires_at
+            and self.setup_code_expires_at > datetime.utcnow()
+        )
+
+    @property
     def closed_by_user_name(self) -> str | None:
         return self.closed_by.name if self.closed_by else None
 
@@ -1747,6 +1755,8 @@ class StockDevice(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     bound_device_id = Column(String, nullable=True)
     bound_device_label = Column(String, nullable=True)
+    setup_code_hash = Column(String, nullable=True)
+    setup_code_expires_at = Column(DateTime, nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(

@@ -3686,6 +3686,8 @@ def _ensure_table_stock_devices(connection) -> None:
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     bound_device_id TEXT,
                     bound_device_label TEXT,
+                    setup_code_hash TEXT,
+                    setup_code_expires_at DATETIME,
                     created_by_user_id INTEGER,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3702,6 +3704,8 @@ def _ensure_table_stock_devices(connection) -> None:
         _ensure_column(connection, "stock_devices", "is_active", "BOOLEAN NOT NULL DEFAULT 1")
         _ensure_column(connection, "stock_devices", "bound_device_id", "TEXT")
         _ensure_column(connection, "stock_devices", "bound_device_label", "TEXT")
+        _ensure_column(connection, "stock_devices", "setup_code_hash", "TEXT")
+        _ensure_column(connection, "stock_devices", "setup_code_expires_at", "DATETIME")
         _ensure_column(connection, "stock_devices", "created_by_user_id", "INTEGER")
         _ensure_column(connection, "stock_devices", "created_at", "DATETIME")
         _ensure_column(connection, "stock_devices", "updated_at", "DATETIME")
@@ -4310,11 +4314,29 @@ def _ensure_table_stock_devices_postgres(connection) -> None:
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 bound_device_id TEXT,
                 bound_device_label TEXT,
+                setup_code_hash TEXT,
+                setup_code_expires_at TIMESTAMP,
                 created_by_user_id INTEGER REFERENCES pos_users(id),
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen_at TIMESTAMP
             )
+        """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE stock_devices
+            ADD COLUMN IF NOT EXISTS setup_code_hash TEXT
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE stock_devices
+            ADD COLUMN IF NOT EXISTS setup_code_expires_at TIMESTAMP
             """
         )
     )

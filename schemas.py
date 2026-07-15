@@ -2216,6 +2216,8 @@ class StockDeviceRead(BaseModel):
     is_active: bool
     bound_device_id: Optional[str] = None
     bound_device_label: Optional[str] = None
+    has_pending_setup_code: bool = False
+    setup_code_expires_at: Optional[datetime] = None
     created_by_user_id: Optional[int] = None
     created_by_user_name: Optional[str] = None
     created_at: datetime
@@ -2231,6 +2233,17 @@ class StockDevicePage(BaseModel):
     total: int
     skip: int
     limit: int
+
+
+class StockDeviceSetupCodeRequest(BaseModel):
+    stock_device_id: Optional[str] = None
+    name: Optional[Annotated[str, Field(min_length=1, max_length=120)]] = None
+
+
+class StockDeviceSetupCodeResponse(BaseModel):
+    device: StockDeviceRead
+    setup_code: str
+    expires_at: datetime
 
 
 class PosStationNoticeCreate(BaseModel):
@@ -3655,10 +3668,24 @@ class AuthMobileStockEmailCheckRequest(BaseModel):
 
 
 class AuthMobileStockLoginRequest(BaseModel):
-    email: EmailStr
+    email: Optional[EmailStr] = None
     pin: str
+    stock_device_id: Optional[str] = None
     device_id: Optional[str] = None
     device_label: Optional[str] = None
+
+
+class AuthMobileStockBindRequest(BaseModel):
+    setup_code: Annotated[str, Field(min_length=6, max_length=12)]
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
+
+
+class AuthMobileStockBindResponse(BaseModel):
+    stock_device_id: str
+    stock_device_name: str
+    tenant_id: Optional[int] = None
+    tenant_name: Optional[str] = None
 
 
 class RolePermissionAction(BaseModel):

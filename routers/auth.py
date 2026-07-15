@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-import schemas, crud
+import schemas, crud, models
 from database import get_db
 from security import (
     verify_password,
@@ -137,6 +137,16 @@ def _get_mobile_stock_user_issue(user) -> str | None:
     status = (user.status or "").strip()
     if status != "Activo":
         return f"Usuario con estado no permitido: {status or 'vacío'}"
+    return None
+
+
+def _get_mobile_stock_device_issue(device) -> str | None:
+    if not device:
+        return "Dispositivo no encontrado"
+    if not device.is_active:
+        return "Dispositivo de inventario inactivo"
+    if device.tenant_id is None:
+        return "Dispositivo sin empresa asignada"
     return None
 
 
@@ -747,23 +757,103 @@ def mobile_stock_email_check(
     )
 
 
+@router.post(
+    "/mobile-stock-bind",
+    response_model=schemas.AuthMobileStockBindResponse,
+)
+def mobile_stock_bind(
+    payload: schemas.AuthMobileStockBindRequest,
+    db: Session = Depends(get_db),
+):
+    device = crud.get_stock_device_by_setup_code(db, payload.setup_code.strip())
+    device_issue = _get_mobile_stock_device_issue(device)
+    if device_issue:
+        raise HTTPException(status_code=401, detail="Código de vinculación inválido o vencido")
+
+    tenant = crud.get_tenant(db, int(device.tenant_id))
+    access_issue = crud.get_tenant_access_issue(tenant)
+    if access_issue:
+        raise HTTPException(status_code=401, detail=access_issue)
+
+    if payload.device_id:
+        device.bound_device_id = payload.device_id.strip() or None
+    if payload.device_label:
+        device.bound_device_label = payload.device_label.strip() or None
+    device.last_seen_at = datetime.utcnow()
+    crud.consume_stock_device_setup_code(db, device)
+
+    return schemas.AuthMobileStockBindResponse(
+        stock_device_id=device.id,
+        stock_device_name=device.name,
+        tenant_id=device.tenant_id,
+        tenant_name=tenant.name if tenant else None,
+    )
+
+
 @router.post("/mobile-stock-login", response_model=schemas.AuthLoginResponse)
 def mobile_stock_login(
     payload: schemas.AuthMobileStockLoginRequest,
     db: Session = Depends(get_db),
 ):
-    user = crud.get_pos_user_by_email_global(db, payload.email)
-    user_issue = _get_mobile_stock_user_issue(user)
-    if user_issue:
-        raise HTTPException(status_code=401, detail=user_issue)
-    if user.tenant_id is None:
-        raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
-    tenant = crud.get_tenant(db, int(user.tenant_id))
+    tenant_id: int | None = None
+    tenant = None
+
+    if payload.stock_device_id:
+        device = (
+            db.query(models.StockDevice)
+            .filter(models.StockDevice.id == payload.stock_device_id.strip())
+            .first()
+        )
+        device_issue = _get_mobile_stock_device_issue(device)
+        if device_issue:
+            raise HTTPException(status_code=401, detail=device_issue)
+        tenant_id = int(device.tenant_id)
+        tenant = crud.get_tenant(db, tenant_id)
+
+        if payload.device_id:
+            incoming_device_id = payload.device_id.strip()
+            if device.bound_device_id and device.bound_device_id != incoming_device_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Este dispositivo de inventario ya está vinculado a otro equipo.",
+                )
+            if incoming_device_id and not device.bound_device_id:
+                device.bound_device_id = incoming_device_id
+            if payload.device_label:
+                incoming_label = payload.device_label.strip()
+                if incoming_label and (
+                    not device.bound_device_label or device.bound_device_label != incoming_label
+                ):
+                    device.bound_device_label = incoming_label
+    elif payload.email:
+        anchor_user = crud.get_pos_user_by_email_global(db, payload.email)
+        user_issue = _get_mobile_stock_user_issue(anchor_user)
+        if user_issue:
+            raise HTTPException(status_code=401, detail=user_issue)
+        if anchor_user.tenant_id is None:
+            raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+        tenant_id = int(anchor_user.tenant_id)
+        tenant = crud.get_tenant(db, tenant_id)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes vincular la tablet o validar un correo antes de ingresar.",
+        )
+
     access_issue = crud.get_tenant_access_issue(tenant)
     if access_issue:
         raise HTTPException(status_code=401, detail=access_issue)
 
-    if not user.pin_hash or not verify_password(payload.pin, user.pin_hash):
+    try:
+        user = crud.get_pos_user_by_pin(db, payload.pin, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="PIN duplicado entre usuarios") from exc
+
+    user_issue = _get_mobile_stock_user_issue(user)
+    if user_issue:
+        raise HTTPException(status_code=401, detail="PIN inválido")
+
+    if not user:
         raise HTTPException(status_code=401, detail="PIN inválido")
 
     crud.revoke_user_sessions(db, user.id, reason="replaced", session_type="stock-mobile")
@@ -777,6 +867,10 @@ def mobile_stock_login(
         expires_at=expires_at,
         device_id=payload.device_id,
     )
+    if payload.stock_device_id:
+        device = crud.get_stock_device(db, payload.stock_device_id.strip(), tenant_id=tenant_id)
+        if device:
+            device.last_seen_at = datetime.utcnow()
     user.last_login = datetime.utcnow()
     db.commit()
     db.refresh(user)

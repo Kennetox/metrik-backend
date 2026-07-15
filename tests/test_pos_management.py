@@ -183,6 +183,110 @@ def test_create_and_update_pos_user(client: TestClient):
     assert "Administrador" in fail_resp.json()["detail"]
 
 
+def test_mobile_stock_binding_code_allows_pin_login_by_any_user_in_tenant(client: TestClient):
+    headers = _auth_headers(client)
+
+    user_a = client.post(
+        "/pos/users",
+        json={
+            "name": "Operario Uno",
+            "email": "operario1@example.com",
+            "role": "Vendedor",
+            "password": "test1234",
+            "pin_plain": "4321",
+        },
+        headers=headers,
+    )
+    assert user_a.status_code == 201
+
+    user_b = client.post(
+        "/pos/users",
+        json={
+            "name": "Operario Dos",
+            "email": "operario2@example.com",
+            "role": "Supervisor",
+            "password": "test5678",
+            "pin_plain": "8765",
+        },
+        headers=headers,
+    )
+    assert user_b.status_code == 201
+
+    setup_response = client.post(
+        "/stock/devices/setup-code",
+        json={"name": "Tablet Recepción Principal"},
+        headers=headers,
+    )
+    assert setup_response.status_code == 201
+    setup_payload = setup_response.json()
+    setup_code = setup_payload["setup_code"]
+    stock_device_id = setup_payload["device"]["id"]
+
+    bind_response = client.post(
+        "/auth/mobile-stock-bind",
+        json={
+            "setup_code": setup_code,
+            "device_id": "STK-TABLET-01",
+            "device_label": "Tablet recepción principal",
+        },
+    )
+    assert bind_response.status_code == 200
+    assert bind_response.json()["stock_device_id"] == stock_device_id
+
+    reused_bind = client.post(
+        "/auth/mobile-stock-bind",
+        json={
+            "setup_code": setup_code,
+            "device_id": "STK-TABLET-01",
+        },
+    )
+    assert reused_bind.status_code == 401
+
+    login_response = client.post(
+        "/auth/mobile-stock-login",
+        json={
+            "stock_device_id": stock_device_id,
+            "pin": "8765",
+            "device_id": "STK-TABLET-01",
+            "device_label": "Tablet recepción principal",
+        },
+    )
+    assert login_response.status_code == 200
+    login_payload = login_response.json()
+    assert login_payload["user"]["email"] == "operario2@example.com"
+    assert login_payload["user"]["name"] == "Operario Dos"
+
+
+def test_mobile_stock_legacy_email_flow_still_works(client: TestClient):
+    headers = _auth_headers(client)
+
+    create_user = client.post(
+        "/pos/users",
+        json={
+            "name": "Operario Legado",
+            "email": "operario.legacy@example.com",
+            "role": "Vendedor",
+            "password": "legacy1234",
+            "pin_plain": "1357",
+        },
+        headers=headers,
+    )
+    assert create_user.status_code == 201
+
+    login_response = client.post(
+        "/auth/mobile-stock-login",
+        json={
+            "email": "operario.legacy@example.com",
+            "pin": "1357",
+            "device_id": "STK-LEGACY-01",
+            "device_label": "Tablet legado",
+        },
+    )
+    assert login_response.status_code == 200
+    payload = login_response.json()
+    assert payload["user"]["email"] == "operario.legacy@example.com"
+
+
 def _create_sale_record(
     customer_id=None,
     surcharge_amount: float = 0.0,

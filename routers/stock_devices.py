@@ -87,3 +87,56 @@ def update_stock_device(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+
+
+@router.post(
+    "/setup-code",
+    response_model=schemas.StockDeviceSetupCodeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_stock_device_setup_code(
+    payload: schemas.StockDeviceSetupCodeRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("movements.manage")),
+):
+    tenant_id = _require_tenant_id(db, current_user)
+    device: models.StockDevice | None = None
+
+    if payload.stock_device_id:
+        device = crud.get_stock_device(db, payload.stock_device_id, tenant_id=tenant_id)
+        if not device:
+            raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+        if payload.name and payload.name.strip() and payload.name.strip() != device.name:
+            try:
+                device = crud.update_stock_device(
+                    db,
+                    device,
+                    schemas.StockDeviceUpdate(name=payload.name.strip()),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(exc),
+                ) from exc
+    else:
+        if not payload.name or not payload.name.strip():
+            raise HTTPException(status_code=400, detail="Debes indicar el nombre del dispositivo")
+        try:
+            device = crud.create_stock_device(
+                db,
+                schemas.StockDeviceCreate(name=payload.name.strip()),
+                tenant_id=tenant_id,
+                created_by_user_id=current_user.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+
+    device, code, expires_at = crud.issue_stock_device_setup_code(db, device)
+    return schemas.StockDeviceSetupCodeResponse(
+        device=schemas.StockDeviceRead.model_validate(device),
+        setup_code=code,
+        expires_at=expires_at,
+    )

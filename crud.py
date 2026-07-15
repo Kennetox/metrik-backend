@@ -11206,6 +11206,50 @@ def update_stock_device(
     return device
 
 
+def issue_stock_device_setup_code(
+    db: Session,
+    device: models.StockDevice,
+    *,
+    ttl_seconds: int = 15 * 60,
+) -> tuple[models.StockDevice, str, datetime]:
+    code = f"{secrets.randbelow(900000) + 100000:06d}"
+    expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+    device.setup_code_hash = hash_password(code)
+    device.setup_code_expires_at = expires_at
+    db.commit()
+    db.refresh(device)
+    return device, code, expires_at
+
+
+def get_stock_device_by_setup_code(
+    db: Session,
+    setup_code: str,
+) -> Optional[models.StockDevice]:
+    now = datetime.utcnow()
+    devices = (
+        db.query(models.StockDevice)
+        .filter(models.StockDevice.setup_code_hash.isnot(None))
+        .filter(models.StockDevice.setup_code_expires_at.isnot(None))
+        .filter(models.StockDevice.setup_code_expires_at >= now)
+        .all()
+    )
+    for device in devices:
+        if device.setup_code_hash and verify_password(setup_code, device.setup_code_hash):
+            return device
+    return None
+
+
+def consume_stock_device_setup_code(
+    db: Session,
+    device: models.StockDevice,
+) -> models.StockDevice:
+    device.setup_code_hash = None
+    device.setup_code_expires_at = None
+    db.commit()
+    db.refresh(device)
+    return device
+
+
 def get_pos_station_by_email(
     db: Session,
     station_email: str,
