@@ -245,6 +245,77 @@ def test_multiple_payment_sale_persists_exact_breakdown(client: TestClient):
         db.close()
 
 
+def test_sale_read_ignores_legacy_zero_payment_without_hiding_valid_payments(
+    client: TestClient,
+    caplog,
+):
+    headers = _auth_headers(client)
+    product = _create_product()
+    request_id = f"legacy-zero-{uuid4().hex}"
+    payload = _sale_payload(product, request_id)
+    payload["payment_method"] = "mixed"
+    payload["payments"] = [
+        {"method": "cash", "amount": 20000.0},
+        {"method": "card", "amount": 30000.0},
+    ]
+    created = client.post("/pos/sales", json=payload, headers=headers)
+    assert created.status_code == 201
+    sale_id = created.json()["id"]
+
+    db = TestingSessionLocal()
+    try:
+        sale = db.query(models.Sale).filter(models.Sale.id == sale_id).one()
+        legacy_payment = models.SalePayment(
+            tenant_id=sale.tenant_id,
+            sale_id=sale.id,
+            method="qr",
+            amount=0.0,
+            is_primary=False,
+        )
+        db.add(legacy_payment)
+        db.commit()
+        db.refresh(legacy_payment)
+        legacy_payment_id = legacy_payment.id
+    finally:
+        db.close()
+
+    with caplog.at_level(logging.WARNING, logger="kensar.pos"):
+        response = client.get(f"/pos/sales/{sale_id}", headers=headers)
+
+    assert response.status_code == 200
+    assert sorted(
+        (payment["method"], payment["amount"])
+        for payment in response.json()["payments"]
+    ) == [("card", 30000.0), ("cash", 20000.0)]
+    assert str(legacy_payment_id) in caplog.text
+
+
+def test_new_sale_still_rejects_zero_payment_lines(client: TestClient):
+    headers = _auth_headers(client)
+    product = _create_product()
+    request_id = f"reject-zero-{uuid4().hex}"
+    payload = _sale_payload(product, request_id)
+    payload["payment_method"] = "mixed"
+    payload["payments"] = [
+        {"method": "cash", "amount": 50000.0},
+        {"method": "qr", "amount": 0.0},
+    ]
+
+    response = client.post("/pos/sales", json=payload, headers=headers)
+
+    assert response.status_code == 422
+    db = TestingSessionLocal()
+    try:
+        assert (
+            db.query(models.Sale)
+            .filter(models.Sale.client_request_id == request_id)
+            .count()
+            == 0
+        )
+    finally:
+        db.close()
+
+
 def test_separated_order_successful_retry_returns_same_order(
     client: TestClient,
 ):

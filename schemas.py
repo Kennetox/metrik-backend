@@ -3296,6 +3296,32 @@ class SaleRead(SaleBase):
     source_system: str = "metrik"
     is_imported: bool = False
 
+    @field_validator("payments", mode="before")
+    @classmethod
+    def ignore_legacy_nonpositive_payments(cls, value):
+        if value is None:
+            return []
+        try:
+            payments = list(value)
+        except TypeError:
+            return value
+
+        valid_payments = []
+        for payment in payments:
+            raw_amount = (
+                payment.get("amount")
+                if isinstance(payment, dict)
+                else getattr(payment, "amount", None)
+            )
+            try:
+                amount = float(raw_amount)
+            except (TypeError, ValueError):
+                valid_payments.append(payment)
+                continue
+            if amount > 0:
+                valid_payments.append(payment)
+        return valid_payments
+
     class Config:
         from_attributes = True
 

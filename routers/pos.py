@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 from html import escape
 import functools
 import inspect
+import logging
 from typing import Any, List, Optional, Literal
 import base64
 import os
@@ -62,6 +63,7 @@ FREE_SALE_REASON_REQUIRED = (
 )
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _POS_QUERY_CACHE: dict[str, tuple[datetime, object]] = {}
+_pos_logger = logging.getLogger("kensar.pos")
 
 
 def _pos_cache_key(name: str, **params: object) -> str:
@@ -681,6 +683,17 @@ def _station_printer_config(
 
 
 def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
+    invalid_payment_ids = [
+        payment.id
+        for payment in list(getattr(sale, "payments", None) or [])
+        if float(getattr(payment, "amount", 0.0) or 0.0) <= 0
+    ]
+    if invalid_payment_ids:
+        _pos_logger.warning(
+            "ignored_nonpositive_sale_payments sale_id=%s payment_ids=%s",
+            sale.id,
+            invalid_payment_ids,
+        )
     sale_schema = schemas.SaleRead.model_validate(sale)
     updates = {}
 
