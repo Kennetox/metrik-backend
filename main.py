@@ -1,6 +1,9 @@
 import logging
 import os
 import asyncio
+import re
+import time
+from uuid import uuid4
 from datetime import datetime, timedelta
 from sqlalchemy import text
 
@@ -208,9 +211,66 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("kensar.validation")
+http_logger = logging.getLogger("kensar.http")
 scheduler_logger = logging.getLogger("kensar.scheduler")
 _monthly_report_task: asyncio.Task | None = None
 _payment_reconciliation_task: asyncio.Task | None = None
+
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _resolve_request_id(request: Request) -> str:
+    candidate = (request.headers.get("x-request-id") or "").strip()
+    if _REQUEST_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return uuid4().hex
+
+
+@app.middleware("http")
+async def request_observability_middleware(request: Request, call_next):
+    """Añade correlación y registra solo fallos/lentitud, sin cuerpos ni query strings."""
+    request_id = _resolve_request_id(request)
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        http_logger.exception(
+            "request_failed request_id=%s method=%s path=%s duration_ms=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Server-Timing"] = f'app;dur={duration_ms}'
+    is_pos_path = request.url.path.startswith(("/pos", "/separated-orders"))
+    is_critical_sale_write = request.method == "POST" and request.url.path in {
+        "/pos/sales",
+        "/separated-orders",
+    }
+    if is_critical_sale_write:
+        http_logger.info(
+            "sale_request request_id=%s path=%s status=%s duration_ms=%s",
+            request_id,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+    elif response.status_code >= 500 or (is_pos_path and duration_ms >= 1500):
+        http_logger.warning(
+            "request_observed request_id=%s method=%s path=%s status=%s duration_ms=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+    return response
 
 
 def _monthly_report_scheduler_enabled() -> bool:
@@ -375,21 +435,29 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ):
-    raw_body = await request.body()
-    body_text = raw_body.decode("utf-8") if raw_body else ""
+    request_id = getattr(request.state, "request_id", uuid4().hex)
+    safe_errors = [
+        {
+            "type": error.get("type"),
+            "loc": error.get("loc"),
+            "msg": error.get("msg"),
+        }
+        for error in exc.errors()
+    ]
     logger.error(
-        "Validation error on %s %s | body=%s | errors=%s",
+        "validation_failed request_id=%s method=%s path=%s errors=%s",
+        request_id,
         request.method,
         request.url.path,
-        body_text,
-        exc.errors(),
+        safe_errors,
     )
     return JSONResponse(
         status_code=422,
         content={
-            "detail": exc.errors(),
-            "body": body_text,
+            "detail": safe_errors,
+            "request_id": request_id,
         },
+        headers={"X-Request-ID": request_id},
     )
 
 

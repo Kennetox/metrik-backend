@@ -1,5 +1,6 @@
 from uuid import uuid4
 from types import SimpleNamespace
+import logging
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +11,37 @@ from routers import pos as pos_router
 from routers import separated_orders as separated_router
 from security import hash_password
 from tests.conftest import TestingSessionLocal, engine
+
+
+def test_request_observability_preserves_safe_client_trace_id(client: TestClient):
+    request_id = f"trace-{uuid4().hex}"
+
+    response = client.get("/healthz", headers={"X-Request-ID": request_id})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == request_id
+    assert response.headers["Server-Timing"].startswith("app;dur=")
+
+
+def test_validation_logs_and_response_never_include_request_body(
+    client: TestClient,
+    caplog,
+):
+    request_id = f"validation-{uuid4().hex}"
+    secret_marker = "never-log-this-password"
+
+    with caplog.at_level(logging.ERROR, logger="kensar.validation"):
+        response = client.post(
+            "/auth/login",
+            json={"email": "cashier@example.com", "password": {"value": secret_marker}},
+            headers={"X-Request-ID": request_id},
+        )
+
+    assert response.status_code == 422
+    assert response.headers["X-Request-ID"] == request_id
+    assert response.json()["request_id"] == request_id
+    assert secret_marker not in response.text
+    assert secret_marker not in caplog.text
 
 
 def _auth_headers(client: TestClient) -> dict[str, str]:
