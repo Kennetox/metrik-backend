@@ -20,7 +20,6 @@ from fastapi import (
     Response,
 )
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -85,18 +84,26 @@ def _get_pos_cache(key: str):
         return None
     expires_at, value = cache_entry
     if expires_at <= datetime.utcnow():
+        _POS_QUERY_CACHE.pop(key, None)
         return None
     return value
 
 
-def _get_pos_stale_cache(key: str):
-    cache_entry = _POS_QUERY_CACHE.get(key)
-    if not cache_entry:
-        return None
-    return cache_entry[1]
-
-
 def _set_pos_cache(key: str, value: object, ttl_seconds: int) -> None:
+    if len(_POS_QUERY_CACHE) >= 512:
+        expired_keys = [
+            cache_key
+            for cache_key, (expires_at, _) in _POS_QUERY_CACHE.items()
+            if expires_at <= datetime.utcnow()
+        ]
+        for cache_key in expired_keys:
+            _POS_QUERY_CACHE.pop(cache_key, None)
+        while len(_POS_QUERY_CACHE) >= 512:
+            oldest_key = min(
+                _POS_QUERY_CACHE,
+                key=lambda cache_key: _POS_QUERY_CACHE[cache_key][0],
+            )
+            _POS_QUERY_CACHE.pop(oldest_key, None)
     _POS_QUERY_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), value)
 
 
@@ -111,17 +118,17 @@ def _pos_cached(ttl_seconds: int, fallback_factory):
                 for key, value in bound_args.arguments.items()
                 if key not in {"db", "current_user"}
             }
+            current_user = bound_args.arguments.get("current_user")
+            cache_params["auth_scope"] = (
+                getattr(current_user, "tenant_id", None),
+                getattr(current_user, "id", None),
+                getattr(current_user, "role", None),
+            )
             cache_key = _pos_cache_key(func.__name__, **cache_params)
             cached = _get_pos_cache(cache_key)
             if cached is not None:
                 return cached
-            try:
-                result = func(*args, **kwargs)
-            except (SQLAlchemyTimeoutError, SQLAlchemyError):
-                stale = _get_pos_stale_cache(cache_key)
-                if stale is not None:
-                    return stale
-                return fallback_factory()
+            result = func(*args, **kwargs)
             _set_pos_cache(cache_key, result, ttl_seconds)
             return result
 
@@ -1126,9 +1133,18 @@ def create_sale(
         )
     except ValueError as exc:
         message = str(exc)
-        status_code = 409 if "ticket" in message.lower() and "existe" in message.lower() else 400
+        normalized_message = message.lower()
+        status_code = (
+            409
+            if (
+                ("ticket" in normalized_message and "existe" in normalized_message)
+                or "client_request_id ya fue utilizado" in normalized_message
+            )
+            else 400
+        )
         raise HTTPException(status_code=status_code, detail=message) from exc
 
+    _POS_QUERY_CACHE.clear()
     return _serialize_sale_response(sale)
 
 

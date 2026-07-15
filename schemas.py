@@ -1569,17 +1569,17 @@ class LabelCloudPrintRequest(BaseModel):
 
 class SaleItemBase(BaseModel):
     product_id: int
-    quantity: float
-    unit_price: float
-    unit_price_original: Optional[float] = None
+    quantity: float = Field(gt=0)
+    unit_price: float = Field(ge=0)
+    unit_price_original: Optional[float] = Field(default=None, ge=0)
     product_sku: Optional[str] = None
     product_name: str
     product_barcode: Optional[str] = None
     combo_context_json: Optional[List[Dict[str, Any]]] = None
 
     # 🔵 Descuento específico de esta línea
-    discount: float = 0.0  # compatibilidad legacy
-    line_discount_value: Optional[float] = None
+    discount: float = Field(default=0.0, ge=0)  # compatibilidad legacy
+    line_discount_value: Optional[float] = Field(default=None, ge=0)
 
 
 class SaleItemCreate(SaleItemBase):
@@ -1597,8 +1597,8 @@ class SaleItemRead(SaleItemBase):
 
 
 class SalePaymentBase(BaseModel):
-    method: str
-    amount: float
+    method: NonEmptyStr
+    amount: float = Field(gt=0)
 
 
 class SalePaymentCreate(SalePaymentBase):
@@ -2889,12 +2889,12 @@ class DocumentAdjustmentRead(BaseModel):
 
 class SaleBase(BaseModel):
     payment_method: str = "cash"
-    total: float
-    paid_amount: float
-    change_amount: float
-    cart_discount_value: float = 0.0
-    cart_discount_percent: float = 0.0
-    surcharge_amount: float = 0.0
+    total: float = Field(ge=0)
+    paid_amount: float = Field(ge=0)
+    change_amount: float = Field(ge=0)
+    cart_discount_value: float = Field(default=0.0, ge=0)
+    cart_discount_percent: float = Field(default=0.0, ge=0, le=100)
+    surcharge_amount: float = Field(default=0.0, ge=0)
     surcharge_label: Optional[str] = None
     customer_name: Optional[str] = None
     customer_id: Optional[int] = None
@@ -2913,6 +2913,12 @@ class SaleCreate(SaleBase):
     payments: Optional[List[SalePaymentCreate]] = None
     sale_number_preassigned: Optional[int] = None
     reservation_id: Optional[int] = None
+    client_request_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class PaymentMethodSummary(BaseModel):

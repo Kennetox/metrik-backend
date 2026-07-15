@@ -7491,11 +7491,73 @@ def update_product_group(
 # ===================== SALES =====================
 
 
+def _matches_existing_sale_request(
+    existing_sale: models.Sale,
+    sale_in: schemas.SaleCreate,
+) -> bool:
+    """Evita que una llave idempotente se reutilice para un carrito diferente."""
+
+    incoming_items = []
+    for item in sale_in.items:
+        quantity = float(item.quantity)
+        original_price = float(item.unit_price_original or item.unit_price)
+        if item.line_discount_value is not None:
+            line_discount = float(item.line_discount_value or 0.0)
+        elif item.discount is not None:
+            line_discount = float(item.discount or 0.0)
+        else:
+            line_discount = max(
+                0.0,
+                (original_price - float(item.unit_price)) * quantity,
+            )
+        incoming_items.append(
+            (
+                int(item.product_id),
+                round(quantity, 6),
+                round(max(0.0, quantity * original_price - line_discount), 2),
+            )
+        )
+
+    existing_items = [
+        (
+            int(item.product_id),
+            round(float(item.quantity or 0.0), 6),
+            round(float(item.total or 0.0), 2),
+        )
+        for item in existing_sale.items
+    ]
+    if sorted(incoming_items) != sorted(existing_items):
+        return False
+
+    incoming_payments = sale_in.payments or [
+        schemas.SalePaymentCreate(
+            method=sale_in.payment_method,
+            amount=sale_in.paid_amount,
+        )
+    ]
+    incoming_payment_signature = sorted(
+        (str(payment.method).strip().lower(), round(float(payment.amount), 2))
+        for payment in incoming_payments
+    )
+    existing_payment_signature = sorted(
+        (str(payment.method).strip().lower(), round(float(payment.amount or 0.0), 2))
+        for payment in existing_sale.payments
+    )
+    if incoming_payment_signature != existing_payment_signature:
+        return False
+
+    return abs(
+        float(existing_sale.total or 0.0) - calculate_sale_total_from_items(sale_in)
+    ) <= 0.01
+
+
 def create_sale(
     db: Session,
     sale_in: schemas.SaleCreate,
     created_by_user_id: int | None = None,
     tenant_id: int | None = None,
+    *,
+    commit: bool = True,
 ) -> models.Sale:
     """
     Crea una venta con sus ítems y pagos.
@@ -7507,12 +7569,62 @@ def create_sale(
       es mínima, respetamos el valor enviado; si es grande, usamos el calculado.
     """
 
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    if tenant_id is None and created_by_user_id:
+        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
+        if creator:
+            effective_tenant_id = resolve_user_tenant_id(db, creator)
+
+    client_request_id = _clean_field(getattr(sale_in, "client_request_id", None))
+    if client_request_id:
+        existing_request = (
+            db.query(models.Sale)
+            .options(
+                selectinload(models.Sale.items),
+                selectinload(models.Sale.payments),
+                selectinload(models.Sale.separated_order),
+            )
+            .filter(
+                models.Sale.client_request_id == client_request_id,
+                (
+                    models.Sale.tenant_id == effective_tenant_id
+                    if effective_tenant_id is not None
+                    else true()
+                ),
+            )
+            .first()
+        )
+        if existing_request:
+            if not _matches_existing_sale_request(existing_request, sale_in):
+                raise ValueError(
+                    "client_request_id ya fue utilizado para una venta diferente"
+                )
+            return existing_request
+
+    if not sale_in.items:
+        raise ValueError("La venta debe tener al menos un ítem")
+
+    product_ids = {int(item.product_id) for item in sale_in.items}
+    products_query = db.query(models.Product).filter(models.Product.id.in_(product_ids))
+    if effective_tenant_id is not None:
+        products_query = products_query.filter(models.Product.tenant_id == effective_tenant_id)
+    products = products_query.all()
+    products_by_id = {int(product.id): product for product in products}
+    missing_product_ids = sorted(product_ids.difference(products_by_id))
+    if missing_product_ids:
+        raise ValueError("Uno o más productos no pertenecen a esta empresa o ya no existen")
+    inactive_products = [product.name for product in products if not product.active]
+    if inactive_products:
+        raise ValueError(f"El producto '{inactive_products[0]}' está inactivo")
+
     # 1) Determinar pagos
     payments_data: List[schemas.SalePaymentCreate] = []
 
     if sale_in.payments and len(sale_in.payments) > 0:
         payments_data = list(sale_in.payments)
     else:
+        if float(sale_in.paid_amount or 0.0) <= 0:
+            raise ValueError("La venta debe incluir un pago mayor a cero")
         payments_data = [
             schemas.SalePaymentCreate(
                 method=sale_in.payment_method,
@@ -7521,6 +7633,10 @@ def create_sale(
         ]
 
     total_paid = sum(p.amount for p in payments_data)
+    if total_paid <= 0:
+        raise ValueError("La venta debe incluir un pago mayor a cero")
+    if sale_in.payments and abs(total_paid - float(sale_in.paid_amount or 0.0)) > 0.01:
+        raise ValueError("paid_amount debe coincidir con la suma de los pagos")
 
     # 2) Calcular totales a partir de los ítems (forma pro)
     items_calc: List[dict] = []
@@ -7578,12 +7694,6 @@ def create_sale(
                 "combo_context_json": _normalize_combo_context_json(getattr(item_in, "combo_context_json", None)),
             }
         )
-
-    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
-    if tenant_id is None and created_by_user_id:
-        creator = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first()
-        if creator:
-            effective_tenant_id = resolve_user_tenant_id(db, creator)
 
     customer_payload = {
         "customer_id": getattr(sale_in, "customer_id", None),
@@ -7786,6 +7896,7 @@ def create_sale(
         vendor_name=sale_in.vendor_name,
         sale_number=sale_number_preassigned,
         document_number=reserved_document_number,
+        client_request_id=client_request_id,
         surcharge_amount=surcharge_amount,
         surcharge_label=surcharge_label,
     )
@@ -7796,6 +7907,30 @@ def create_sale(
     except IntegrityError as exc:
         db.rollback()
         error_text = str(exc).lower()
+        if client_request_id and "client_request" in error_text:
+            existing_request = (
+                db.query(models.Sale)
+                .options(
+                    selectinload(models.Sale.items),
+                    selectinload(models.Sale.payments),
+                    selectinload(models.Sale.separated_order),
+                )
+                .filter(
+                    models.Sale.client_request_id == client_request_id,
+                    (
+                        models.Sale.tenant_id == effective_tenant_id
+                        if effective_tenant_id is not None
+                        else true()
+                    ),
+                )
+                .first()
+            )
+            if existing_request:
+                if not _matches_existing_sale_request(existing_request, sale_in):
+                    raise ValueError(
+                        "client_request_id ya fue utilizado para una venta diferente"
+                    )
+                return existing_request
         if "sales" in error_text and "document_number" in error_text:
             detail = str(exc)
             document_match = re.search(r"\(document_number\)=\(([^)]+)\)", detail)
@@ -7829,15 +7964,7 @@ def create_sale(
         sale.document_number = f"V-{doc_number_source:06d}"
 
     # 4) Crear ítems (ya conocemos sale.id)
-    product_ids = [item_data["product_id"] for item_data in items_calc]
-    product_flags = {}
-    if product_ids:
-        products = (
-            db.query(models.Product)
-            .filter(models.Product.id.in_(product_ids))
-            .all()
-        )
-        product_flags = {product.id: product.service for product in products}
+    product_flags = {product.id: product.service for product in products}
 
     for item_data in items_calc:
         db_item = models.SaleItem(
@@ -7887,10 +8014,33 @@ def create_sale(
         db.add(reservation)
 
     try:
-        db.commit()
+        if commit:
+            db.commit()
+            db.refresh(sale)
+        else:
+            db.flush()
     except IntegrityError as exc:
         db.rollback()
         error_text = str(exc).lower()
+        if client_request_id and "client_request" in error_text:
+            existing_request = (
+                db.query(models.Sale)
+                .filter(
+                    models.Sale.client_request_id == client_request_id,
+                    (
+                        models.Sale.tenant_id == effective_tenant_id
+                        if effective_tenant_id is not None
+                        else true()
+                    ),
+                )
+                .first()
+            )
+            if existing_request:
+                if not _matches_existing_sale_request(existing_request, sale_in):
+                    raise ValueError(
+                        "client_request_id ya fue utilizado para una venta diferente"
+                    )
+                return existing_request
         if "sales" in error_text and "document_number" in error_text:
             raise ValueError(
                 f"El ticket {sale.document_number} ya existe en esta empresa. Actualiza y vuelve a intentar."
@@ -7900,7 +8050,6 @@ def create_sale(
                 f"El número de ticket {sale.sale_number} ya existe en esta empresa."
             ) from exc
         raise
-    db.refresh(sale)
     return sale
 
 
@@ -7911,9 +8060,11 @@ def create_separated_order(
     db: Session,
     sale: models.Sale,
     separated_in: schemas.SeparatedOrderCreate,
+    *,
+    commit: bool = True,
 ) -> models.SeparatedOrder:
     if sale.separated_order:
-        raise ValueError("La venta ya tiene un separado registrado")
+        return sale.separated_order
 
     total_amount = calculate_sale_total_from_items(sale)
     if total_amount <= 0:
@@ -7956,8 +8107,11 @@ def create_separated_order(
         surcharge_label=sale.surcharge_label,
     )
     db.add(order)
-    db.commit()
-    db.refresh(order)
+    if commit:
+        db.commit()
+        db.refresh(order)
+    else:
+        db.flush()
     _apply_separated_order_view_totals(order)
     return order
 
@@ -13106,6 +13260,7 @@ def convert_web_order_to_sale(
         pos_name="POS Web",
         station_id=None,
         vendor_name="Comercio Web",
+        client_request_id=f"web-order-{order.id}",
         items=[
             schemas.SaleItemCreate(
                 product_id=item.product_id,
@@ -13134,6 +13289,7 @@ def convert_web_order_to_sale(
         sale_payload,
         created_by_user_id=actor_user_id,
         tenant_id=order.tenant_id,
+        commit=False,
     )
 
     order.sale_id = sale.id

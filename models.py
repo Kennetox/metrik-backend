@@ -508,6 +508,10 @@ class Sale(Base):
     # Número de documento único tipo "V-000001"
     document_number = Column(String, index=True, nullable=True)
 
+    # Identificador estable generado por el cliente para que reintentar una
+    # confirmacion ambigua nunca cree una segunda venta.
+    client_request_id = Column(String(64), index=True, nullable=True)
+
     # Método principal de pago (nuevo campo pensado para reportes)
     main_payment_method = Column(String, nullable=False, default="cash")
 

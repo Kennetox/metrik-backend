@@ -191,6 +191,7 @@ def _create_sale_record(
 ):
     db = TestingSessionLocal()
     product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto cierre",
         price=100.0,
         cost=50.0,
@@ -302,6 +303,7 @@ def test_sale_total_is_recomputed_from_discounted_items(client: TestClient):
     headers = _auth_headers(client)
     db = TestingSessionLocal()
     product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto descuento total",
         price=100.0,
         cost=50.0,
@@ -381,6 +383,7 @@ def test_closure_separated_clarification_totals(client: TestClient):
     headers = _auth_headers(client)
     db = TestingSessionLocal()
     product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto separado cierre",
         sku="SEP-CLOSE-001",
         price=62000.0,
@@ -478,6 +481,7 @@ def test_dashboard_summary_matches_collected_closure_total(client: TestClient):
     headers = _auth_headers(client)
     db = TestingSessionLocal()
     product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto dashboard cierre",
         sku="DASH-CLOSE-001",
         price=62000.0,
@@ -755,6 +759,7 @@ def _create_change_test_sale(
 ):
     db = TestingSessionLocal()
     sale_product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name=sale_name,
         price=sale_price,
         cost=sale_price / 2,
@@ -770,6 +775,7 @@ def _create_change_test_sale(
         includes_tax=False,
     )
     new_product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name=new_name,
         price=new_price,
         cost=new_price / 2,
@@ -826,6 +832,7 @@ def _create_change_test_sale(
 def _create_change_discounted_sale():
     db = TestingSessionLocal()
     sale_product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto cambio con descuento",
         price=10000.0,
         cost=5000.0,
@@ -841,6 +848,7 @@ def _create_change_discounted_sale():
         includes_tax=False,
     )
     other_product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto extra cambio con descuento",
         price=20000.0,
         cost=10000.0,
@@ -856,6 +864,7 @@ def _create_change_discounted_sale():
         includes_tax=False,
     )
     new_product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Nuevo producto cambio con descuento",
         price=11000.0,
         cost=5500.0,

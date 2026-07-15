@@ -3,6 +3,7 @@ from datetime import datetime
 from fastapi.testclient import TestClient
 
 import models
+import crud
 from tests.conftest import TestingSessionLocal
 
 
@@ -19,6 +20,7 @@ def _auth_headers(client: TestClient):
 def _create_product():
     db = TestingSessionLocal()
     product = models.Product(
+        tenant_id=crud.get_default_tenant_id(db),
         name="Producto separado",
         sku="SEP-001",
         price=50000.0,

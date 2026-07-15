@@ -925,6 +925,24 @@ def _ensure_pos_document_tenant_scoped_unique_indexes(connection, backend: str) 
             )
         )
 
+    if _has_duplicate_tenant_text(connection, "sales", "client_request_id", backend):
+        print(
+            "[schema-upgrade] No se creó índice único (tenant_id, client_request_id) en sales: "
+            "hay identificadores duplicados dentro del mismo tenant."
+        )
+    else:
+        connection.execute(
+            text(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS sales_tenant_client_request_unique_idx
+                ON sales (tenant_id, client_request_id)
+                WHERE tenant_id IS NOT NULL
+                  AND client_request_id IS NOT NULL
+                  AND {trim_fn}(client_request_id) <> ''
+                """
+            )
+        )
+
     if _has_duplicate_tenant_number(connection, "sale_number_reservations", "sale_number"):
         print(
             "[schema-upgrade] No se creó índice único de reservas por tenant para sale_number: "
@@ -1025,10 +1043,12 @@ def run_schema_upgrades(engine: Engine) -> None:
     with engine.connect() as connection:
         with connection.begin():
             if backend == "postgresql":
+                _ensure_column_postgres(connection, "sales", "client_request_id", "VARCHAR(64)")
                 _ensure_column_postgres(connection, "pos_closures", "methods_breakdown", "JSONB")
                 _ensure_column_postgres(connection, "pos_closures", "separated_summary", "JSONB")
                 _ensure_column_postgres(connection, "pos_closures", "user_breakdown", "JSONB")
             else:
+                _ensure_column(connection, "sales", "client_request_id", "TEXT")
                 _ensure_column(connection, "pos_closures", "methods_breakdown", "TEXT")
                 _ensure_column(connection, "pos_closures", "separated_summary", "TEXT")
                 _ensure_column(connection, "pos_closures", "user_breakdown", "TEXT")
@@ -3401,7 +3421,7 @@ def _backfill_hr_employees_from_users(connection, backend: str) -> None:
     rows = connection.execute(
         text(
             """
-            SELECT id, name, email, status, phone, position, notes, avatar_url, birth_date, location, bio, created_at
+            SELECT id, tenant_id, name, email, status, phone, position, notes, avatar_url, birth_date, location, bio, created_at
             FROM pos_users
             WHERE employee_id IS NULL
             """
@@ -3412,14 +3432,17 @@ def _backfill_hr_employees_from_users(connection, backend: str) -> None:
             text(
                 """
                 INSERT INTO hr_employees (
-                    id, name, email, status, phone, position, notes, avatar_url, birth_date, location, bio, created_at, updated_at
+                    id, tenant_id, name, email, status, phone, position, notes, avatar_url,
+                    birth_date, location, bio, show_in_schedule, order_index, created_at, updated_at
                 )
-                SELECT :id, :name, :email, :status, :phone, :position, :notes, :avatar_url, :birth_date, :location, :bio, :created_at, CURRENT_TIMESTAMP
+                SELECT :id, :tenant_id, :name, :email, :status, :phone, :position, :notes,
+                       :avatar_url, :birth_date, :location, :bio, 1, 0, :created_at, CURRENT_TIMESTAMP
                 WHERE NOT EXISTS (SELECT 1 FROM hr_employees WHERE id = :id)
                 """
             ),
             {
                 "id": row.get("id"),
+                "tenant_id": row.get("tenant_id"),
                 "name": row.get("name"),
                 "email": row.get("email"),
                 "status": row.get("status") or "Activo",

@@ -107,15 +107,19 @@ def _schema_bootstrap_enabled() -> bool:
 
 
 def _bootstrap_database_schema() -> None:
-    # Aplicamos upgrades idempotentes siempre. Esto corrige desfaces de esquema
-    # en producción sin depender de una variable de entorno.
+    bootstrap_schema = _schema_bootstrap_enabled()
+    if bootstrap_schema:
+        # En una instalación local completamente nueva todavía no existen las
+        # tablas que los upgrades intentan alterar. Creamos primero el esquema
+        # base y luego aplicamos migraciones/semillas idempotentes.
+        Base.metadata.create_all(bind=engine)
+
+    # Aplicamos upgrades idempotentes siempre. Esto corrige desfases de esquema
+    # en producción sin habilitar el create_all costoso de forma implícita.
     run_schema_upgrades(engine)
 
-    if not _schema_bootstrap_enabled():
+    if not bootstrap_schema:
         return
-
-    # Esta rutina puede ser costosa en PostgreSQL, por eso queda opt-in.
-    Base.metadata.create_all(bind=engine)
 
     platform_owner_email = os.getenv("PLATFORM_OWNER_EMAIL")
     platform_owner_password = os.getenv("PLATFORM_OWNER_PASSWORD")
