@@ -325,6 +325,37 @@ def _build_restock_forecast_response(
         .subquery()
     )
 
+    change_rows = (
+        db.query(
+            models.SaleChangeNewItem.product_id.label("product_id"),
+            func.coalesce(
+                func.sum(
+                    case((models.SaleChange.created_at >= sale_window_start, models.SaleChangeNewItem.quantity), else_=0)
+                ),
+                0,
+            ).label("units_lookback"),
+            func.coalesce(
+                func.sum(
+                    case((models.SaleChange.created_at >= short_window_start, models.SaleChangeNewItem.quantity), else_=0)
+                ),
+                0,
+            ).label("units_7d"),
+            func.coalesce(
+                func.sum(
+                    case((models.SaleChange.created_at >= day_start, models.SaleChangeNewItem.quantity), else_=0)
+                ),
+                0,
+            ).label("units_today"),
+            func.max(models.SaleChange.created_at).label("last_change_at"),
+        )
+        .join(models.SaleChange, models.SaleChange.id == models.SaleChangeNewItem.change_id)
+        .filter(models.SaleChange.tenant_id == tenant_id if tenant_id is not None else true())
+        .filter(models.SaleChange.status == "confirmed")
+        .filter(models.SaleChange.created_at >= sale_window_start)
+        .group_by(models.SaleChangeNewItem.product_id)
+        .subquery()
+    )
+
     today_sales_rows = (
         db.query(
             models.SaleItem.product_id.label("product_id"),
@@ -383,14 +414,24 @@ def _build_restock_forecast_response(
             models.Product.low_stock_alert,
             func.coalesce(stock_rows.c.qty_on_hand, 0).label("qty_on_hand"),
             stock_rows.c.last_movement_at.label("last_movement_at"),
-            func.coalesce(sales_rows.c.units_lookback, 0).label("units_lookback"),
-            func.coalesce(sales_rows.c.units_7d, 0).label("units_7d"),
-            sales_rows.c.last_sale_at.label("last_sale_at"),
-            func.coalesce(today_sales_rows.c.units_today, 0).label("units_today"),
-            today_sales_rows.c.last_sale_today_at.label("last_sale_today_at"),
+            (
+                func.coalesce(sales_rows.c.units_lookback, 0)
+                + func.coalesce(change_rows.c.units_lookback, 0)
+            ).label("units_lookback"),
+            (
+                func.coalesce(sales_rows.c.units_7d, 0)
+                + func.coalesce(change_rows.c.units_7d, 0)
+            ).label("units_7d"),
+            func.coalesce(sales_rows.c.last_sale_at, change_rows.c.last_change_at).label("last_sale_at"),
+            (
+                func.coalesce(today_sales_rows.c.units_today, 0)
+                + func.coalesce(change_rows.c.units_today, 0)
+            ).label("units_today"),
+            func.coalesce(today_sales_rows.c.last_sale_today_at, change_rows.c.last_change_at).label("last_sale_today_at"),
         )
         .outerjoin(stock_rows, stock_rows.c.product_id == models.Product.id)
         .outerjoin(sales_rows, sales_rows.c.product_id == models.Product.id)
+        .outerjoin(change_rows, change_rows.c.product_id == models.Product.id)
         .outerjoin(today_sales_rows, today_sales_rows.c.product_id == models.Product.id)
         .filter(models.Product.tenant_id == tenant_id if tenant_id is not None else true())
         .filter(models.Product.service.is_(False))
