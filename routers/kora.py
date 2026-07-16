@@ -240,6 +240,37 @@ def _looks_like_sparse_rotation(
     return units_lookback < 3 and units_7d < 1
 
 
+def _compute_stable_daily_rate(
+    *,
+    units_lookback: float,
+    units_7d: float,
+    lookback_days: int,
+    short_window_days: int,
+) -> float:
+    if units_lookback <= 0 and units_7d <= 0:
+        return 0.0
+
+    rate_lookback = units_lookback / lookback_days if lookback_days > 0 else 0.0
+    rate_7d = units_7d / short_window_days if short_window_days > 0 else 0.0
+
+    if units_lookback > 0 and units_7d > 0:
+        recent_vs_history = rate_7d / rate_lookback if rate_lookback > 0 else 0.0
+        if units_lookback <= 6 and units_7d <= 2:
+            long_weight, short_weight = 0.8, 0.2
+        elif units_lookback >= 15 or units_7d >= 4 or recent_vs_history >= 1.3:
+            long_weight, short_weight = 0.35, 0.65
+        elif recent_vs_history <= 0.75:
+            long_weight, short_weight = 0.7, 0.3
+        else:
+            long_weight, short_weight = 0.55, 0.45
+        return (rate_lookback * long_weight) + (rate_7d * short_weight)
+
+    if units_lookback > 0:
+        return rate_lookback
+
+    return rate_7d
+
+
 def _build_restock_forecast_response(
     *,
     db: Session,
@@ -373,14 +404,12 @@ def _build_restock_forecast_response(
         units_lookback = max(0.0, float(row.units_lookback or 0.0))
         units_7d = max(0.0, float(row.units_7d or 0.0))
         units_today = max(0.0, float(row.units_today or 0.0))
-        rate_lookback = units_lookback / lookback_days if lookback_days > 0 else 0.0
-        rate_7d = units_7d / short_window_days if short_window_days > 0 else 0.0
-        if units_lookback > 0 and units_7d > 0:
-            daily_rate = (rate_lookback * 0.35) + (rate_7d * 0.65)
-        elif units_lookback > 0:
-            daily_rate = rate_lookback
-        else:
-            daily_rate = rate_7d
+        daily_rate = _compute_stable_daily_rate(
+            units_lookback=units_lookback,
+            units_7d=units_7d,
+            lookback_days=lookback_days,
+            short_window_days=short_window_days,
+        )
 
         projected_demand = daily_rate * horizon_days
         configured_threshold = max(
@@ -499,6 +528,11 @@ def _build_restock_forecast_response(
         if qty <= 0 and (units_lookback > 0 or units_today > 0 or buffer_target > 0):
             urgency = "high"
             reason_parts.append("hoy está sin stock")
+        elif mode == "today" and qty > 0 and coverage_days is not None and coverage_days >= horizon_days:
+            urgency = "medium"
+            reason_parts.append(f"aun tiene cobertura de {_format_days(coverage_days)}")
+            if units_today >= 3:
+                reason_parts.append(f"hoy se vendieron {units_today:.0f} unidades")
         elif effective_threshold > 0 and qty <= float(effective_threshold):
             today_threshold_is_too_soft = (
                 mode == "today"
