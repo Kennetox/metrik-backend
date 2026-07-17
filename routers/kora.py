@@ -82,7 +82,7 @@ class KoraRestockForecastItem(BaseModel):
     projected_demand: float
     suggested_qty: int
     urgency: Literal["high", "medium", "low"]
-    reason: str
+    reason: str = Field(exclude=True)
     last_sale_at: datetime | None = None
     last_movement_at: datetime | None = None
 
