@@ -24,6 +24,7 @@ from dependencies import (
     get_current_tenant_id,
     require_permission,
 )
+from services import kora_web_opportunities
 
 class KoraAskContext(BaseModel):
     topic: str | None = None
@@ -101,11 +102,121 @@ class KoraRestockForecastResponse(BaseModel):
     conversation_starters: list[str]
 
 
+class KoraWebOpportunityItem(BaseModel):
+    product_id: int
+    product_name: str
+    sku: str | None = None
+    group_name: str | None = None
+    qty_on_hand: float
+    units_7d: float
+    units_lookback: float
+    revenue_lookback: float
+    last_sale_at: datetime | None = None
+    readiness_score: int
+    missing_web_fields: list[str]
+    score: float
+    reason: str
+
+
+class KoraWebOpportunityResponse(BaseModel):
+    generated_at: datetime
+    source: Literal["web-opportunities-v1"] = "web-opportunities-v1"
+    state: Literal["opportunities", "no_sales", "no_candidates"]
+    lookback_days: int
+    analyzed_product_count: int
+    headline: str
+    items: list[KoraWebOpportunityItem]
+    recipient_count: int = 0
+    notifications_created: int = 0
+    duplicate_notifications: int = 0
+
+
 router = APIRouter(
     prefix="/kora",
     tags=["kora"],
     dependencies=[Depends(require_permission("dashboard.view"))],
 )
+
+web_router = APIRouter(
+    prefix="/kora",
+    tags=["kora"],
+    dependencies=[Depends(require_permission("commerce_web.view"))],
+)
+
+
+def _web_opportunity_response(
+    analysis: kora_web_opportunities.WebOpportunityAnalysis,
+    *,
+    recipient_count: int = 0,
+    notifications_created: int = 0,
+    duplicate_notifications: int = 0,
+) -> KoraWebOpportunityResponse:
+    return KoraWebOpportunityResponse(
+        generated_at=analysis.generated_at,
+        state=analysis.state,
+        lookback_days=analysis.lookback_days,
+        analyzed_product_count=analysis.analyzed_product_count,
+        headline=analysis.headline,
+        items=[
+            KoraWebOpportunityItem(
+                product_id=item.product_id,
+                product_name=item.product_name,
+                sku=item.sku,
+                group_name=item.group_name,
+                qty_on_hand=item.qty_on_hand,
+                units_7d=item.units_7d,
+                units_lookback=item.units_lookback,
+                revenue_lookback=item.revenue_lookback,
+                last_sale_at=item.last_sale_at,
+                readiness_score=item.readiness_score,
+                missing_web_fields=list(item.missing_web_fields),
+                score=item.score,
+                reason=item.reason,
+            )
+            for item in analysis.items
+        ],
+        recipient_count=recipient_count,
+        notifications_created=notifications_created,
+        duplicate_notifications=duplicate_notifications,
+    )
+
+
+@web_router.get("/web-opportunities", response_model=KoraWebOpportunityResponse)
+def get_kora_web_opportunities(
+    lookback_days: int = Query(default=30, ge=14, le=90),
+    max_items: int = Query(default=8, ge=1, le=20),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    analysis = kora_web_opportunities.analyze_web_opportunities(
+        db,
+        tenant_id=tenant_id,
+        lookback_days=lookback_days,
+        max_items=max_items,
+    )
+    return _web_opportunity_response(analysis)
+
+
+@web_router.post(
+    "/web-opportunities/notify",
+    response_model=KoraWebOpportunityResponse,
+    dependencies=[Depends(require_permission("commerce_web.manage"))],
+)
+def notify_kora_web_opportunities(
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    result = kora_web_opportunities.dispatch_web_opportunity_notifications(
+        db,
+        tenant_id=tenant_id,
+        trigger="manual",
+    )
+    return _web_opportunity_response(
+        result.analysis,
+        recipient_count=result.recipient_count,
+        notifications_created=result.created_count,
+        duplicate_notifications=result.duplicate_count,
+    )
 
 
 ALLOWED_HREFS = {

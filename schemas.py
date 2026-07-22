@@ -4030,3 +4030,29 @@ class PosClosurePreviewRead(PosClosureBase):
         if value is None:
             return []
         return value
+
+
+# ===================== USER NOTIFICATIONS =====================
+
+
+class UserNotificationRead(BaseModel):
+    id: int
+    source: str
+    category: str
+    severity: Literal["info", "success", "warning", "critical"]
+    module_id: Optional[str] = None
+    title: str
+    message: str
+    action_label: Optional[str] = None
+    action_href: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    read_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserNotificationListRead(BaseModel):
+    items: List[UserNotificationRead]
+    unread_count: int

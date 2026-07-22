@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     JSON,
+    Index,
     Text,
     UniqueConstraint,
 )
@@ -1528,6 +1529,47 @@ class PosUser(Base):
     sessions = relationship("PosSession", back_populates="user")
     documents = relationship("PosUserDocument", back_populates="user")
     employee = relationship("HREmployee", back_populates="system_user")
+
+
+class UserNotification(Base):
+    __tablename__ = "user_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "dedupe_key",
+            name="uq_user_notifications_recipient_dedupe",
+        ),
+        Index(
+            "ix_user_notifications_inbox",
+            "tenant_id",
+            "user_id",
+            "dismissed_at",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    source = Column(String(32), nullable=False, default="system")
+    category = Column(String(48), nullable=False, default="general")
+    severity = Column(String(16), nullable=False, default="info")
+    module_id = Column(String(48), nullable=True)
+    required_permission = Column(String(96), nullable=True)
+    title = Column(String(160), nullable=False)
+    message = Column(Text, nullable=False)
+    action_label = Column(String(80), nullable=True)
+    action_href = Column(String(512), nullable=True)
+    dedupe_key = Column(String(160), nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    read_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+    tenant = relationship("Tenant")
+    user = relationship("PosUser")
 
 
 class PosSession(Base):

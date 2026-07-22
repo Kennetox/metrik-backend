@@ -19,6 +19,7 @@ import crud
 from db_migrations import run_schema_upgrades
 from services import storage
 from services import monthly_report_email
+from services import kora_web_opportunities
 from services.payments.sync import refresh_backoffice_order_payment_statuses
 from routers import (
     uploads as uploads_router,
@@ -48,6 +49,7 @@ from routers import (
     kora as kora_router,
     legacy_imports as legacy_imports_router,
     documents as documents_router,
+    notifications as notifications_router,
 )
 
 app = FastAPI(
@@ -215,6 +217,7 @@ http_logger = logging.getLogger("kensar.http")
 scheduler_logger = logging.getLogger("kensar.scheduler")
 _monthly_report_task: asyncio.Task | None = None
 _payment_reconciliation_task: asyncio.Task | None = None
+_kora_web_opportunity_task: asyncio.Task | None = None
 
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -383,9 +386,30 @@ async def _payment_reconciliation_loop():
         await asyncio.sleep(_payment_reconciliation_interval_seconds())
 
 
+def _kora_web_opportunity_scheduler_enabled() -> bool:
+    raw = os.getenv("KORA_WEB_OPPORTUNITY_SCHEDULER_ENABLED", "true").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+async def _kora_web_opportunity_scheduler_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            result = kora_web_opportunities.run_weekly_web_opportunity_dispatch()
+            if result.get("notifications_created", 0) or result.get("failed", 0):
+                scheduler_logger.info("Kora web opportunity scheduler: %s", result)
+        except Exception:
+            scheduler_logger.exception("Kora web opportunity scheduler failed")
+        await asyncio.sleep(6 * 60 * 60)
+
+
 @app.on_event("startup")
 async def _start_monthly_report_scheduler():
-    global _monthly_report_task, _payment_reconciliation_task
+    global _monthly_report_task, _payment_reconciliation_task, _kora_web_opportunity_task
     _bootstrap_database_schema()
     if not _monthly_report_scheduler_enabled():
         _monthly_report_task = None
@@ -399,10 +423,18 @@ async def _start_monthly_report_scheduler():
         if not (_payment_reconciliation_task and not _payment_reconciliation_task.done()):
             _payment_reconciliation_task = asyncio.create_task(_payment_reconciliation_loop())
 
+    if not _kora_web_opportunity_scheduler_enabled():
+        _kora_web_opportunity_task = None
+    else:
+        if not (_kora_web_opportunity_task and not _kora_web_opportunity_task.done()):
+            _kora_web_opportunity_task = asyncio.create_task(
+                _kora_web_opportunity_scheduler_loop()
+            )
+
 
 @app.on_event("shutdown")
 async def _stop_monthly_report_scheduler():
-    global _monthly_report_task, _payment_reconciliation_task
+    global _monthly_report_task, _payment_reconciliation_task, _kora_web_opportunity_task
     if _monthly_report_task is None:
         pass
     else:
@@ -413,14 +445,21 @@ async def _stop_monthly_report_scheduler():
             pass
         _monthly_report_task = None
 
-    if _payment_reconciliation_task is None:
-        return
-    _payment_reconciliation_task.cancel()
-    try:
-        await _payment_reconciliation_task
-    except asyncio.CancelledError:
-        pass
-    _payment_reconciliation_task = None
+    if _payment_reconciliation_task is not None:
+        _payment_reconciliation_task.cancel()
+        try:
+            await _payment_reconciliation_task
+        except asyncio.CancelledError:
+            pass
+        _payment_reconciliation_task = None
+
+    if _kora_web_opportunity_task is not None:
+        _kora_web_opportunity_task.cancel()
+        try:
+            await _kora_web_opportunity_task
+        except asyncio.CancelledError:
+            pass
+        _kora_web_opportunity_task = None
 
 app.include_router(uploads_router.router)
 app.include_router(labels_router.router)
@@ -485,8 +524,10 @@ app.include_router(comercio_web_router.router)
 app.include_router(platform_router.router)
 app.include_router(investment_router.router)
 app.include_router(kora_router.router)
+app.include_router(kora_router.web_router)
 app.include_router(legacy_imports_router.router)
 app.include_router(documents_router.router)
+app.include_router(notifications_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
 

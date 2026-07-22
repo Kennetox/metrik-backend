@@ -1188,6 +1188,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_pos_station_notices_postgres(connection)
                 _ensure_table_stock_devices_postgres(connection)
                 _ensure_table_demo_signup_audits_postgres(connection)
+                _ensure_table_user_notifications_postgres(connection)
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -1943,6 +1944,7 @@ def run_schema_upgrades(engine: Engine) -> None:
             if backend == "sqlite":
                 _ensure_table_tenants(connection)
                 _ensure_table_demo_signup_audits(connection)
+                _ensure_table_user_notifications(connection)
                 _seed_default_tenant_sqlite(connection)
                 _ensure_column(
                     connection,
@@ -3938,6 +3940,48 @@ def _ensure_table_pos_station_notices(connection) -> None:
         )
 
 
+def _ensure_table_user_notifications(connection) -> None:
+    if not _table_exists(connection, "user_notifications"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE user_notifications (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'system',
+                    category TEXT NOT NULL DEFAULT 'general',
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    module_id TEXT,
+                    required_permission TEXT,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    action_label TEXT,
+                    action_href TEXT,
+                    dedupe_key TEXT,
+                    payload JSON,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    read_at DATETIME,
+                    dismissed_at DATETIME,
+                    expires_at DATETIME,
+                    FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                    FOREIGN KEY(user_id) REFERENCES pos_users(id),
+                    CONSTRAINT uq_user_notifications_recipient_dedupe
+                        UNIQUE (tenant_id, user_id, dedupe_key)
+                )
+                """
+            )
+        )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_user_notifications_inbox
+            ON user_notifications (tenant_id, user_id, dismissed_at, created_at)
+            """
+        )
+    )
+
+
 def _relax_pos_station_schema_sqlite(connection) -> None:
     if not _table_exists(connection, "pos_stations"):
         return
@@ -4416,6 +4460,45 @@ def _ensure_table_pos_station_notices_postgres(connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS pos_station_notices_station_idx
             ON pos_station_notices (station_id)
+            """
+        )
+    )
+
+
+def _ensure_table_user_notifications_postgres(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                user_id INTEGER NOT NULL REFERENCES pos_users(id),
+                source VARCHAR(32) NOT NULL DEFAULT 'system',
+                category VARCHAR(48) NOT NULL DEFAULT 'general',
+                severity VARCHAR(16) NOT NULL DEFAULT 'info',
+                module_id VARCHAR(48),
+                required_permission VARCHAR(96),
+                title VARCHAR(160) NOT NULL,
+                message TEXT NOT NULL,
+                action_label VARCHAR(80),
+                action_href VARCHAR(512),
+                dedupe_key VARCHAR(160),
+                payload JSONB,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                read_at TIMESTAMP,
+                dismissed_at TIMESTAMP,
+                expires_at TIMESTAMP,
+                CONSTRAINT uq_user_notifications_recipient_dedupe
+                    UNIQUE (tenant_id, user_id, dedupe_key)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_user_notifications_inbox
+            ON user_notifications (tenant_id, user_id, dismissed_at, created_at DESC)
             """
         )
     )
