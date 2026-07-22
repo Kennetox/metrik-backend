@@ -1809,10 +1809,31 @@ class WebCatalogHomeSectionsConfig(BaseModel):
     web_home_sections_mode: WebHomeSectionsMode = "categories"
 
 
+class ComercioWebSettingsRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    web_personalization_bindings: WebPersonalizationBindings = Field(
+        default_factory=WebPersonalizationBindings
+    )
+    web_personalization_home_images: WebPersonalizationHomeImages = Field(
+        default_factory=WebPersonalizationHomeImages
+    )
+    web_brand_collage_images: WebBrandCollageImages = Field(
+        default_factory=WebBrandCollageImages
+    )
+    web_home_sections_mode: WebHomeSectionsMode = "categories"
+
+
+class ComercioWebSettingsUpdate(BaseModel):
+    web_personalization_bindings: Optional[WebPersonalizationBindings] = None
+    web_personalization_home_images: Optional[WebPersonalizationHomeImages] = None
+    web_brand_collage_images: Optional[WebBrandCollageImages] = None
+    web_home_sections_mode: Optional[WebHomeSectionsMode] = None
+
+
 class PosUserBase(BaseModel):
     name: str
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"] = "Vendedor"
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"] = "Vendedor"
     phone: Optional[str] = None
     position: Optional[str] = None
     notes: Optional[str] = None
@@ -1832,7 +1853,7 @@ class PosUserCreate(PosUserBase):
 class PosUserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
-    role: Optional[Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]] = None
+    role: Optional[Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"]] = None
     status: Optional[Literal["Activo", "Inactivo"]] = None
     password: Optional[str] = None
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
@@ -1873,7 +1894,7 @@ class PosUserProfileRead(BaseModel):
     id: int
     name: str
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"]
     status: Literal["Activo", "Inactivo"]
     phone: Optional[str] = None
     position: Optional[str] = None
@@ -1970,7 +1991,7 @@ class HREmployeeUpdate(BaseModel):
 class HREmployeeSystemUserSummary(BaseModel):
     id: int
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"]
     status: Literal["Activo", "Inactivo"]
 
 
@@ -2002,7 +2023,7 @@ class HREmployeeDocumentRead(BaseModel):
 
 class HREmployeeCreateSystemUserRequest(BaseModel):
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"] = "Vendedor"
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"] = "Vendedor"
     password: Optional[str] = None
     pin_plain: Optional[Annotated[str, Field(min_length=4, max_length=8, pattern=r"^\d{4,8}$")]] = None
 
@@ -2024,7 +2045,7 @@ class HRSystemUserOption(BaseModel):
     id: int
     name: str
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"]
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"]
     status: Literal["Activo", "Inactivo"]
     employee_id: Optional[int] = None
 
@@ -3495,7 +3516,7 @@ class PlatformTenantUserRead(BaseModel):
     id: int
     name: str
     email: EmailStr
-    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor"] = "Vendedor"
+    role: Literal["Administrador", "Supervisor", "Vendedor", "Auditor", "Gestor Web"] = "Vendedor"
     status: Literal["Activo", "Inactivo"] = "Activo"
     is_active: bool = True
     created_at: datetime

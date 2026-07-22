@@ -137,7 +137,17 @@ def _get_mobile_stock_user_issue(user) -> str | None:
     status = (user.status or "").strip()
     if status != "Activo":
         return f"Usuario con estado no permitido: {status or 'vacío'}"
+    if user.role == "Gestor Web":
+        return "El rol Gestor Web solo puede ingresar al panel web"
     return None
+
+
+def _ensure_operational_login_role(user) -> None:
+    if user.role == "Gestor Web":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El rol Gestor Web solo puede ingresar al panel web",
+        )
 
 
 def _get_mobile_stock_device_issue(device) -> str | None:
@@ -556,6 +566,7 @@ def pos_login(
         raise HTTPException(
             status_code=401, detail="Credenciales inválidas o usuario inactivo"
         )
+    _ensure_operational_login_role(user)
     tenant = crud.get_tenant(db, int(user.tenant_id)) if user.tenant_id else None
     access_issue = crud.get_tenant_access_issue(tenant)
     if access_issue:
@@ -643,6 +654,7 @@ def tablet_login(
         raise HTTPException(
             status_code=401, detail="PIN inválido o usuario inactivo"
         )
+    _ensure_operational_login_role(user)
     tenant = crud.get_tenant(db, int(user.tenant_id)) if user.tenant_id else None
     access_issue = crud.get_tenant_access_issue(tenant)
     if access_issue:
@@ -726,6 +738,7 @@ def tablet_email_check(
     user = crud.get_pos_user_by_email(db, payload.email, tenant_id=tenant_id)
     if not user or not user.is_active or user.status != "Activo":
         raise HTTPException(status_code=404, detail="Correo no encontrado o inactivo")
+    _ensure_operational_login_role(user)
 
     return schemas.AuthTabletEmailCheckResponse(
         exists=True,

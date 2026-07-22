@@ -4,7 +4,13 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 
-ROLE_KEYS = ["Administrador", "Supervisor", "Vendedor", "Auditor"]
+WEB_MANAGER_ROLE = "Gestor Web"
+ROLE_KEYS = ["Administrador", "Supervisor", "Vendedor", "Auditor", WEB_MANAGER_ROLE]
+WEB_MANAGER_PERMISSION_IDS = {
+    "commerce_web",
+    "commerce_web.view",
+    "commerce_web.manage",
+}
 
 # Acciones críticas mínimas que deben quedar protegidas para operación.
 # El resto de acciones/módulos siguen siendo editables por toggles.
@@ -29,6 +35,23 @@ def _apply_locked_editable_flags(modules: List[Dict[str, Any]]) -> List[Dict[str
             action_id = action.get("id")
             if action_id in LOCKED_ACTION_IDS:
                 action["editable"] = False
+    return modules
+
+
+def _enforce_web_manager_scope(
+    modules: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep the dedicated web role isolated from every non-web permission."""
+    for module in modules:
+        module_id = module.get("id")
+        module.setdefault("roles", {})[WEB_MANAGER_ROLE] = (
+            module_id in WEB_MANAGER_PERMISSION_IDS
+        )
+        for action in module.get("actions", []):
+            action_id = action.get("id")
+            action.setdefault("roles", {})[WEB_MANAGER_ROLE] = (
+                action_id in WEB_MANAGER_PERMISSION_IDS
+            )
     return modules
 
 
@@ -393,6 +416,7 @@ DEFAULT_ROLE_PERMISSION_MODULES: List[Dict[str, Any]] = [
 
 def get_default_permissions() -> List[Dict[str, Any]]:
     data = deepcopy(DEFAULT_ROLE_PERMISSION_MODULES)
+    data = _enforce_web_manager_scope(data)
     return _apply_locked_editable_flags(data)
 
 
@@ -475,6 +499,7 @@ def ensure_permissions(
             )
         merged_modules.append(module_copy)
     merged_modules = _enforce_locked_action_floor(merged_modules, default_modules)
+    merged_modules = _enforce_web_manager_scope(merged_modules)
     return _apply_locked_editable_flags(merged_modules)
 
 

@@ -1,10 +1,14 @@
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy.orm import Session
 
+import crud
 import models
 from dependencies import get_current_active_user
+from database import get_db
 import schemas
+from services import permissions
 from services import storage
 
 logger = logging.getLogger(__name__)
@@ -15,13 +19,47 @@ router = APIRouter(
 )
 
 
+def require_product_media_upload(
+    current_user: models.PosUser = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> models.PosUser:
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
+    if permissions.role_has_permission(matrix, "products.manage", current_user.role):
+        return current_user
+    tenant = crud.get_tenant(db, tenant_id) if tenant_id is not None else None
+    if permissions.role_has_permission(
+        matrix, "commerce_web.manage", current_user.role
+    ) and crud.can_user_access_tenant_module(
+        tenant, "commerce_web", user=current_user
+    ):
+        return current_user
+    raise HTTPException(status_code=403, detail="No autorizado para subir archivos")
+
+
+def require_home_video_upload(
+    current_user: models.PosUser = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> models.PosUser:
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
+    tenant = crud.get_tenant(db, tenant_id) if tenant_id is not None else None
+    if permissions.role_has_permission(
+        matrix, "commerce_web.manage", current_user.role
+    ) and crud.can_user_access_tenant_module(
+        tenant, "commerce_web", user=current_user
+    ):
+        return current_user
+    raise HTTPException(status_code=403, detail="No autorizado para subir archivos")
+
+
 @router.post(
     "/product-images",
     response_model=schemas.UploadProductImageResponse,
 )
 async def upload_product_image(
     file: UploadFile = File(...),
-    current_user: models.PosUser = Depends(get_current_active_user),
+    current_user: models.PosUser = Depends(require_product_media_upload),
 ):
     try:
         result = await storage.save_product_image(
@@ -42,7 +80,7 @@ async def upload_product_image(
 )
 async def upload_product_video(
     file: UploadFile = File(...),
-    current_user: models.PosUser = Depends(get_current_active_user),
+    current_user: models.PosUser = Depends(require_product_media_upload),
 ):
     try:
         result = await storage.save_product_video(
@@ -67,7 +105,7 @@ async def upload_product_video(
 )
 async def upload_home_video(
     file: UploadFile = File(...),
-    current_user: models.PosUser = Depends(get_current_active_user),
+    current_user: models.PosUser = Depends(require_home_video_upload),
 ):
     tenant_id = getattr(current_user, "tenant_id", None)
     logger.info(

@@ -38,6 +38,44 @@ def test_seller_cannot_manage_settings_or_payment_methods():
     )
 
 
+def test_web_manager_is_scoped_exclusively_to_commerce_web():
+    modules = get_default_permissions()
+
+    assert role_has_permission(modules, "commerce_web", "Gestor Web") is True
+    assert role_has_permission(modules, "commerce_web.view", "Gestor Web") is True
+    assert role_has_permission(modules, "commerce_web.manage", "Gestor Web") is True
+
+    for permission_id in (
+        "dashboard.view",
+        "products.view",
+        "products.manage",
+        "movements.view",
+        "pos.sales",
+        "reports.view",
+        "settings.view",
+        "settings.manage",
+        "users.manage",
+        "hr.view",
+        "schedule.view",
+    ):
+        assert role_has_permission(modules, permission_id, "Gestor Web") is False
+
+
+def test_web_manager_scope_cannot_be_expanded_by_role_overrides():
+    override = get_default_permissions()
+    for module in override:
+        module["roles"]["Gestor Web"] = True
+        for action in module.get("actions", []):
+            action["roles"]["Gestor Web"] = True
+
+    merged = permissions.ensure_permissions(override)
+
+    assert role_has_permission(merged, "commerce_web.manage", "Gestor Web") is True
+    assert role_has_permission(merged, "dashboard.view", "Gestor Web") is False
+    assert role_has_permission(merged, "settings.manage", "Gestor Web") is False
+    assert role_has_permission(merged, "products.manage", "Gestor Web") is False
+
+
 def test_only_locked_actions_are_non_revocable_floor():
     defaults = get_default_permissions()
 

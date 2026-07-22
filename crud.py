@@ -10013,6 +10013,25 @@ def update_pos_settings(
     return settings
 
 
+def update_comercio_web_settings(
+    db: Session,
+    settings: models.PosSettings,
+    settings_in: schemas.ComercioWebSettingsUpdate,
+) -> models.PosSettings:
+    data = settings_in.model_dump(exclude_unset=True, exclude_none=True)
+    for field, value in data.items():
+        setattr(settings, field, value)
+    db.commit()
+    db.refresh(settings)
+    settings.web_personalization_bindings = _hydrate_web_personalization_bindings(
+        db,
+        settings.web_personalization_bindings or {},
+        tenant_id=settings.tenant_id,
+    )
+    clear_public_web_home_cache(tenant_id=settings.tenant_id)
+    return settings
+
+
 def get_role_permissions(
     db: Session,
     tenant_id: Optional[int] = None,
@@ -10124,12 +10143,30 @@ def _count_active_admins(db: Session, tenant_id: Optional[int] = None) -> int:
     return query.count()
 
 
+def _validate_pos_user_role_availability(
+    db: Session,
+    role: str,
+    tenant_id: Optional[int],
+) -> None:
+    if role != permissions.WEB_MANAGER_ROLE:
+        return
+    tenant = get_tenant(db, tenant_id) if tenant_id is not None else None
+    if not tenant or not tenant_modules.is_module_enabled(
+        tenant.enabled_modules,
+        "commerce_web",
+    ):
+        raise ValueError(
+            "El rol Gestor Web solo está disponible cuando Comercio Web está activo"
+        )
+
+
 def create_pos_user(
     db: Session,
     user_in: schemas.PosUserCreate,
     tenant_id: Optional[int] = None,
 ) -> models.PosUser:
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    _validate_pos_user_role_availability(db, user_in.role, effective_tenant_id)
     existing = get_pos_user_by_email(db, user_in.email, tenant_id=effective_tenant_id)
     if existing:
         raise ValueError("Ya existe un usuario con ese email")
@@ -10241,6 +10278,8 @@ def update_pos_user(
 
     new_role = data.get("role", user.role)
     new_status = data.get("status", user.status)
+    if new_role != user.role:
+        _validate_pos_user_role_availability(db, new_role, user.tenant_id)
 
     was_active_admin = user.role == "Administrador" and user.status == "Activo"
     will_be_active_admin = new_role == "Administrador" and new_status == "Activo"

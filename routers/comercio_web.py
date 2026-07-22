@@ -27,6 +27,28 @@ def _tenant_id_for_user(db: Session, user: models.PosUser) -> int:
     return tenant_id
 
 
+@router.get("/settings", response_model=schemas.ComercioWebSettingsRead)
+def get_comercio_web_settings(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.get_pos_settings(db, tenant_id=tenant_id)
+
+
+@router.patch("/settings", response_model=schemas.ComercioWebSettingsRead)
+def update_comercio_web_settings(
+    payload: schemas.ComercioWebSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+    return crud.update_comercio_web_settings(db, settings, payload)
+
+
 @router.get("/orders", response_model=list[schemas.WebOrderRead])
 def list_comercio_web_orders(
     limit: int = Query(default=100, ge=1, le=200),

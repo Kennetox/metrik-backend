@@ -2136,6 +2136,19 @@ def get_role_permissions(
     return schemas.RolePermissionMatrix(modules=modules)
 
 
+@router.get(
+    "/me/permissions",
+    response_model=schemas.RolePermissionMatrix,
+)
+def get_my_role_permissions(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    modules = crud.get_role_permissions(db, tenant_id=tenant_id)
+    return schemas.RolePermissionMatrix(modules=modules)
+
+
 @router.put(
     "/roles/permissions",
     response_model=schemas.RolePermissionMatrix,
