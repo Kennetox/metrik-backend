@@ -20,6 +20,7 @@ from db_migrations import run_schema_upgrades
 from services import storage
 from services import monthly_report_email
 from services import kora_web_opportunities
+from services import operational_notifications
 from services.payments.sync import refresh_backoffice_order_payment_statuses
 from routers import (
     uploads as uploads_router,
@@ -218,6 +219,7 @@ scheduler_logger = logging.getLogger("kensar.scheduler")
 _monthly_report_task: asyncio.Task | None = None
 _payment_reconciliation_task: asyncio.Task | None = None
 _kora_web_opportunity_task: asyncio.Task | None = None
+_operational_notification_task: asyncio.Task | None = None
 
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -395,6 +397,15 @@ def _kora_web_opportunity_scheduler_enabled() -> bool:
     return True
 
 
+def _operational_notification_scheduler_enabled() -> bool:
+    raw = os.getenv("OPERATIONAL_NOTIFICATION_SCHEDULER_ENABLED", "true").strip().lower()
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
 async def _kora_web_opportunity_scheduler_loop():
     await asyncio.sleep(20)
     while True:
@@ -407,9 +418,22 @@ async def _kora_web_opportunity_scheduler_loop():
         await asyncio.sleep(6 * 60 * 60)
 
 
+async def _operational_notification_scheduler_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            result = operational_notifications.run_operational_notification_dispatch()
+            if result.get("notifications_created", 0) or result.get("failed", 0):
+                scheduler_logger.info("Operational notification scheduler: %s", result)
+        except Exception:
+            scheduler_logger.exception("Operational notification scheduler failed")
+        await asyncio.sleep(6 * 60 * 60)
+
+
 @app.on_event("startup")
 async def _start_monthly_report_scheduler():
     global _monthly_report_task, _payment_reconciliation_task, _kora_web_opportunity_task
+    global _operational_notification_task
     _bootstrap_database_schema()
     if not _monthly_report_scheduler_enabled():
         _monthly_report_task = None
@@ -431,10 +455,18 @@ async def _start_monthly_report_scheduler():
                 _kora_web_opportunity_scheduler_loop()
             )
 
+    if not _operational_notification_scheduler_enabled():
+        _operational_notification_task = None
+    elif not (_operational_notification_task and not _operational_notification_task.done()):
+        _operational_notification_task = asyncio.create_task(
+            _operational_notification_scheduler_loop()
+        )
+
 
 @app.on_event("shutdown")
 async def _stop_monthly_report_scheduler():
     global _monthly_report_task, _payment_reconciliation_task, _kora_web_opportunity_task
+    global _operational_notification_task
     if _monthly_report_task is None:
         pass
     else:
@@ -460,6 +492,14 @@ async def _stop_monthly_report_scheduler():
         except asyncio.CancelledError:
             pass
         _kora_web_opportunity_task = None
+
+    if _operational_notification_task is not None:
+        _operational_notification_task.cancel()
+        try:
+            await _operational_notification_task
+        except asyncio.CancelledError:
+            pass
+        _operational_notification_task = None
 
 app.include_router(uploads_router.router)
 app.include_router(labels_router.router)
