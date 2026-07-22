@@ -496,8 +496,31 @@ def dispatch_web_opportunity_notifications(
         dedupe_key=f"kora:web-opportunities:v2:{dedupe_suffix}",
         payload={
             "radar_version": 2,
+            "generated_at": analysis.generated_at.isoformat(),
+            "headline": analysis.headline,
             "lookback_days": analysis.lookback_days,
+            "analyzed_product_count": analysis.analyzed_product_count,
+            "minimum_sale_price": analysis.minimum_sale_price,
+            "eligible_group_count": analysis.eligible_group_count,
             "product_ids": [item.product_id for item in analysis.items],
+            "opportunities": [
+                {
+                    "product_id": item.product_id,
+                    "product_name": item.product_name,
+                    "sku": item.sku,
+                    "group_name": item.group_name,
+                    "sale_price": item.sale_price,
+                    "suggested_category_key": item.suggested_category_key,
+                    "suggested_category_name": item.suggested_category_name,
+                    "qty_on_hand": item.qty_on_hand,
+                    "units_7d": item.units_7d,
+                    "units_lookback": item.units_lookback,
+                    "revenue_lookback": item.revenue_lookback,
+                    "missing_web_fields": list(item.missing_web_fields),
+                    "reason": item.reason,
+                }
+                for item in analysis.items
+            ],
             "trigger": trigger,
         },
         expires_at=(analysis.generated_at + timedelta(days=14)),

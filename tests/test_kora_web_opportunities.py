@@ -318,3 +318,6 @@ def test_weekly_web_opportunity_dispatch_targets_web_managers_and_deduplicates()
         }
         assert all(notification.source == "kora" for notification in notifications)
         assert all(notification.module_id == "commerce_web" for notification in notifications)
+        assert all(notification.payload["radar_version"] == 2 for notification in notifications)
+        assert all(notification.payload["opportunities"][0]["product_id"] == product.id for notification in notifications)
+        assert all(notification.payload["opportunities"][0]["sale_price"] == 100_000 for notification in notifications)
