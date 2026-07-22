@@ -1116,6 +1116,29 @@ class WebCatalogHomeSlider(Base):
     link_type = Column(String(24), nullable=False, default="catalogo")
     link_value = Column(String(255), nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
+    content_updated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class WebCatalogHomeVideo(Base):
+    __tablename__ = "web_catalog_home_videos"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slot", name="web_catalog_home_videos_tenant_slot_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    slot = Column(Integer, nullable=False, index=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    video_url = Column(String(512), nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    content_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime,

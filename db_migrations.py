@@ -309,6 +309,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
                     link_type VARCHAR(24) NOT NULL DEFAULT 'catalogo',
                     link_value VARCHAR(255),
                     sort_order INTEGER NOT NULL DEFAULT 0,
+                    content_updated_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -327,8 +328,16 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
         _ensure_column_postgres(connection, table, "link_type", "VARCHAR(24) NOT NULL DEFAULT 'catalogo'")
         _ensure_column_postgres(connection, table, "link_value", "VARCHAR(255)")
         _ensure_column_postgres(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "content_updated_at", "TIMESTAMP")
         _ensure_column_postgres(connection, table, "created_at", "TIMESTAMP")
         _ensure_column_postgres(connection, table, "updated_at", "TIMESTAMP")
+        connection.execute(
+            text(
+                "UPDATE web_catalog_home_sliders "
+                "SET content_updated_at = updated_at "
+                "WHERE content_updated_at IS NULL AND image_url IS NOT NULL AND image_url <> ''"
+            )
+        )
         connection.execute(
             text(
                 """
@@ -369,6 +378,7 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
                     link_type TEXT NOT NULL DEFAULT 'catalogo',
                     link_value TEXT,
                     sort_order INTEGER NOT NULL DEFAULT 0,
+                    content_updated_at DATETIME,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -387,8 +397,114 @@ def _ensure_web_catalog_home_slider_schema(connection, backend: str) -> None:
     _ensure_column(connection, table, "link_type", "TEXT NOT NULL DEFAULT 'catalogo'")
     _ensure_column(connection, table, "link_value", "TEXT")
     _ensure_column(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "content_updated_at", "DATETIME")
     _ensure_column(connection, table, "created_at", "DATETIME")
     _ensure_column(connection, table, "updated_at", "DATETIME")
+    connection.execute(
+        text(
+            "UPDATE web_catalog_home_sliders "
+            "SET content_updated_at = updated_at "
+            "WHERE content_updated_at IS NULL AND image_url IS NOT NULL AND image_url <> ''"
+        )
+    )
+
+
+def _ensure_web_catalog_home_video_schema(connection, backend: str) -> None:
+    table = "web_catalog_home_videos"
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS web_catalog_home_videos (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER REFERENCES tenants(id),
+                    slot INTEGER NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    video_url VARCHAR(512),
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    content_updated_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        _ensure_column_postgres(connection, table, "tenant_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "slot", "INTEGER")
+        _ensure_column_postgres(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT FALSE")
+        _ensure_column_postgres(connection, table, "video_url", "VARCHAR(512)")
+        _ensure_column_postgres(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "content_updated_at", "TIMESTAMP")
+        _ensure_column_postgres(connection, table, "created_at", "TIMESTAMP")
+        _ensure_column_postgres(connection, table, "updated_at", "TIMESTAMP")
+        connection.execute(
+            text(
+                "UPDATE web_catalog_home_videos "
+                "SET content_updated_at = updated_at "
+                "WHERE content_updated_at IS NULL AND video_url IS NOT NULL AND video_url <> ''"
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_home_videos_tenant_slot_key
+                ON web_catalog_home_videos (tenant_id, slot)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_videos_tenant_id "
+                "ON web_catalog_home_videos (tenant_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_catalog_home_videos_slot "
+                "ON web_catalog_home_videos (slot)"
+            )
+        )
+        return
+
+    if not _table_exists(connection, table):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE web_catalog_home_videos (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
+                    slot INTEGER NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT 0,
+                    video_url TEXT,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    content_updated_at DATETIME,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    _ensure_column(connection, table, "tenant_id", "INTEGER")
+    _ensure_column(connection, table, "slot", "INTEGER")
+    _ensure_column(connection, table, "enabled", "BOOLEAN NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "video_url", "TEXT")
+    _ensure_column(connection, table, "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "content_updated_at", "DATETIME")
+    _ensure_column(connection, table, "created_at", "DATETIME")
+    _ensure_column(connection, table, "updated_at", "DATETIME")
+    connection.execute(
+        text(
+            "UPDATE web_catalog_home_videos "
+            "SET content_updated_at = updated_at "
+            "WHERE content_updated_at IS NULL AND video_url IS NOT NULL AND video_url <> ''"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS web_catalog_home_videos_tenant_slot_key "
+            "ON web_catalog_home_videos (tenant_id, slot)"
+        )
+    )
 
 
 def _ensure_web_catalog_combo_schema(connection, backend: str) -> None:
@@ -1820,6 +1936,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
                 _ensure_web_description_template_schema(connection, backend="postgresql")
                 _ensure_web_catalog_home_slider_schema(connection, backend="postgresql")
+                _ensure_web_catalog_home_video_schema(connection, backend="postgresql")
                 _ensure_web_catalog_combo_schema(connection, backend="postgresql")
                 _ensure_inventory_recount_drafts_schema(connection, backend="postgresql")
                 return
@@ -2985,6 +3102,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")
                 _ensure_web_description_template_schema(connection, backend="sqlite")
                 _ensure_web_catalog_home_slider_schema(connection, backend="sqlite")
+                _ensure_web_catalog_home_video_schema(connection, backend="sqlite")
                 _ensure_web_catalog_combo_schema(connection, backend="sqlite")
                 _ensure_inventory_recount_drafts_schema(connection, backend="sqlite")
 

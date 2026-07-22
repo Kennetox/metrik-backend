@@ -518,6 +518,45 @@ def update_comercio_web_home_slider(
 
 
 @router.get(
+    "/home-videos",
+    response_model=list[schemas.ComercioWebHomeVideoRead],
+)
+def list_comercio_web_home_videos(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_comercio_web_home_videos(db, tenant_id=tenant_id)
+
+
+@router.put(
+    "/home-videos/{slot}",
+    response_model=schemas.ComercioWebHomeVideoRead,
+)
+def update_comercio_web_home_video(
+    slot: int,
+    payload: schemas.ComercioWebHomeVideoUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_comercio_web_home_video(
+            db,
+            tenant_id=tenant_id,
+            slot=slot,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrado" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.get(
     "/catalog/discount-codes/{discount_code_id}/usage",
     response_model=schemas.ComercioWebDiscountCodeUsagePage,
 )

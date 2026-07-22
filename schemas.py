@@ -601,6 +601,30 @@ class ComercioWebHomeSliderUpdate(BaseModel):
 
 class ComercioWebHomeSliderRead(ComercioWebHomeSliderBase):
     id: int
+    content_updated_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ComercioWebHomeVideoBase(BaseModel):
+    slot: int = Field(ge=1, le=5)
+    enabled: bool = False
+    video_url: Optional[str] = None
+    sort_order: int = 0
+
+
+class ComercioWebHomeVideoUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    video_url: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class ComercioWebHomeVideoRead(ComercioWebHomeVideoBase):
+    id: int
+    content_updated_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -754,6 +778,17 @@ class WebCatalogHomeSlider(BaseModel):
 
 class WebCatalogHomeSliderList(BaseModel):
     items: List[WebCatalogHomeSlider]
+
+
+class WebCatalogHomeVideo(BaseModel):
+    slot: int
+    video_url: str
+    sort_order: int = 0
+    is_new: bool = False
+
+
+class WebCatalogHomeVideoList(BaseModel):
+    items: List[WebCatalogHomeVideo]
 
 
 class WebCatalogProductCard(BaseModel):

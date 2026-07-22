@@ -38,6 +38,15 @@ def list_web_catalog_home_sliders(
     return schemas.WebCatalogHomeSliderList(items=items)
 
 
+@router.get("/home-videos", response_model=schemas.WebCatalogHomeVideoList)
+def list_web_catalog_home_videos(
+    db: Session = Depends(get_db),
+):
+    tenant_id = crud.resolve_public_catalog_tenant_id(db)
+    items = crud.list_public_web_home_videos(db, tenant_id=tenant_id)
+    return schemas.WebCatalogHomeVideoList(items=items)
+
+
 @router.get("/home-sections", response_model=schemas.WebCatalogHomeSectionsConfig)
 def get_web_catalog_home_sections(
     db: Session = Depends(get_db),

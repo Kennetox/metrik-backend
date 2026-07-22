@@ -3913,6 +3913,7 @@ def _seed_comercio_web_home_sliders(
                 link_type="catalogo",
                 link_value=None,
                 sort_order=slot,
+                content_updated_at=None,
                 created_at=now,
                 updated_at=now,
             )
@@ -4022,6 +4023,7 @@ def list_comercio_web_home_sliders(
             link_type=_normalize_slider_link_type(row.link_type),
             link_value=row.link_value,
             sort_order=int(row.sort_order or 0),
+            content_updated_at=row.content_updated_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -4072,8 +4074,11 @@ def update_comercio_web_home_slider(
 
     if "enabled" in data:
         row.enabled = next_enabled
+    current_image_url = _normalize_slider_text(row.image_url)
     if "image_url" in data:
         row.image_url = next_image_url
+        if next_image_url != current_image_url:
+            row.content_updated_at = datetime.utcnow() if next_image_url else None
     if "mobile_image_url" in data:
         row.mobile_image_url = next_mobile_image_url
     if "alt_text" in data:
@@ -4107,6 +4112,7 @@ def update_comercio_web_home_slider(
         link_type=_normalize_slider_link_type(row.link_type),
         link_value=row.link_value,
         sort_order=int(row.sort_order or 0),
+        content_updated_at=row.content_updated_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -4148,6 +4154,154 @@ def list_public_web_home_sliders(
         filtered.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
         result = filtered[:5]
         _set_public_web_home_cache("sliders", effective_tenant_id, result)
+        return list(result)
+    except (SQLAlchemyTimeoutError, SQLAlchemyError):
+        stale_items = _get_public_web_stale_cache(cache_key)
+        if isinstance(stale_items, list):
+            return list(stale_items)
+        return []
+
+
+def _seed_comercio_web_home_videos(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+) -> None:
+    existing = (
+        db.query(func.count(models.WebCatalogHomeVideo.id))
+        .filter(models.WebCatalogHomeVideo.tenant_id == tenant_id)
+        .scalar()
+    )
+    if int(existing or 0) > 0:
+        return
+    now = datetime.utcnow()
+    db.add_all(
+        [
+            models.WebCatalogHomeVideo(
+                tenant_id=tenant_id,
+                slot=slot,
+                enabled=False,
+                video_url=None,
+                sort_order=slot,
+                content_updated_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+            for slot in range(1, 6)
+        ]
+    )
+    db.commit()
+
+
+def _serialize_comercio_web_home_video(
+    row: models.WebCatalogHomeVideo,
+) -> schemas.ComercioWebHomeVideoRead:
+    return schemas.ComercioWebHomeVideoRead(
+        id=row.id,
+        slot=int(row.slot or 0),
+        enabled=bool(row.enabled),
+        video_url=row.video_url,
+        sort_order=int(row.sort_order or 0),
+        content_updated_at=row.content_updated_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def list_comercio_web_home_videos(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> list[schemas.ComercioWebHomeVideoRead]:
+    _seed_comercio_web_home_videos(db, tenant_id=tenant_id)
+    rows = (
+        db.query(models.WebCatalogHomeVideo)
+        .filter(models.WebCatalogHomeVideo.tenant_id == tenant_id)
+        .order_by(models.WebCatalogHomeVideo.slot.asc(), models.WebCatalogHomeVideo.id.asc())
+        .all()
+    )
+    return [_serialize_comercio_web_home_video(row) for row in rows]
+
+
+def update_comercio_web_home_video(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+    slot: int,
+    payload: schemas.ComercioWebHomeVideoUpdate,
+) -> schemas.ComercioWebHomeVideoRead:
+    if slot < 1 or slot > 5:
+        raise ValueError("Slot inválido. Debe estar entre 1 y 5.")
+    _seed_comercio_web_home_videos(db, tenant_id=tenant_id)
+    row = (
+        db.query(models.WebCatalogHomeVideo)
+        .filter(
+            models.WebCatalogHomeVideo.tenant_id == tenant_id,
+            models.WebCatalogHomeVideo.slot == slot,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Video de inicio no encontrado")
+
+    data = payload.model_dump(exclude_unset=True)
+    next_video_url = _normalize_slider_text(data.get("video_url", row.video_url))
+    next_enabled = bool(data.get("enabled", row.enabled))
+    if next_enabled and not next_video_url:
+        raise ValueError("No puedes activar un slot sin video.")
+
+    if "video_url" in data:
+        row.video_url = next_video_url
+        row.content_updated_at = datetime.utcnow() if next_video_url else None
+        if not next_video_url:
+            row.enabled = False
+    if "enabled" in data:
+        row.enabled = next_enabled
+    if "sort_order" in data:
+        row.sort_order = int(data.get("sort_order") or 0)
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    clear_public_web_home_cache(tenant_id=tenant_id)
+    return _serialize_comercio_web_home_video(row)
+
+
+def list_public_web_home_videos(
+    db: Session,
+    *,
+    tenant_id: Optional[int] = None,
+) -> list[schemas.WebCatalogHomeVideo]:
+    effective_tenant_id = tenant_id if tenant_id is not None else resolve_public_catalog_tenant_id(db)
+    cached_items = _get_public_web_home_cache("videos", effective_tenant_id)
+    if isinstance(cached_items, list):
+        return list(cached_items)
+    cache_key = _public_web_home_cache_key("videos", effective_tenant_id)
+    try:
+        rows = (
+            db.query(models.WebCatalogHomeVideo)
+            .filter(models.WebCatalogHomeVideo.tenant_id == effective_tenant_id)
+            .order_by(models.WebCatalogHomeVideo.slot.asc(), models.WebCatalogHomeVideo.id.asc())
+            .all()
+        )
+        new_badge_days = _env_int("WEB_HOME_VIDEO_NEW_BADGE_DAYS", 7, min_value=1, max_value=30)
+        new_badge_threshold = datetime.utcnow() - timedelta(days=new_badge_days)
+        result = [
+            schemas.WebCatalogHomeVideo(
+                slot=int(row.slot or 0),
+                video_url=(row.video_url or "").strip(),
+                sort_order=int(row.sort_order or 0),
+                is_new=bool(
+                    row.content_updated_at
+                    and row.content_updated_at >= new_badge_threshold
+                ),
+            )
+            for row in rows
+            if bool(row.enabled) and bool((row.video_url or "").strip())
+        ]
+        result.sort(key=lambda item: (int(item.sort_order or 0), int(item.slot or 0)))
+        result = result[:5]
+        _set_public_web_home_cache("videos", effective_tenant_id, result)
         return list(result)
     except (SQLAlchemyTimeoutError, SQLAlchemyError):
         stale_items = _get_public_web_stale_cache(cache_key)

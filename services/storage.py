@@ -11,9 +11,11 @@ from fastapi import UploadFile
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov"}
-MAX_VIDEO_SIZE = 80 * 1024 * 1024  # 80MB input before compression
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500MB input, streamed to disk before compression
 MAX_VIDEO_DURATION_SECONDS = 45
+MAX_HOME_VIDEO_DURATION_SECONDS = 3 * 60
+VIDEO_UPLOAD_CHUNK_SIZE = 1024 * 1024
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -236,37 +238,51 @@ async def save_product_image(
 async def save_product_video(
     file: UploadFile,
     tenant_id: Optional[int] = None,
+    compression_profile: str = "product",
 ) -> StoredProductVideo:
+    is_home_video = compression_profile == "home"
     original_name = file.filename or ""
     extension = Path(original_name).suffix.lower()
     if extension not in ALLOWED_VIDEO_EXTENSIONS:
-        raise ValueError("Formato no soportado. Usa MP4 o MOV.")
+        raise ValueError("Formato no soportado. Usa MP4, MOV, M4V, WebM, AVI o MKV.")
 
     ffmpeg_bin = shutil.which("ffmpeg")
     ffprobe_bin = shutil.which("ffprobe")
     if not ffmpeg_bin or not ffprobe_bin:
         raise ValueError("No hay soporte de compresión de video disponible en el servidor.")
 
-    contents = await file.read()
-    if len(contents) > MAX_VIDEO_SIZE:
-        raise ValueError("El video supera los 80MB permitidos para procesar.")
-
     with tempfile.TemporaryDirectory(prefix="metrik-video-") as temp_dir:
         temp_root = Path(temp_dir)
         input_path = temp_root / f"input{extension}"
         output_path = temp_root / "output.mp4"
-        input_path.write_bytes(contents)
+        uploaded_size = 0
+        with input_path.open("wb") as input_file:
+            while chunk := await file.read(VIDEO_UPLOAD_CHUNK_SIZE):
+                uploaded_size += len(chunk)
+                if uploaded_size > MAX_VIDEO_SIZE:
+                    raise ValueError("El video supera los 500MB permitidos para procesar.")
+                input_file.write(chunk)
+
+        if uploaded_size <= 0:
+            raise ValueError("El archivo de video está vacío.")
 
         duration_seconds = _probe_video_duration_seconds(ffprobe_bin, input_path)
         if duration_seconds <= 0:
             raise ValueError("No se pudo leer la duración del video.")
-        if duration_seconds > MAX_VIDEO_DURATION_SECONDS:
+        max_duration_seconds = (
+            MAX_HOME_VIDEO_DURATION_SECONDS if is_home_video else MAX_VIDEO_DURATION_SECONDS
+        )
+        if duration_seconds > max_duration_seconds:
+            if is_home_video:
+                raise ValueError("El video de inicio no puede superar los 3 minutos.")
             raise ValueError(f"El video no puede superar los {MAX_VIDEO_DURATION_SECONDS} segundos.")
 
         scale_filter = (
-            "scale="
-            "if(gte(iw,ih),min(1280,iw),-2):"
-            "if(lt(iw,ih),min(1280,ih),-2)"
+            "scale=w='min(720,iw)':h='min(1280,ih)':"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2"
+            if is_home_video
+            else "scale=w='min(1280,iw)':h='min(1280,ih)':"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2"
         )
         transcode_command = [
             ffmpeg_bin,
@@ -280,13 +296,13 @@ async def save_product_video(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "medium" if is_home_video else "veryfast",
             "-crf",
-            "28",
+            "30" if is_home_video else "28",
             "-maxrate",
-            "2500k",
+            "1200k" if is_home_video else "2500k",
             "-bufsize",
-            "5000k",
+            "2400k" if is_home_video else "5000k",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -294,7 +310,7 @@ async def save_product_video(
             "-c:a",
             "aac",
             "-b:a",
-            "96k",
+            "64k" if is_home_video else "96k",
             "-ac",
             "2",
             "-ar",
@@ -308,7 +324,7 @@ async def save_product_video(
             text=True,
             check=False,
         )
-        if process.returncode != 0 or not output_path.exists():
+        if (process.returncode != 0 or not output_path.exists()) and not is_home_video:
             # Fallback para MOV/MP4 ya codificados en H264/AAC: solo remux a MP4.
             remux_command = [
                 ffmpeg_bin,
@@ -337,6 +353,13 @@ async def save_product_video(
                     + (f" ({error_tail})" if error_tail else "")
                 )
 
+        if is_home_video and (process.returncode != 0 or not output_path.exists()):
+            error_tail = (process.stderr or "").strip().splitlines()[-6:]
+            raise ValueError(
+                "No se pudo comprimir el video para web. Intenta con otro archivo."
+                + (f" ({' '.join(error_tail)})" if error_tail else "")
+            )
+
         output_size = output_path.stat().st_size
         if output_size <= 0:
             raise ValueError("No se pudo generar un video válido.")
@@ -345,7 +368,7 @@ async def save_product_video(
         base_dir = _get_product_video_dir(tenant_id)
         base_dir.mkdir(parents=True, exist_ok=True)
         file_path = base_dir / filename
-        file_path.write_bytes(output_path.read_bytes())
+        shutil.copyfile(output_path, file_path)
 
     url = _build_product_video_public_url(filename, tenant_id)
     return StoredProductVideo(
@@ -353,6 +376,17 @@ async def save_product_video(
         url=url,
         size_bytes=output_size,
         duration_seconds=duration_seconds,
+    )
+
+
+async def save_home_video(
+    file: UploadFile,
+    tenant_id: Optional[int] = None,
+) -> StoredProductVideo:
+    return await save_product_video(
+        file,
+        tenant_id=tenant_id,
+        compression_profile="home",
     )
 
 
