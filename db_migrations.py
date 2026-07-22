@@ -3556,7 +3556,8 @@ def _backfill_hr_employees_from_users(connection, backend: str) -> None:
                     birth_date, location, bio, show_in_schedule, order_index, created_at, updated_at
                 )
                 SELECT :id, :tenant_id, :name, :email, :status, :phone, :position, :notes,
-                       :avatar_url, :birth_date, :location, :bio, 1, 0, :created_at, CURRENT_TIMESTAMP
+                       :avatar_url, :birth_date, :location, :bio, :show_in_schedule, :order_index,
+                       :created_at, CURRENT_TIMESTAMP
                 WHERE NOT EXISTS (SELECT 1 FROM hr_employees WHERE id = :id)
                 """
             ),
@@ -3573,6 +3574,8 @@ def _backfill_hr_employees_from_users(connection, backend: str) -> None:
                 "birth_date": row.get("birth_date"),
                 "location": row.get("location"),
                 "bio": row.get("bio"),
+                "show_in_schedule": True,
+                "order_index": 0,
                 "created_at": row.get("created_at"),
             },
         )

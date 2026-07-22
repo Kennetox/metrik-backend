@@ -171,6 +171,47 @@ def test_local_schema_backfill_supports_fresh_non_nullable_hr_columns():
         db.close()
 
 
+def test_hr_backfill_binds_native_boolean_for_postgresql():
+    captured_insert_params = None
+
+    class FakeResult:
+        def __init__(self, rows=None):
+            self.rows = rows or []
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class FakeConnection:
+        def execute(self, statement, params=None):
+            nonlocal captured_insert_params
+            sql = str(statement)
+            if "FROM pos_users" in sql:
+                return FakeResult(
+                    [
+                        {
+                            "id": 12,
+                            "tenant_id": 3,
+                            "name": "MariaJose",
+                            "email": "maria@example.com",
+                            "status": "Activo",
+                            "created_at": None,
+                        }
+                    ]
+                )
+            if "INSERT INTO hr_employees" in sql:
+                captured_insert_params = params
+            return FakeResult()
+
+    _backfill_hr_employees_from_users(FakeConnection(), backend="postgresql")
+
+    assert captured_insert_params is not None
+    assert captured_insert_params["show_in_schedule"] is True
+    assert captured_insert_params["order_index"] == 0
+
+
 def test_sale_retry_is_idempotent_and_does_not_duplicate_inventory(
     client: TestClient,
 ):
