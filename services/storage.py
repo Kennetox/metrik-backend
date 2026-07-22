@@ -1,3 +1,6 @@
+import asyncio
+import json
+import logging
 import os
 import shutil
 import subprocess
@@ -13,15 +16,19 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500MB input, streamed to disk before compression
+MAX_HOME_VIDEO_SIZE = 90 * 1024 * 1024  # Practical limit below the production proxy ceiling
 MAX_VIDEO_DURATION_SECONDS = 45
 MAX_HOME_VIDEO_DURATION_SECONDS = 3 * 60
 VIDEO_UPLOAD_CHUNK_SIZE = 1024 * 1024
+VIDEO_PROCESS_TIMEOUT_SECONDS = 10 * 60
 LOGO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".svg"}
 MAX_LOGO_SIZE = 1 * 1024 * 1024  # 1MB
 AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
 DOC_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx"}
 MAX_DOC_SIZE = 5 * 1024 * 1024  # 5MB
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,6 +44,18 @@ class StoredProductVideo:
     url: str
     size_bytes: int
     duration_seconds: int
+
+
+@dataclass(frozen=True)
+class VideoMetadata:
+    duration_seconds: int
+    video_codec: str
+    audio_codec: Optional[str]
+    width: int
+    height: int
+    fps: float
+    bitrate: int
+    pixel_format: str
 
 
 @dataclass
@@ -235,13 +254,114 @@ async def save_product_image(
     return StoredProductImage(filename=filename, url=url, thumb_url=url)
 
 
+def _parse_frame_rate(value: object) -> float:
+    raw = str(value or "0").strip()
+    try:
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            denominator_value = float(denominator)
+            return float(numerator) / denominator_value if denominator_value else 0.0
+        return float(raw)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _probe_video_metadata(ffprobe_bin: str, file_path: Path) -> VideoMetadata:
+    process = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(file_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    if process.returncode != 0:
+        raise ValueError("No se pudo leer la información técnica del video.")
+    try:
+        payload = json.loads(process.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("No se pudo leer la información técnica del video.") from exc
+
+    streams = payload.get("streams") if isinstance(payload, dict) else []
+    streams = streams if isinstance(streams, list) else []
+    video_stream = next(
+        (stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "video"),
+        None,
+    )
+    audio_stream = next(
+        (stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "audio"),
+        None,
+    )
+    if not isinstance(video_stream, dict):
+        raise ValueError("El archivo no contiene una pista de video válida.")
+
+    format_data = payload.get("format") if isinstance(payload, dict) else {}
+    format_data = format_data if isinstance(format_data, dict) else {}
+    try:
+        duration_seconds = int(round(float(format_data.get("duration") or 0)))
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    try:
+        bitrate = int(video_stream.get("bit_rate") or format_data.get("bit_rate") or 0)
+    except (TypeError, ValueError):
+        bitrate = 0
+
+    return VideoMetadata(
+        duration_seconds=duration_seconds,
+        video_codec=str(video_stream.get("codec_name") or "").lower(),
+        audio_codec=(
+            str(audio_stream.get("codec_name") or "").lower()
+            if isinstance(audio_stream, dict)
+            else None
+        ),
+        width=int(video_stream.get("width") or 0),
+        height=int(video_stream.get("height") or 0),
+        fps=_parse_frame_rate(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")),
+        bitrate=bitrate,
+        pixel_format=str(video_stream.get("pix_fmt") or "").lower(),
+    )
+
+
+def _is_web_ready_home_video(metadata: VideoMetadata) -> bool:
+    return bool(
+        metadata.video_codec == "h264"
+        and metadata.audio_codec in {None, "aac"}
+        and 0 < metadata.width <= 720
+        and 0 < metadata.height <= 1280
+        and 0 < metadata.fps <= 30.5
+        and 0 < metadata.bitrate <= 1_500_000
+        and metadata.pixel_format in {"yuv420p", "yuvj420p"}
+    )
+
+
+def _run_video_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=VIDEO_PROCESS_TIMEOUT_SECONDS,
+    )
+
+
 async def save_product_video(
     file: UploadFile,
     tenant_id: Optional[int] = None,
     compression_profile: str = "product",
 ) -> StoredProductVideo:
     is_home_video = compression_profile == "home"
-    original_name = file.filename or ""
+    profile_name = "home" if is_home_video else "product"
+    original_name = Path(file.filename or "").name
     extension = Path(original_name).suffix.lower()
     if extension not in ALLOWED_VIDEO_EXTENSIONS:
         raise ValueError("Formato no soportado. Usa MP4, MOV, M4V, WebM, AVI o MKV.")
@@ -251,6 +371,15 @@ async def save_product_video(
     if not ffmpeg_bin or not ffprobe_bin:
         raise ValueError("No hay soporte de compresión de video disponible en el servidor.")
 
+    max_input_size = MAX_HOME_VIDEO_SIZE if is_home_video else MAX_VIDEO_SIZE
+    max_input_mb = max_input_size // (1024 * 1024)
+    logger.info(
+        "video_processing_started profile=%s tenant_id=%s filename=%s",
+        profile_name,
+        tenant_id,
+        original_name,
+    )
+
     with tempfile.TemporaryDirectory(prefix="metrik-video-") as temp_dir:
         temp_root = Path(temp_dir)
         input_path = temp_root / f"input{extension}"
@@ -259,14 +388,24 @@ async def save_product_video(
         with input_path.open("wb") as input_file:
             while chunk := await file.read(VIDEO_UPLOAD_CHUNK_SIZE):
                 uploaded_size += len(chunk)
-                if uploaded_size > MAX_VIDEO_SIZE:
-                    raise ValueError("El video supera los 500MB permitidos para procesar.")
+                if uploaded_size > max_input_size:
+                    logger.warning(
+                        "video_input_rejected profile=%s tenant_id=%s size_bytes=%s limit_bytes=%s",
+                        profile_name,
+                        tenant_id,
+                        uploaded_size,
+                        max_input_size,
+                    )
+                    raise ValueError(
+                        f"El video supera los {max_input_mb}MB permitidos para procesar."
+                    )
                 input_file.write(chunk)
 
         if uploaded_size <= 0:
             raise ValueError("El archivo de video está vacío.")
 
-        duration_seconds = _probe_video_duration_seconds(ffprobe_bin, input_path)
+        metadata = await asyncio.to_thread(_probe_video_metadata, ffprobe_bin, input_path)
+        duration_seconds = metadata.duration_seconds
         if duration_seconds <= 0:
             raise ValueError("No se pudo leer la duración del video.")
         max_duration_seconds = (
@@ -277,6 +416,7 @@ async def save_product_video(
                 raise ValueError("El video de inicio no puede superar los 3 minutos.")
             raise ValueError(f"El video no puede superar los {MAX_VIDEO_DURATION_SECONDS} segundos.")
 
+        use_fast_path = is_home_video and _is_web_ready_home_video(metadata)
         scale_filter = (
             "scale=w='min(720,iw)':h='min(1280,ih)':"
             "force_original_aspect_ratio=decrease:force_divisible_by=2"
@@ -287,6 +427,9 @@ async def save_product_video(
         transcode_command = [
             ffmpeg_bin,
             "-y",
+            "-nostats",
+            "-loglevel",
+            "error",
             "-i",
             str(input_path),
             "-vf",
@@ -296,7 +439,7 @@ async def save_product_video(
             "-c:v",
             "libx264",
             "-preset",
-            "medium" if is_home_video else "veryfast",
+            "veryfast",
             "-crf",
             "30" if is_home_video else "28",
             "-maxrate",
@@ -317,33 +460,61 @@ async def save_product_video(
             "44100",
             str(output_path),
         ]
-        process = subprocess.run(
-            transcode_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+        remux_command = [
+            ffmpeg_bin,
+            "-y",
+            "-nostats",
+            "-loglevel",
+            "error",
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        processing_mode = "fast_remux" if use_fast_path else "transcode"
+        logger.info(
+            "video_encoding_started profile=%s tenant_id=%s mode=%s input_bytes=%s duration_seconds=%s",
+            profile_name,
+            tenant_id,
+            processing_mode,
+            uploaded_size,
+            duration_seconds,
         )
-        if (process.returncode != 0 or not output_path.exists()) and not is_home_video:
-            # Fallback para MOV/MP4 ya codificados en H264/AAC: solo remux a MP4.
-            remux_command = [
-                ffmpeg_bin,
-                "-y",
-                "-i",
-                str(input_path),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ]
-            remux_process = subprocess.run(
-                remux_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
+        try:
+            process = await asyncio.to_thread(
+                _run_video_command,
+                remux_command if use_fast_path else transcode_command,
             )
+            if use_fast_path and (process.returncode != 0 or not output_path.exists()):
+                logger.warning(
+                    "video_fast_remux_failed profile=%s tenant_id=%s; falling_back_to_transcode",
+                    profile_name,
+                    tenant_id,
+                )
+                output_path.unlink(missing_ok=True)
+                processing_mode = "transcode_fallback"
+                process = await asyncio.to_thread(_run_video_command, transcode_command)
+        except subprocess.TimeoutExpired as exc:
+            logger.exception(
+                "video_encoding_timeout profile=%s tenant_id=%s filename=%s",
+                profile_name,
+                tenant_id,
+                original_name,
+            )
+            raise ValueError(
+                "El procesamiento tardó demasiado. Optimiza el video antes de volver a subirlo."
+            ) from exc
+
+        if (process.returncode != 0 or not output_path.exists()) and not is_home_video:
+            output_path.unlink(missing_ok=True)
+            remux_process = await asyncio.to_thread(_run_video_command, remux_command)
             if remux_process.returncode != 0 or not output_path.exists():
                 transcode_error = (process.stderr or "").strip().splitlines()[-4:]
                 remux_error = (remux_process.stderr or "").strip().splitlines()[-4:]
@@ -355,6 +526,12 @@ async def save_product_video(
 
         if is_home_video and (process.returncode != 0 or not output_path.exists()):
             error_tail = (process.stderr or "").strip().splitlines()[-6:]
+            logger.error(
+                "video_encoding_failed profile=home tenant_id=%s filename=%s error=%s",
+                tenant_id,
+                original_name,
+                " | ".join(error_tail),
+            )
             raise ValueError(
                 "No se pudo comprimir el video para web. Intenta con otro archivo."
                 + (f" ({' '.join(error_tail)})" if error_tail else "")
@@ -370,6 +547,14 @@ async def save_product_video(
         file_path = base_dir / filename
         shutil.copyfile(output_path, file_path)
 
+    logger.info(
+        "video_processing_completed profile=%s tenant_id=%s mode=%s output_bytes=%s duration_seconds=%s",
+        profile_name,
+        tenant_id,
+        processing_mode,
+        output_size,
+        duration_seconds,
+    )
     url = _build_product_video_public_url(filename, tenant_id)
     return StoredProductVideo(
         filename=filename,
@@ -388,32 +573,6 @@ async def save_home_video(
         tenant_id=tenant_id,
         compression_profile="home",
     )
-
-
-def _probe_video_duration_seconds(ffprobe_bin: str, file_path: Path) -> int:
-    process = subprocess.run(
-        [
-            ffprobe_bin,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(file_path),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if process.returncode != 0:
-        return 0
-    raw_value = (process.stdout or "").strip()
-    try:
-        return int(round(float(raw_value)))
-    except Exception:
-        return 0
 
 
 async def save_pos_logo(file: UploadFile) -> StoredLogo:
