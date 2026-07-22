@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 import crud, models
@@ -19,6 +20,34 @@ from services.user_notifications import distribute_notification
 
 logger = logging.getLogger("kensar.kora_web_opportunities")
 BOGOTA_TZ = ZoneInfo("America/Bogota")
+DEFAULT_MIN_WEB_SALE_PRICE_COP = 10_000.0
+
+
+def _minimum_web_sale_price() -> float:
+    raw = (os.getenv("KORA_WEB_MIN_PRODUCT_PRICE_COP") or "").strip()
+    if not raw:
+        return DEFAULT_MIN_WEB_SALE_PRICE_COP
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid KORA_WEB_MIN_PRODUCT_PRICE_COP=%r; using %.0f",
+            raw,
+            DEFAULT_MIN_WEB_SALE_PRICE_COP,
+        )
+        return DEFAULT_MIN_WEB_SALE_PRICE_COP
+
+
+def _normalize_group_name(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _normalize_category_key(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _format_cop(value: float) -> str:
+    return f"{value:,.0f}".replace(",", ".")
 
 
 @dataclass(frozen=True)
@@ -27,6 +56,9 @@ class WebOpportunityItem:
     product_name: str
     sku: str | None
     group_name: str | None
+    sale_price: float
+    suggested_category_key: str
+    suggested_category_name: str
     qty_on_hand: float
     units_7d: float
     units_lookback: float
@@ -44,6 +76,8 @@ class WebOpportunityAnalysis:
     state: Literal["opportunities", "no_sales", "no_candidates"]
     lookback_days: int
     analyzed_product_count: int
+    minimum_sale_price: float
+    eligible_group_count: int
     headline: str
     items: tuple[WebOpportunityItem, ...]
 
@@ -94,17 +128,78 @@ def analyze_web_opportunities(
     tenant_id: int,
     lookback_days: int = 30,
     max_items: int = 8,
+    minimum_sale_price: float | None = None,
     reference_time: datetime | None = None,
 ) -> WebOpportunityAnalysis:
     """Ranks active, in-stock and unpublished products using recent POS sales."""
 
     lookback_days = max(14, min(int(lookback_days or 30), 90))
     max_items = max(1, min(int(max_items or 8), 20))
+    effective_minimum_price = max(
+        0.0,
+        float(minimum_sale_price)
+        if minimum_sale_price is not None
+        else _minimum_web_sale_price(),
+    )
     generated_at = reference_time or datetime.utcnow()
     query_now = generated_at.replace(tzinfo=None) if generated_at.tzinfo else generated_at
     lookback_start = query_now - timedelta(days=lookback_days)
     recent_start = query_now - timedelta(days=min(7, lookback_days))
     metrics: dict[int, dict[str, object]] = {}
+
+    active_category_rows = (
+        db.query(models.WebCatalogCategory.key, models.WebCatalogCategory.name)
+        .filter(models.WebCatalogCategory.tenant_id == tenant_id)
+        .filter(models.WebCatalogCategory.is_active.is_(True))
+        .all()
+    )
+    active_categories = {
+        _normalize_category_key(row.key): str(row.name)
+        for row in active_category_rows
+        if _normalize_category_key(row.key)
+    }
+
+    published_group_rows = (
+        db.query(
+            models.Product.group_name.label("group_name"),
+            models.Product.web_category_key.label("category_key"),
+            models.WebCatalogCategory.name.label("category_name"),
+            func.count(models.Product.id).label("published_count"),
+        )
+        .join(
+            models.WebCatalogCategory,
+            and_(
+                models.WebCatalogCategory.tenant_id == models.Product.tenant_id,
+                models.WebCatalogCategory.key == models.Product.web_category_key,
+            ),
+        )
+        .filter(models.Product.tenant_id == tenant_id)
+        .filter(models.Product.active.is_(True))
+        .filter(models.Product.service.is_(False))
+        .filter(models.Product.web_published.is_(True))
+        .filter(models.Product.group_name.isnot(None))
+        .filter(func.trim(models.Product.group_name) != "")
+        .filter(models.WebCatalogCategory.is_active.is_(True))
+        .group_by(
+            models.Product.group_name,
+            models.Product.web_category_key,
+            models.WebCatalogCategory.name,
+        )
+        .all()
+    )
+    eligible_group_categories: dict[str, tuple[str, str, int]] = {}
+    for row in published_group_rows:
+        normalized_group = _normalize_group_name(row.group_name)
+        if not normalized_group:
+            continue
+        published_count = int(row.published_count or 0)
+        current = eligible_group_categories.get(normalized_group)
+        if current is None or published_count > current[2]:
+            eligible_group_categories[normalized_group] = (
+                str(row.category_key),
+                str(row.category_name),
+                published_count,
+            )
 
     sale_rows = (
         db.query(
@@ -218,6 +313,8 @@ def analyze_web_opportunities(
             state="no_sales",
             lookback_days=lookback_days,
             analyzed_product_count=0,
+            minimum_sale_price=effective_minimum_price,
+            eligible_group_count=len(eligible_group_categories),
             headline="Aún no hay ventas recientes suficientes para detectar oportunidades web.",
             items=(),
         )
@@ -245,6 +342,20 @@ def analyze_web_opportunities(
 
     candidates: list[WebOpportunityItem] = []
     for product in products:
+        normalized_group = _normalize_group_name(product.group_name)
+        category_suggestion = eligible_group_categories.get(normalized_group)
+        if category_suggestion is None:
+            continue
+        current_category_key = _normalize_category_key(product.web_category_key)
+        if current_category_key in active_categories:
+            category_suggestion = (
+                current_category_key,
+                active_categories[current_category_key],
+                category_suggestion[2],
+            )
+        sale_price = crud.resolve_web_product_sale_price(product)
+        if sale_price < effective_minimum_price:
+            continue
         metric = metrics[int(product.id)]
         units_7d = float(metric["units_7d"])
         units_lookback = float(metric["units_lookback"])
@@ -258,21 +369,24 @@ def analyze_web_opportunities(
         missing_fields: list[str] = []
         if not (product.image_url or product.image_thumb_url):
             missing_fields.append("imagen")
-        if not product.group_name:
+        if current_category_key not in active_categories:
             missing_fields.append("categoría")
         if not product.web_short_description:
             missing_fields.append("descripción")
         readiness_score = 3 - len(missing_fields)
         score = (
-            (units_7d * 6.0)
-            + (units_lookback * 3.0)
-            + min(revenue / 100_000.0, 15.0)
+            (min(units_7d, 10.0) * 2.0)
+            + (min(units_lookback, 30.0) * 0.75)
+            + min(revenue / 50_000.0, 50.0)
+            + min(sale_price / 100_000.0, 10.0)
             + min(qty_on_hand, 20.0) * 0.2
-            + readiness_score
+            + (readiness_score * 2.0)
         )
+        suggested_category_key, suggested_category_name, _ = category_suggestion
         reason = (
             f"Vendió {units_lookback:g} unidades en {lookback_days} días"
-            f" ({units_7d:g} en los últimos 7) y tiene {qty_on_hand:g} disponibles."
+            f" ({units_7d:g} en los últimos 7), tiene {qty_on_hand:g} disponibles y "
+            f"su grupo ya participa en {suggested_category_name}."
         )
         candidates.append(
             WebOpportunityItem(
@@ -280,6 +394,9 @@ def analyze_web_opportunities(
                 product_name=str(product.web_name or product.name),
                 sku=product.sku,
                 group_name=product.group_name,
+                sale_price=round(sale_price, 2),
+                suggested_category_key=suggested_category_key,
+                suggested_category_name=suggested_category_name,
                 qty_on_hand=round(qty_on_hand, 2),
                 units_7d=round(units_7d, 2),
                 units_lookback=round(units_lookback, 2),
@@ -308,7 +425,13 @@ def analyze_web_opportunities(
             state="no_candidates",
             lookback_days=lookback_days,
             analyzed_product_count=len(metrics),
-            headline="Revisé las ventas, pero todavía no hay productos con señal y stock suficientes.",
+            minimum_sale_price=effective_minimum_price,
+            eligible_group_count=len(eligible_group_categories),
+            headline=(
+                "Revisé las ventas, pero no encontré productos no publicados que cumplan todos "
+                f"los criterios: grupos ya presentes en la web, precio mínimo de "
+                f"{_format_cop(effective_minimum_price)} COP, stock disponible y rotación suficiente."
+            ),
             items=(),
         )
     return WebOpportunityAnalysis(
@@ -316,6 +439,8 @@ def analyze_web_opportunities(
         state="opportunities",
         lookback_days=lookback_days,
         analyzed_product_count=len(metrics),
+        minimum_sale_price=effective_minimum_price,
+        eligible_group_count=len(eligible_group_categories),
         headline=(
             f"Encontré {len(selected)} producto{'s' if len(selected) != 1 else ''} con potencial "
             "para publicar en Comercio Web."
@@ -352,7 +477,8 @@ def dispatch_web_opportunity_notifications(
     )
     top_items = analysis.items[:3]
     highlights = ", ".join(
-        f"{item.product_name} ({item.units_lookback:g} uds.)" for item in top_items
+        f"{item.product_name} (${_format_cop(item.sale_price)}; {item.units_lookback:g} uds.)"
+        for item in top_items
     )
     message = f"{analysis.headline} Destacan: {highlights}"
     distribution = distribute_notification(
@@ -367,8 +493,9 @@ def dispatch_web_opportunity_notifications(
         message=message,
         action_label="Revisar productos",
         action_href="/dashboard/comercio-web",
-        dedupe_key=f"kora:web-opportunities:{dedupe_suffix}",
+        dedupe_key=f"kora:web-opportunities:v2:{dedupe_suffix}",
         payload={
+            "radar_version": 2,
             "lookback_days": analysis.lookback_days,
             "product_ids": [item.product_id for item in analysis.items],
             "trigger": trigger,

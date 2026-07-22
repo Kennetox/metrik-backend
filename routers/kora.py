@@ -107,6 +107,9 @@ class KoraWebOpportunityItem(BaseModel):
     product_name: str
     sku: str | None = None
     group_name: str | None = None
+    sale_price: float
+    suggested_category_key: str
+    suggested_category_name: str
     qty_on_hand: float
     units_7d: float
     units_lookback: float
@@ -120,10 +123,12 @@ class KoraWebOpportunityItem(BaseModel):
 
 class KoraWebOpportunityResponse(BaseModel):
     generated_at: datetime
-    source: Literal["web-opportunities-v1"] = "web-opportunities-v1"
+    source: Literal["web-opportunities-v2"] = "web-opportunities-v2"
     state: Literal["opportunities", "no_sales", "no_candidates"]
     lookback_days: int
     analyzed_product_count: int
+    minimum_sale_price: float
+    eligible_group_count: int
     headline: str
     items: list[KoraWebOpportunityItem]
     recipient_count: int = 0
@@ -156,6 +161,8 @@ def _web_opportunity_response(
         state=analysis.state,
         lookback_days=analysis.lookback_days,
         analyzed_product_count=analysis.analyzed_product_count,
+        minimum_sale_price=analysis.minimum_sale_price,
+        eligible_group_count=analysis.eligible_group_count,
         headline=analysis.headline,
         items=[
             KoraWebOpportunityItem(
@@ -163,6 +170,9 @@ def _web_opportunity_response(
                 product_name=item.product_name,
                 sku=item.sku,
                 group_name=item.group_name,
+                sale_price=item.sale_price,
+                suggested_category_key=item.suggested_category_key,
+                suggested_category_name=item.suggested_category_name,
                 qty_on_hand=item.qty_on_hand,
                 units_7d=item.units_7d,
                 units_lookback=item.units_lookback,
