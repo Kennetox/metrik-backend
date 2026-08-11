@@ -213,6 +213,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Media filenames are generated with UUIDs and are never overwritten. Allow
+# browsers and intermediary caches to reuse these public assets instead of
+# downloading the same images/videos from Render on every visit.
+_CACHEABLE_UPLOAD_PREFIXES = (
+    "/uploads/product-images/",
+    "/uploads/product-videos/",
+    "/uploads/pos-logos/",
+)
+
 logger = logging.getLogger("kensar.validation")
 http_logger = logging.getLogger("kensar.http")
 scheduler_logger = logging.getLogger("kensar.scheduler")
@@ -253,6 +262,11 @@ async def request_observability_middleware(request: Request, call_next):
     duration_ms = round((time.perf_counter() - started_at) * 1000)
     response.headers["X-Request-ID"] = request_id
     response.headers["Server-Timing"] = f'app;dur={duration_ms}'
+    if (
+        response.status_code in {200, 206, 304}
+        and request.url.path.startswith(_CACHEABLE_UPLOAD_PREFIXES)
+    ):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     is_pos_path = request.url.path.startswith(("/pos", "/separated-orders"))
     is_critical_sale_write = request.method == "POST" and request.url.path in {
         "/pos/sales",
