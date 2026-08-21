@@ -168,6 +168,8 @@ async def readyz():
             "service": "kensar-backend",
             "ready": False,
             "maintenance": True,
+            "message": "Estamos actualizando Metrik para incorporar mejoras.",
+            "retry_after_seconds": 30,
         }
         _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
@@ -181,6 +183,8 @@ async def readyz():
             "service": "kensar-backend",
             "ready": False,
             "maintenance": False,
+            "message": "Metrik no puede conectarse con sus servicios internos.",
+            "retry_after_seconds": 15,
         }
         _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
