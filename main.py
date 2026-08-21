@@ -101,6 +101,22 @@ def _maintenance_enabled() -> bool:
     return _flag_enabled(os.getenv("MAINTENANCE_MODE"), default=False)
 
 
+def _release_id() -> str:
+    return (
+        os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("RENDER_GIT_COMMIT_SHA")
+        or os.getenv("APP_VERSION")
+        or "local"
+    )[:80]
+
+
+def _status_metadata() -> dict[str, str]:
+    return {
+        "release": _release_id(),
+        "checked_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+
 def _schema_bootstrap_enabled() -> bool:
     raw = os.getenv("BOOTSTRAP_SCHEMA_ON_STARTUP")
     if raw is not None:
@@ -150,6 +166,7 @@ async def healthz():
         "status": "ok",
         "service": "kensar-backend",
         "maintenance": _maintenance_enabled(),
+        **_status_metadata(),
     }
 
 
@@ -170,6 +187,7 @@ async def readyz():
             "maintenance": True,
             "message": "Estamos actualizando Metrik para incorporar mejoras.",
             "retry_after_seconds": 30,
+            **_status_metadata(),
         }
         _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
@@ -185,6 +203,7 @@ async def readyz():
             "maintenance": False,
             "message": "Metrik no puede conectarse con sus servicios internos.",
             "retry_after_seconds": 15,
+            **_status_metadata(),
         }
         _set_readyz_cache(503, payload, ttl_seconds=15)
         return JSONResponse(status_code=503, content=payload)
@@ -196,6 +215,7 @@ async def readyz():
         "service": "kensar-backend",
         "ready": True,
         "maintenance": False,
+        **_status_metadata(),
     }
     _set_readyz_cache(200, payload, ttl_seconds=10)
     return payload
