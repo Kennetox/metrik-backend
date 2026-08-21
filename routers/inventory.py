@@ -376,7 +376,7 @@ def get_inventory_overview(
 
 @router.get("/stock-trend", response_model=List[schemas.InventoryStockTrendPoint])
 def get_inventory_stock_trend(
-    days: int = Query(default=7, ge=2, le=31),
+    days: int = Query(default=7, ge=2, le=366),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("movements.view")),
 ):
@@ -426,7 +426,7 @@ def get_inventory_stock_trend(
     for row in current_rows:
         current_qty[row.product_id] = float(row.qty or 0.0)
 
-    first_close = datetime.combine(first_date + timedelta(days=1), time.min)
+    first_close = datetime.combine(first_date, time.min)
     recent_movements = (
         db.query(
             models.InventoryMovement.product_id,
@@ -443,22 +443,28 @@ def get_inventory_stock_trend(
         .all()
     )
 
-    points: List[schemas.InventoryStockTrendPoint] = []
-    for index in range(days):
-        point_date = first_date + timedelta(days=index)
-        is_today = point_date == now.date()
-        boundary = now if is_today else datetime.combine(point_date + timedelta(days=1), time.min)
-        quantities = current_qty.copy()
-        if not is_today:
-            for movement in recent_movements:
-                if movement.created_at >= boundary:
-                    quantities[movement.product_id] -= float(movement.qty_delta or 0.0)
+    # Aggregate once per calendar day so annual requests do not repeatedly
+    # scan every movement for every point in the chart.
+    daily_units: Dict[object, float] = {}
+    daily_values: Dict[object, float] = {}
+    for movement in recent_movements:
+        movement_date = movement.created_at.date()
+        qty_delta = float(movement.qty_delta or 0.0)
+        daily_units[movement_date] = daily_units.get(movement_date, 0.0) + qty_delta
+        daily_values[movement_date] = daily_values.get(movement_date, 0.0) + (
+            qty_delta * prices.get(movement.product_id, 0.0)
+        )
 
-        stock_units = sum(quantities.values())
+    points: List[schemas.InventoryStockTrendPoint] = []
+    future_units = 0.0
+    future_value = 0.0
+    for index in range(days):
+        point_date = first_date + timedelta(days=days - index - 1)
+        stock_units = sum(current_qty.values()) - future_units
         stock_sale_value = sum(
             qty * prices.get(product_id, 0.0)
-            for product_id, qty in quantities.items()
-        )
+            for product_id, qty in current_qty.items()
+        ) - future_value
         points.append(
             schemas.InventoryStockTrendPoint(
                 date=point_date,
@@ -466,8 +472,10 @@ def get_inventory_stock_trend(
                 stock_sale_value=stock_sale_value,
             )
         )
+        future_units += daily_units.get(point_date, 0.0)
+        future_value += daily_values.get(point_date, 0.0)
 
-    return points
+    return list(reversed(points))
 
 
 @router.get("/movements", response_model=List[schemas.InventoryMovementRead])
