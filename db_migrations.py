@@ -678,6 +678,47 @@ def _table_exists_postgres(connection, table: str) -> bool:
     return bool(row and row.get("exists"))
 
 
+def _ensure_system_status_schema(connection, backend: str) -> None:
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS system_status (
+                    id INTEGER PRIMARY KEY,
+                    state VARCHAR(24) NOT NULL DEFAULT 'healthy',
+                    message VARCHAR(255),
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_by VARCHAR(120)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO system_status (id, state) VALUES (1, 'healthy') "
+                "ON CONFLICT (id) DO NOTHING"
+            )
+        )
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS system_status (
+                id INTEGER PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'healthy',
+                message TEXT,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            )
+            """
+        )
+    )
+    connection.execute(
+        text("INSERT OR IGNORE INTO system_status (id, state) VALUES (1, 'healthy')")
+    )
+
+
 def _column_exists_postgres(connection, table: str, column: str) -> bool:
     row = connection.execute(
         text(
@@ -1940,8 +1981,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_home_video_schema(connection, backend="postgresql")
                 _ensure_web_catalog_combo_schema(connection, backend="postgresql")
                 _ensure_inventory_recount_drafts_schema(connection, backend="postgresql")
+                _ensure_system_status_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
+                _ensure_system_status_schema(connection, backend="sqlite")
                 _ensure_table_tenants(connection)
                 _ensure_table_demo_signup_audits(connection)
                 _ensure_table_user_notifications(connection)

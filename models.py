@@ -870,6 +870,16 @@ class PosSettings(Base):
     web_home_sections_mode = Column(String(20), nullable=True, default="categories")
 
 
+class SystemStatus(Base):
+    __tablename__ = "system_status"
+
+    id = Column(Integer, primary_key=True)
+    state = Column(String(24), nullable=False, default="healthy")
+    message = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_by = Column(String(120), nullable=True)
+
+
 class MonthlyReportDispatch(Base):
     __tablename__ = "monthly_report_dispatches"
 

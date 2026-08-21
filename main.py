@@ -51,6 +51,7 @@ from routers import (
     legacy_imports as legacy_imports_router,
     documents as documents_router,
     notifications as notifications_router,
+    system_status as system_status_router,
 )
 
 app = FastAPI(
@@ -115,6 +116,10 @@ def _status_metadata() -> dict[str, str]:
         "release": _release_id(),
         "checked_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
+
+
+def _persistent_system_status(db) -> models.SystemStatus | None:
+    return db.query(models.SystemStatus).filter(models.SystemStatus.id == 1).first()
 
 
 def _schema_bootstrap_enabled() -> bool:
@@ -194,6 +199,20 @@ async def readyz():
 
     db = SessionLocal()
     try:
+        system_status = _persistent_system_status(db)
+        if system_status and system_status.state == "maintenance":
+            payload = {
+                "status": "maintenance",
+                "service": "kensar-backend",
+                "ready": False,
+                "maintenance": True,
+                "message": system_status.message
+                or "Estamos actualizando Metrik para incorporar mejoras.",
+                "retry_after_seconds": 15,
+                **_status_metadata(),
+            }
+            _set_readyz_cache(503, payload, ttl_seconds=5)
+            return JSONResponse(status_code=503, content=payload)
         db.execute(text("SELECT 1"))
     except Exception:
         payload = {
@@ -606,6 +625,7 @@ app.include_router(kora_router.web_router)
 app.include_router(legacy_imports_router.router)
 app.include_router(documents_router.router)
 app.include_router(notifications_router.router)
+app.include_router(system_status_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
 
