@@ -73,4 +73,14 @@ def update_system_status(
     row.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(row)
+
+    # /readyz has a short in-process cache. Clear it immediately so clients
+    # can observe maintenance before Render replaces the running instance.
+    try:
+        from main import _READYZ_CACHE
+
+        _READYZ_CACHE.pop("readyz", None)
+    except (ImportError, AttributeError):
+        pass
+
     return _public_status(row)

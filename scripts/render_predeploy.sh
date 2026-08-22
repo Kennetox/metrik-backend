@@ -16,3 +16,4 @@ curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 \
   --data '{"state":"maintenance","message":"Estamos actualizando Metrik. El servicio volverá en unos minutos.","updated_by":"render-predeploy"}'
 
 echo "Aviso de mantenimiento publicado antes del despliegue."
+sleep "${DEPLOYMENT_STATUS_ANNOUNCEMENT_DELAY_SECONDS:-12}"

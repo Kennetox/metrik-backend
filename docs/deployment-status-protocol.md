@@ -11,6 +11,8 @@ En **Settings** del servicio `metrik-api`, configura:
 
 Además de `DEPLOYMENT_STATUS_TOKEN`, agrega `PUBLIC_API_BASE_URL` con `https://api.metrikpos.com`. Render ejecutará el pre-deploy después del build y antes de poner la nueva instancia en servicio; el comando de arranque limpiará el estado al iniciar la versión nueva.
 
+El pre-deploy deja una ventana de 12 segundos después de publicar el aviso para que los clientes web y POS alcancen a recibirlo antes del reemplazo. Puedes ajustar esa ventana con `DEPLOYMENT_STATUS_ANNOUNCEMENT_DELAY_SECONDS` si fuera necesario.
+
 La primera vez conviene hacer esta configuración cuando la versión que contiene estos scripts ya esté desplegada. Después, los pushes y los despliegues manuales seguirán el flujo automáticamente.
 
 El flujo automatizado fue validado en producción con un despliegue controlado.
