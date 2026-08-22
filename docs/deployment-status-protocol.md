@@ -21,6 +21,8 @@ La ventana de anuncio previo también se mantiene activa para los despliegues au
 
 Prueba visual del aviso animado preparada para el siguiente despliegue.
 
+Prueba adicional de clasificación estable durante la transición del servicio.
+
 ## Antes del despliegue
 
 Configura `DEPLOYMENT_STATUS_TOKEN` como secreto en Render y localmente en la terminal. No lo guardes en el repositorio.
