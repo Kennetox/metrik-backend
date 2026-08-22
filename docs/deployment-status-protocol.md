@@ -19,6 +19,8 @@ El flujo automatizado fue validado en producción con un despliegue controlado.
 
 La ventana de anuncio previo también se mantiene activa para los despliegues automáticos.
 
+Prueba visual del aviso animado preparada para el siguiente despliegue.
+
 ## Antes del despliegue
 
 Configura `DEPLOYMENT_STATUS_TOKEN` como secreto en Render y localmente en la terminal. No lo guardes en el repositorio.
