@@ -1,6 +1,17 @@
 # Protocolo de despliegue de Metrik
 
-El estado de mantenimiento se guarda en la base de datos para que sobreviva al reinicio del backend. Antes de iniciar un despliegue, el responsable debe publicar el aviso; después de comprobar que la nueva versión responde, debe cerrarlo.
+El estado de mantenimiento se guarda en la base de datos para que sobreviva al reinicio del backend. El flujo recomendado automatiza ambos pasos con los comandos `pre-deploy` y `start` de Render: el primero publica el aviso antes de reemplazar la instancia y el segundo lo cierra cuando la nueva instancia ya inició correctamente.
+
+## Configuración automática en Render
+
+En **Settings** del servicio `metrik-api`, configura:
+
+- **Pre-deploy Command:** `bash scripts/render_predeploy.sh`
+- **Start Command:** `bash scripts/render_start.sh`
+
+Además de `DEPLOYMENT_STATUS_TOKEN`, agrega `PUBLIC_API_BASE_URL` con `https://api.metrikpos.com`. Render ejecutará el pre-deploy después del build y antes de poner la nueva instancia en servicio; el comando de arranque limpiará el estado al iniciar la versión nueva.
+
+La primera vez conviene hacer esta configuración cuando la versión que contiene estos scripts ya esté desplegada. Después, los pushes y los despliegues manuales seguirán el flujo automáticamente.
 
 ## Antes del despliegue
 
