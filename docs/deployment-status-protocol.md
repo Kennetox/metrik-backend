@@ -17,6 +17,8 @@ La primera vez conviene hacer esta configuración cuando la versión que contien
 
 El flujo automatizado fue validado en producción con un despliegue controlado.
 
+La ventana de anuncio previo también se mantiene activa para los despliegues automáticos.
+
 ## Antes del despliegue
 
 Configura `DEPLOYMENT_STATUS_TOKEN` como secreto en Render y localmente en la terminal. No lo guardes en el repositorio.
