@@ -13,6 +13,8 @@ Además de `DEPLOYMENT_STATUS_TOKEN`, agrega `PUBLIC_API_BASE_URL` con `https://
 
 La primera vez conviene hacer esta configuración cuando la versión que contiene estos scripts ya esté desplegada. Después, los pushes y los despliegues manuales seguirán el flujo automáticamente.
 
+El flujo automatizado fue validado en producción con un despliegue controlado.
+
 ## Antes del despliegue
 
 Configura `DEPLOYMENT_STATUS_TOKEN` como secreto en Render y localmente en la terminal. No lo guardes en el repositorio.
