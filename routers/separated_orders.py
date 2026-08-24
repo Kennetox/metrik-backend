@@ -261,7 +261,12 @@ def add_separated_payment(
     if not order:
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     try:
-        updated = crud.add_separated_order_payment(db, order, payment_in)
+        updated = crud.add_separated_order_payment(
+            db,
+            order,
+            payment_in,
+            user_id=current_user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _SEPARATED_ORDERS_CACHE.clear()

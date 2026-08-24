@@ -8431,12 +8431,30 @@ def add_separated_order_payment(
     db: Session,
     order: models.SeparatedOrder,
     payment_in: schemas.SeparatedOrderPaymentCreate,
+    user_id: Optional[int] = None,
 ) -> models.SeparatedOrder:
     _apply_separated_order_view_totals(order)
     if order.status == "cancelado":
         raise ValueError("No se pueden registrar abonos en un separado cancelado")
     if order.balance <= 0.01:
         raise ValueError("El separado ya está pagado")
+    bogota_timezone = ZoneInfo("America/Bogota")
+    now_bogota = datetime.now(timezone.utc).astimezone(bogota_timezone)
+    due_at = order.due_date
+    if due_at is not None:
+        due_utc = (
+            due_at.replace(tzinfo=timezone.utc)
+            if due_at.tzinfo is None
+            else due_at.astimezone(timezone.utc)
+        )
+        due_bogota = due_utc.astimezone(bogota_timezone)
+        days_overdue = (now_bogota.date() - due_bogota.date()).days
+    else:
+        days_overdue = 0
+    if days_overdue > 0 and not payment_in.expired_acknowledged:
+        raise ValueError(
+            "Este separado está vencido. Confirma la advertencia antes de registrar el abono"
+        )
     amount = float(payment_in.amount or 0.0)
     if amount <= 0:
         raise ValueError("El monto del abono debe ser mayor a cero")
@@ -8485,6 +8503,21 @@ def add_separated_order_payment(
     if new_balance <= 0.01:
         order.balance = 0.0
         order.status = "conciliado" if float(order.reconciled_amount or 0.0) > 0.01 else "pagado"
+    if days_overdue > 0:
+        _append_separated_resolution_event(
+            order,
+            action="overdue_payment_acknowledged",
+            user_id=user_id,
+            before_balance=current_balance,
+            after_balance=new_balance,
+            details={
+                "amount": round(amount, 2),
+                "due_date": order.due_date.isoformat() if order.due_date else None,
+                "days_overdue": days_overdue,
+                "method": payment_in.method,
+                "reference": payment_in.reference,
+            },
+        )
 
     db.commit()
     db.refresh(order)

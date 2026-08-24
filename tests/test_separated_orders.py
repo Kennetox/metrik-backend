@@ -51,6 +51,7 @@ def _create_test_separated(
     *,
     paid: float = 10000.0,
     quantity: float = 1,
+    due_days: int = 2,
 ):
     product = _create_product()
     total = 50000.0 * quantity
@@ -77,7 +78,7 @@ def _create_test_separated(
             }
         ],
         "payments": [{"method": "cash", "amount": paid}],
-        "due_date": (datetime.utcnow() + timedelta(days=2)).isoformat(),
+        "due_date": (datetime.utcnow() + timedelta(days=due_days)).isoformat(),
     }
     response = client.post("/separated-orders", json=payload, headers=headers)
     assert response.status_code == 201
@@ -478,3 +479,35 @@ def test_partial_pos_return_recalculates_active_total_and_balance(client: TestCl
     assert closed.json()["status"] == "cancelado"
     assert closed.json()["active_total_amount"] == 0
     assert closed.json()["balance"] == 0
+
+
+def test_overdue_payment_requires_and_records_acknowledgement(client: TestClient):
+    headers = _auth_headers(client)
+    order = _create_test_separated(client, headers, due_days=-2)
+    payment = {
+        "method": "cash",
+        "amount": 5000,
+        "note": "Cliente decidió continuar fuera del plazo",
+    }
+
+    rejected = client.post(
+        f"/separated-orders/{order['id']}/payments",
+        json=payment,
+        headers=headers,
+    )
+    assert rejected.status_code == 400
+    assert "vencido" in rejected.json()["detail"].lower()
+
+    accepted = client.post(
+        f"/separated-orders/{order['id']}/payments",
+        json={**payment, "expired_acknowledged": True},
+        headers=headers,
+    )
+    assert accepted.status_code == 200, accepted.text
+    data = accepted.json()
+    assert data["balance"] == 35000
+    event = data["resolution_history"][-1]
+    assert event["action"] == "overdue_payment_acknowledged"
+    assert event["amount"] == 5000
+    assert event["days_overdue"] >= 1
+    assert event["created_by_user_id"] is not None

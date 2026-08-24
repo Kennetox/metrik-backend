@@ -3843,6 +3843,7 @@ class SeparatedOrderPaymentBase(BaseModel):
     reference: Optional[str] = None
     note: Optional[str] = None
     station_id: Optional[str] = None
+    expired_acknowledged: bool = False
 
 
 class SeparatedOrderPaymentCreate(SeparatedOrderPaymentBase):
