@@ -126,6 +126,29 @@ def mark_all_as_read(
     db.commit()
 
 
+@router.post("/dismiss-all", status_code=status.HTTP_204_NO_CONTENT)
+def dismiss_all_notifications(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(get_current_active_user),
+):
+    tenant_id = _tenant_id(db, current_user)
+    now = datetime.utcnow()
+    inbox_query = db.query(models.UserNotification).filter(
+        models.UserNotification.tenant_id == tenant_id,
+        models.UserNotification.user_id == current_user.id,
+        models.UserNotification.dismissed_at.is_(None),
+    )
+    inbox_query.filter(models.UserNotification.read_at.is_(None)).update(
+        {models.UserNotification.read_at: now},
+        synchronize_session=False,
+    )
+    inbox_query.update(
+        {models.UserNotification.dismissed_at: now},
+        synchronize_session=False,
+    )
+    db.commit()
+
+
 @router.patch("/{notification_id}/read", response_model=schemas.UserNotificationRead)
 def mark_as_read(
     notification_id: int,

@@ -94,6 +94,32 @@ def test_personal_notification_lifecycle_and_deduplication(client: TestClient):
     assert all(item["id"] != notification_id for item in refreshed.json()["items"])
 
 
+def test_dismiss_all_notifications_empties_personal_inbox(client: TestClient):
+    headers = _auth_headers(client)
+    with TestingSessionLocal() as db:
+        user = crud.get_pos_user_by_email(db, "master@kensar.com")
+        assert user is not None and user.tenant_id is not None
+        for index in range(2):
+            create_user_notification(
+                db,
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                title=f"Aviso para limpiar {index}",
+                message="Este aviso debe desaparecer al limpiar la bandeja.",
+                dedupe_key=f"test:dismiss-all:{index}",
+            )
+
+    dismissed = client.post("/notifications/dismiss-all", headers=headers)
+    assert dismissed.status_code == 204
+
+    refreshed = client.get("/notifications", headers=headers)
+    assert refreshed.status_code == 200
+    assert refreshed.json() == {"items": [], "unread_count": 0}
+
+    repeated = client.post("/notifications/dismiss-all", headers=headers)
+    assert repeated.status_code == 204
+
+
 def test_notification_action_rejects_external_urls(client: TestClient):
     _auth_headers(client)
     with TestingSessionLocal() as db:
