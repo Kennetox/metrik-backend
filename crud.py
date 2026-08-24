@@ -6490,6 +6490,35 @@ def resolve_web_product_stock_status(
     return "in_stock"
 
 
+def resolve_web_product_available_quantity(
+    product: models.Product,
+    qty_on_hand: Optional[float],
+) -> Optional[int]:
+    """Return whole units that can be sold online; services do not use inventory."""
+    if product.service:
+        return None
+    return max(0, int(math.floor(float(qty_on_hand or 0.0) + 1e-9)))
+
+
+def validate_web_product_quantity(
+    product: models.Product,
+    requested_quantity: float,
+    qty_on_hand: Optional[float],
+) -> None:
+    if product.service:
+        return
+    requested = float(requested_quantity or 0.0)
+    available = resolve_web_product_available_quantity(product, qty_on_hand) or 0
+    if requested <= available + 1e-9:
+        return
+    availability_text = (
+        "queda 1 unidad disponible"
+        if available == 1
+        else f"quedan {available} unidades disponibles"
+    )
+    raise ValueError(f"Solo {availability_text} de {resolve_product_web_name(product)}.")
+
+
 def _build_web_catalog_filters(
     db: Session,
     tenant_id: Optional[int],
@@ -7483,10 +7512,8 @@ def get_web_catalog_product_by_slug(
     normalized_slug = build_product_web_slug(slug)
     cache_key = f"tenant={effective_tenant_id if effective_tenant_id is not None else 'none'}|slug={normalized_slug}"
     cached_result = _get_public_web_product_detail_cache(cache_key)
-    if cached_result is not None:
-        if cached_result is False:
-            return None
-        return cached_result
+    if cached_result is False:
+        return None
     cached_slugs = _get_public_web_product_slugs_cache(effective_tenant_id)
     if cached_slugs is not None and normalized_slug not in cached_slugs:
         _set_public_web_product_detail_cache(cache_key, False)
@@ -7577,7 +7604,7 @@ def get_web_catalog_product_by_slug(
                 return None
             price_mode = (product.web_price_mode or "visible").strip().lower()
             sale_price = resolve_web_product_sale_price(product)
-            return schemas.WebCatalogProductDetail(
+            result = schemas.WebCatalogProductDetail(
                 id=product.id,
                 sku=product.sku,
                 slug=resolved_slug,
@@ -7598,11 +7625,11 @@ def get_web_catalog_product_by_slug(
                 price=(sale_price if price_mode == "visible" else None),
                 compare_price=(resolve_web_compare_price(product, sale_price=sale_price) if price_mode == "visible" else None),
                 stock_status=stock_status,
+                available_quantity=resolve_web_product_available_quantity(product, qty_on_hand),
                 warranty_text=product.web_warranty_text,
                 specs={},
                 whatsapp_message=product.web_whatsapp_message,
             )
-            _set_public_web_product_detail_cache(cache_key, result)
             return result
         _set_public_web_product_detail_cache(cache_key, False)
         return None
@@ -13035,6 +13062,10 @@ def _serialize_web_cart(
                 image_url=product.image_url,
                 brand=product.brand,
                 stock_status=resolve_web_product_stock_status(product, qty_by_product.get(product.id, 0.0)),
+                available_quantity=resolve_web_product_available_quantity(
+                    product,
+                    qty_by_product.get(product.id, 0.0),
+                ),
                 quantity=quantity,
                 unit_price=unit_price,
                 compare_price=resolve_web_compare_price(product, sale_price=unit_price),
@@ -13091,13 +13122,18 @@ def add_item_to_web_cart(
         raise ValueError("Producto no disponible para web")
 
     existing = _get_cart_item(db, cart.id, product.id)
+    qty_on_hand = _get_web_cart_stock_snapshot(db, account.tenant_id, [product.id]).get(product.id, 0.0)
+    previous_quantity = float(existing.quantity or 0.0) if existing else 0.0
+    allowed_quantity = max(
+        0.0,
+        min(float(payload.quantity), float(_web_cart_max_units_per_item()) - previous_quantity),
+    )
+    requested_total_quantity = previous_quantity + allowed_quantity
+    validate_web_product_quantity(product, requested_total_quantity, qty_on_hand)
     requested_unit_price = float(getattr(payload, "unit_price_snapshot", None) or 0.0)
     web_unit_price = requested_unit_price if requested_unit_price > 0 else resolve_web_product_sale_price(product)
     if existing:
-        previous_quantity = float(existing.quantity or 0.0)
         previous_unit_price = float(existing.unit_price_snapshot or 0.0)
-        max_units = float(_web_cart_max_units_per_item())
-        allowed_quantity = max(0.0, min(float(payload.quantity), max_units - previous_quantity))
         if allowed_quantity <= 0:
             db.commit()
             db.refresh(cart)
@@ -13147,6 +13183,8 @@ def update_web_cart_item_quantity(
     elif quantity <= 0:
         db.delete(item)
     else:
+        qty_on_hand = _get_web_cart_stock_snapshot(db, account.tenant_id, [product_id]).get(product_id, 0.0)
+        validate_web_product_quantity(item.product, quantity, qty_on_hand)
         item.quantity = float(quantity)
 
     cart.updated_at = datetime.utcnow()
@@ -13982,6 +14020,44 @@ def update_backoffice_web_order_status(
     return _serialize_web_order(stored)
 
 
+def validate_web_order_stock(
+    db: Session,
+    order: models.WebOrder,
+    *,
+    acquire_locks: bool = False,
+) -> None:
+    if not order.items:
+        raise ValueError("La orden no tiene items para validar")
+    product_ids = sorted({int(item.product_id) for item in order.items})
+    if acquire_locks and db.get_bind().dialect.name == "postgresql":
+        tenant_lock_id = int(order.tenant_id or 0)
+        for product_id in product_ids:
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:tenant_id, :product_id)"),
+                {"tenant_id": tenant_lock_id, "product_id": product_id},
+            )
+    products = (
+        db.query(models.Product)
+        .filter(models.Product.id.in_(product_ids))
+        .filter(models.Product.tenant_id == order.tenant_id if order.tenant_id is not None else true())
+        .all()
+    )
+    products_by_id = {int(product.id): product for product in products}
+    qty_by_product = _get_web_cart_stock_snapshot(db, order.tenant_id, product_ids)
+    requested_qty_by_product: dict[int, float] = defaultdict(float)
+    for item in order.items:
+        requested_qty_by_product[int(item.product_id)] += float(item.quantity or 0.0)
+    for product_id, requested_quantity in requested_qty_by_product.items():
+        product = products_by_id.get(product_id)
+        if not product:
+            raise ValueError("La orden contiene un producto que ya no existe")
+        validate_web_product_quantity(
+            product,
+            requested_quantity,
+            qty_by_product.get(product_id, 0.0),
+        )
+
+
 def convert_web_order_to_sale(
     db: Session,
     order: models.WebOrder,
@@ -14002,6 +14078,8 @@ def convert_web_order_to_sale(
     approved_payments = [payment for payment in (order.payments or []) if payment.status == "approved"]
     if not approved_payments:
         raise ValueError("No hay pagos aprobados para convertir la orden en venta")
+
+    validate_web_order_stock(db, order, acquire_locks=True)
 
     paid_amount = round(sum(float(payment.amount or 0.0) for payment in approved_payments), 2)
     total_amount = round(float(order.total or 0.0), 2)
@@ -14106,6 +14184,8 @@ def create_web_order_from_cart(
     if not cart or not cart.items:
         raise ValueError("El carrito está vacío")
 
+    product_ids = [int(cart_item.product_id) for cart_item in cart.items]
+    qty_by_product = _get_web_cart_stock_snapshot(db, account.tenant_id, product_ids)
     line_items_payload: list[dict[str, Any]] = []
     subtotal_base = 0.0
     for cart_item in cart.items:
@@ -14116,6 +14196,7 @@ def create_web_order_from_cart(
         quantity = float(cart_item.quantity or 0.0)
         if quantity <= 0:
             continue
+        validate_web_product_quantity(product, quantity, qty_by_product.get(product.id, 0.0))
         line_total = unit_price * quantity
         subtotal_base += line_total
         line_items_payload.append(

@@ -195,6 +195,10 @@ def create_wompi_checkout(
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
+    try:
+        crud.validate_web_order_stock(db, order)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if isinstance(payload.checkout_context, dict):
         order = mp_router._persist_checkout_context_on_order(

@@ -248,6 +248,14 @@ def preview_web_coupon(
                 detail=f"Producto {product.name} no disponible por stock.",
             )
         quantity = float(item_input.quantity or 0.0)
+        try:
+            crud.validate_web_product_quantity(
+                product,
+                quantity,
+                qty_by_product.get(product.id, 0.0),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         unit_price = float(crud.resolve_web_product_sale_price(product) or 0.0)
         subtotal_base += unit_price * quantity
 

@@ -1576,6 +1576,7 @@ def _create_guest_order(
     qty_by_product = crud._get_web_cart_stock_snapshot(db, tenant_id, product_ids)
 
     subtotal_base = 0.0
+    requested_qty_by_product: dict[int, float] = {}
     line_items_payload: list[dict[str, Any]] = []
     for item_input in item_inputs:
         product = crud.get_product(db, int(item_input.product_id), tenant_id=tenant_id)
@@ -1607,6 +1608,15 @@ def _create_guest_order(
         quantity = float(item_input.quantity or 0.0)
         if quantity <= 0:
             continue
+        requested_qty_by_product[product.id] = requested_qty_by_product.get(product.id, 0.0) + quantity
+        try:
+            crud.validate_web_product_quantity(
+                product,
+                requested_qty_by_product[product.id],
+                qty_by_product.get(product.id, 0.0),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         unit_price = float(crud.resolve_web_product_sale_price(product) or 0.0)
         line_total = unit_price * quantity
         subtotal_base += line_total
@@ -2031,6 +2041,10 @@ def create_mercadopago_checkout(
     order = crud.get_web_order(db, payload.order_id, account.id, tenant_id=account.tenant_id)
     if not order:
         raise HTTPException(status_code=404, detail="Orden web no encontrada")
+    try:
+        crud.validate_web_order_stock(db, order)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(payload.checkout_context, dict):
         order = _persist_checkout_context_on_order(
             db,

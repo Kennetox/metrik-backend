@@ -863,6 +863,7 @@ class WebCatalogProductDetail(BaseModel):
     price: Optional[float] = None
     compare_price: Optional[float] = None
     stock_status: WebCatalogStockStatus
+    available_quantity: Optional[int] = None
     warranty_text: Optional[str] = None
     specs: Dict[str, str]
     whatsapp_message: Optional[str] = None
@@ -2442,6 +2443,7 @@ class WebCartItemRead(BaseModel):
     image_url: Optional[str] = None
     brand: Optional[str] = None
     stock_status: WebCatalogStockStatus
+    available_quantity: Optional[int] = None
     quantity: float
     unit_price: float
     compare_price: Optional[float] = None
