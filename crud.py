@@ -507,7 +507,23 @@ def _apply_separated_order_view_totals(order: models.SeparatedOrder) -> models.S
     )
     order.total_amount = effective_total
     order.initial_payment = initial_payment
-    order.balance = max(0.0, effective_total - initial_payment - later_payments)
+    active_total = float(order.active_total_amount or 0.0)
+    net_recorded_payments = max(
+        0.0,
+        initial_payment
+        + later_payments
+        - float(getattr(order, "refunded_total", 0.0) or 0.0),
+    )
+    calculated_balance = max(
+        0.0,
+        active_total
+        - net_recorded_payments
+        - float(getattr(order, "reconciled_amount", 0.0) or 0.0),
+    )
+    if order.status in {"cancelado", "incobrable", "anulado"}:
+        order.balance = 0.0
+    else:
+        order.balance = calculated_balance
     return order
 
 
@@ -8278,6 +8294,9 @@ def get_separated_order(
     query = db.query(models.SeparatedOrder).options(
         selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.items),
         selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.payments),
+        selectinload(models.SeparatedOrder.sale)
+        .selectinload(models.Sale.returns)
+        .selectinload(models.SaleReturn.items),
         selectinload(models.SeparatedOrder.payments),
     ).filter(models.SeparatedOrder.id == order_id)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
@@ -8306,6 +8325,9 @@ def list_separated_orders(
     query = db.query(models.SeparatedOrder).options(
         selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.items),
         selectinload(models.SeparatedOrder.sale).selectinload(models.Sale.payments),
+        selectinload(models.SeparatedOrder.sale)
+        .selectinload(models.Sale.returns)
+        .selectinload(models.SaleReturn.items),
         selectinload(models.SeparatedOrder.payments)
     )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
@@ -8435,7 +8457,7 @@ def add_separated_order_payment(
     order.balance = new_balance
     if new_balance <= 0.01:
         order.balance = 0.0
-        order.status = "pagado"
+        order.status = "conciliado" if float(order.reconciled_amount or 0.0) > 0.01 else "pagado"
 
     db.commit()
     db.refresh(order)
@@ -8452,7 +8474,7 @@ def complete_separated_order(
         raise ValueError("El separado está cancelado")
     if float(order.balance or 0.0) > 0.01:
         raise ValueError("Aún hay saldo pendiente por pagar")
-    order.status = "pagado"
+    order.status = "conciliado" if float(order.reconciled_amount or 0.0) > 0.01 else "pagado"
     order.completed_at = datetime.utcnow()
     if notes:
         order.notes = notes
@@ -8477,6 +8499,377 @@ def cancel_separated_order(
     return order
 
 
+def _append_separated_resolution_event(
+    order: models.SeparatedOrder,
+    *,
+    action: str,
+    user_id: Optional[int],
+    before_balance: float,
+    after_balance: float,
+    details: dict[str, Any],
+) -> None:
+    history = list(order.resolution_history or [])
+    history.append(
+        {
+            "action": action,
+            "created_at": datetime.utcnow().isoformat(),
+            "created_by_user_id": int(user_id) if user_id is not None else None,
+            "balance_before": round(float(before_balance), 2),
+            "balance_after": round(float(after_balance), 2),
+            **details,
+        }
+    )
+    order.resolution_history = history
+
+
+def _remaining_separated_items(order: models.SeparatedOrder) -> list[tuple[models.SaleItem, float]]:
+    sale = order.sale
+    returned_by_item: dict[int, float] = defaultdict(float)
+    for sale_return in sale.returns or []:
+        if (sale_return.status or "").strip().lower() != "confirmed" or sale_return.voided_at:
+            continue
+        for returned in sale_return.items or []:
+            returned_by_item[int(returned.sale_item_id)] += float(returned.quantity or 0.0)
+    remaining: list[tuple[models.SaleItem, float]] = []
+    for item in sale.items or []:
+        available = max(0.0, float(item.quantity or 0.0) - returned_by_item[int(item.id)])
+        if available > 0.0001:
+            remaining.append((item, available))
+    return remaining
+
+
+def _release_separated_inventory(
+    db: Session,
+    order: models.SeparatedOrder,
+    user: models.PosUser,
+    reason: str,
+) -> None:
+    if order.inventory_released_at is not None:
+        return
+    remaining = _remaining_separated_items(order)
+    product_ids = [int(item.product_id) for item, _ in remaining if item.product_id is not None]
+    service_flags: dict[int, bool] = {}
+    if product_ids:
+        service_flags = {
+            int(row.id): bool(row.service)
+            for row in db.query(models.Product.id, models.Product.service)
+            .filter(models.Product.id.in_(product_ids))
+            .all()
+        }
+    sale_return = models.SaleReturn(
+        tenant_id=order.tenant_id,
+        sale_id=order.sale_id,
+        status="confirmed",
+        notes=f"Liberación de inventario sin devolución de dinero: {reason}",
+        created_by=getattr(user, "name", None),
+        total_refund=0.0,
+    )
+    db.add(sale_return)
+    db.flush()
+    sale_return.document_number = f"DV-{sale_return.id:06d}"
+    for item, quantity in remaining:
+        if item.product_id is None:
+            continue
+        db.add(
+            models.SaleReturnItem(
+                tenant_id=order.tenant_id,
+                return_id=sale_return.id,
+                sale_item_id=item.id,
+                product_id=item.product_id,
+                product_name=item.product_name,
+                product_sku=item.product_sku,
+                product_barcode=item.product_barcode,
+                reason=reason,
+                quantity=quantity,
+                unit_price_original=float(item.unit_price_original or item.unit_price or 0.0),
+                unit_price_net=0.0,
+                line_discount_value=0.0,
+                cart_discount_share=0.0,
+                total_refund=0.0,
+            )
+        )
+        if service_flags.get(int(item.product_id), False):
+            continue
+        db.add(
+            models.InventoryMovement(
+                tenant_id=order.tenant_id,
+                product_id=int(item.product_id),
+                qty_delta=abs(float(quantity)),
+                reason="adjustment",
+                notes=f"Liberación por resolución de separado {order.sale_document_number}: {reason}",
+                reference_type="sale_return",
+                reference_id=sale_return.id,
+                created_by_user_id=user.id,
+            )
+        )
+    order.inventory_released_at = datetime.utcnow()
+
+
+def _create_separated_refund(
+    db: Session,
+    order: models.SeparatedOrder,
+    user: models.PosUser,
+    *,
+    amount: float,
+    method: str,
+    reason: str,
+    release_inventory: bool,
+) -> models.SaleReturn:
+    if amount <= 0:
+        raise ValueError("El valor a devolver debe ser mayor a cero")
+    remaining = _remaining_separated_items(order) if release_inventory else []
+    if release_inventory and remaining:
+        return_in = schemas.SaleReturnCreate(
+            sale_id=order.sale_id,
+            notes=f"Cancelación de separado: {reason}",
+            created_by=getattr(user, "name", None),
+            items=[
+                schemas.ReturnItemCreate(
+                    sale_item_id=item.id,
+                    quantity=quantity,
+                    reason=reason,
+                )
+                for item, quantity in remaining
+            ],
+            payments=[schemas.ReturnPaymentCreate(method=method, amount=amount)],
+            refund_amount=amount,
+        )
+        sale_return = create_return(
+            db,
+            return_in,
+            tenant_id=order.tenant_id,
+            created_by_user_id=user.id,
+            commit=False,
+            sync_separated=False,
+        )
+        order.inventory_released_at = datetime.utcnow()
+        return sale_return
+
+    sale_return = models.SaleReturn(
+        tenant_id=order.tenant_id,
+        sale_id=order.sale_id,
+        status="confirmed",
+        notes=f"Reembolso administrativo de separado: {reason}",
+        created_by=getattr(user, "name", None),
+        total_refund=amount,
+    )
+    db.add(sale_return)
+    db.flush()
+    sale_return.document_number = f"DV-{sale_return.id:06d}"
+    db.add(
+        models.SaleReturnPayment(
+            tenant_id=order.tenant_id,
+            return_id=sale_return.id,
+            method=method,
+            amount=amount,
+        )
+    )
+    order.sale.refunded_total = float(order.sale.refunded_total or 0.0) + amount
+    order.sale.refund_count = int(order.sale.refund_count or 0) + 1
+    return sale_return
+
+
+def resolve_separated_order(
+    db: Session,
+    order: models.SeparatedOrder,
+    payload: schemas.SeparatedOrderResolveRequest,
+    user: models.PosUser,
+) -> models.SeparatedOrder:
+    _apply_separated_order_view_totals(order)
+    action = payload.action
+    before_balance = float(order.balance or 0.0)
+    now = datetime.utcnow()
+    terminal_statuses = {"pagado", "conciliado", "cancelado", "incobrable", "anulado"}
+
+    if action == "reconcile":
+        if order.status in terminal_statuses:
+            raise ValueError("Este separado ya está cerrado")
+        amount = float(payload.amount or 0.0)
+        if amount <= 0:
+            raise ValueError("Indica el valor conciliado")
+        if amount - before_balance > 0.01:
+            raise ValueError("El valor conciliado supera el saldo pendiente")
+        if not (payload.reference or "").strip():
+            raise ValueError("La conciliación requiere el documento de referencia")
+        order.reconciled_amount = float(order.reconciled_amount or 0.0) + amount
+        order.resolution_type = "external_reconciliation"
+        order.resolution_reference = payload.reference.strip()
+        order.resolution_reason = (payload.reason or "Pago registrado en otro documento").strip()
+        order.resolution_notes = (payload.notes or "").strip() or None
+        _apply_separated_order_view_totals(order)
+        if float(order.balance or 0.0) <= 0.01:
+            order.balance = 0.0
+            order.status = "conciliado"
+            order.completed_at = now
+            order.resolved_at = now
+            order.resolved_by_user_id = user.id
+        _append_separated_resolution_event(
+            order,
+            action="reconcile",
+            user_id=user.id,
+            before_balance=before_balance,
+            after_balance=float(order.balance or 0.0),
+            details={
+                "amount": round(amount, 2),
+                "reference": order.resolution_reference,
+                "reason": order.resolution_reason,
+                "notes": order.resolution_notes,
+            },
+        )
+
+    elif action == "reschedule":
+        if order.status in terminal_statuses:
+            raise ValueError("Este separado ya está cerrado")
+        if payload.due_date is None:
+            raise ValueError("Indica la nueva fecha límite")
+        new_due_date = payload.due_date
+        if new_due_date.tzinfo is not None:
+            new_due_date = new_due_date.astimezone(timezone.utc).replace(tzinfo=None)
+        if new_due_date <= now:
+            raise ValueError("La nueva fecha límite debe ser futura")
+        previous_due_date = order.due_date
+        order.due_date = new_due_date
+        order.resolution_type = "rescheduled"
+        order.resolution_reason = (payload.reason or "Vencimiento reprogramado").strip()
+        order.resolution_notes = (payload.notes or "").strip() or None
+        _append_separated_resolution_event(
+            order,
+            action="reschedule",
+            user_id=user.id,
+            before_balance=before_balance,
+            after_balance=before_balance,
+            details={
+                "previous_due_date": previous_due_date.isoformat() if previous_due_date else None,
+                "new_due_date": new_due_date.isoformat(),
+                "reason": order.resolution_reason,
+                "notes": order.resolution_notes,
+            },
+        )
+
+    elif action == "cancel":
+        if order.status in terminal_statuses:
+            raise ValueError("Este separado ya está cerrado")
+        reason = (payload.reason or "").strip()
+        if not reason:
+            raise ValueError("La cancelación requiere un motivo")
+        available_paid = float(order.net_paid_total or 0.0)
+        refund_amount = float(payload.refund_amount or 0.0)
+        if refund_amount - available_paid > 0.01:
+            raise ValueError("La devolución supera el dinero abonado disponible")
+        if refund_amount > 0 and not (payload.refund_method or "").strip():
+            raise ValueError("Selecciona el método de devolución")
+        remaining_paid = max(0.0, available_paid - refund_amount)
+        if refund_amount > 0:
+            _create_separated_refund(
+                db,
+                order,
+                user,
+                amount=refund_amount,
+                method=payload.refund_method.strip(),
+                reason=reason,
+                release_inventory=True,
+            )
+        else:
+            _release_separated_inventory(db, order, user, reason)
+
+        retained = credit = pending_refund = 0.0
+        if payload.remainder_disposition == "retained":
+            retained = remaining_paid
+        elif payload.remainder_disposition == "credit":
+            credit = remaining_paid
+        else:
+            pending_refund = remaining_paid
+
+        status_by_outcome = {
+            "cancelled": "cancelado",
+            "uncollectible": "incobrable",
+            "voided_error": "anulado",
+        }
+        order.status = status_by_outcome[payload.cancellation_outcome]
+        order.balance_before_resolution = before_balance
+        order.waived_amount = float(order.waived_amount or 0.0) + before_balance
+        order.retained_amount = float(order.retained_amount or 0.0) + retained
+        order.credit_amount = float(order.credit_amount or 0.0) + credit
+        order.pending_refund_amount = float(order.pending_refund_amount or 0.0) + pending_refund
+        order.balance = 0.0
+        order.cancelled_at = now
+        order.resolved_at = now
+        order.resolved_by_user_id = user.id
+        order.resolution_type = (
+            "cancel_refunded"
+            if refund_amount > 0 and remaining_paid <= 0.01
+            else "cancel_partial_refund"
+            if refund_amount > 0
+            else "cancel_no_refund"
+        )
+        order.resolution_reason = reason
+        order.resolution_reference = (payload.reference or "").strip() or None
+        order.resolution_notes = (payload.notes or "").strip() or None
+        _append_separated_resolution_event(
+            order,
+            action="cancel",
+            user_id=user.id,
+            before_balance=before_balance,
+            after_balance=0.0,
+            details={
+                "outcome": payload.cancellation_outcome,
+                "refund_amount": round(refund_amount, 2),
+                "refund_method": payload.refund_method,
+                "retained_amount": round(retained, 2),
+                "credit_amount": round(credit, 2),
+                "pending_refund_amount": round(pending_refund, 2),
+                "waived_amount": round(before_balance, 2),
+                "reason": reason,
+                "reference": order.resolution_reference,
+                "notes": order.resolution_notes,
+            },
+        )
+
+    elif action == "refund_pending":
+        pending = float(order.pending_refund_amount or 0.0)
+        amount = float(payload.amount or 0.0)
+        if pending <= 0.01:
+            raise ValueError("Este separado no tiene devoluciones pendientes")
+        if amount <= 0 or amount - pending > 0.01:
+            raise ValueError("El valor supera la devolución pendiente")
+        if not (payload.refund_method or "").strip():
+            raise ValueError("Selecciona el método de devolución")
+        reason = (payload.reason or "Pago de devolución pendiente").strip()
+        sale_return = _create_separated_refund(
+            db,
+            order,
+            user,
+            amount=amount,
+            method=payload.refund_method.strip(),
+            reason=reason,
+            release_inventory=False,
+        )
+        order.pending_refund_amount = max(0.0, pending - amount)
+        order.resolution_reference = sale_return.document_number
+        order.resolution_notes = (payload.notes or "").strip() or order.resolution_notes
+        _append_separated_resolution_event(
+            order,
+            action="refund_pending",
+            user_id=user.id,
+            before_balance=before_balance,
+            after_balance=before_balance,
+            details={
+                "amount": round(amount, 2),
+                "method": payload.refund_method,
+                "return_document": sale_return.document_number,
+                "reason": reason,
+                "notes": (payload.notes or "").strip() or None,
+            },
+        )
+    else:
+        raise ValueError("Acción de resolución no soportada")
+
+    db.commit()
+    db.refresh(order)
+    _apply_separated_order_view_totals(order)
+    return order
+
+
 def get_sales(
     db: Session,
     skip: int = 0,
@@ -8488,7 +8881,8 @@ def get_sales(
     query = db.query(models.Sale).options(
         selectinload(models.Sale.items),
         selectinload(models.Sale.payments),
-        selectinload(models.Sale.separated_order),
+        selectinload(models.Sale.separated_order).selectinload(models.SeparatedOrder.payments),
+        selectinload(models.Sale.returns).selectinload(models.SaleReturn.items),
     )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
@@ -8520,7 +8914,8 @@ def get_sales_history_page(
     query = db.query(models.Sale).options(
         selectinload(models.Sale.items),
         selectinload(models.Sale.payments),
-        selectinload(models.Sale.separated_order),
+        selectinload(models.Sale.separated_order).selectinload(models.SeparatedOrder.payments),
+        selectinload(models.Sale.returns).selectinload(models.SaleReturn.items),
     )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
@@ -8937,6 +9332,9 @@ def create_return(
     return_in: schemas.SaleReturnCreate,
     tenant_id: Optional[int] = None,
     created_by_user_id: Optional[int] = None,
+    *,
+    commit: bool = True,
+    sync_separated: bool = True,
 ) -> models.SaleReturn:
     if not return_in.items or len(return_in.items) == 0:
         raise ValueError("La devolución debe incluir al menos un ítem")
@@ -8956,6 +9354,12 @@ def create_return(
         raise ValueError(
             "No encontramos la venta asociada (usa sale_id o sale_document_number)"
         )
+
+    separated = sale.separated_order if sale.is_separated else None
+    separated_balance_before_return: Optional[float] = None
+    if sync_separated and separated:
+        _apply_separated_order_view_totals(separated)
+        separated_balance_before_return = float(separated.balance or 0.0)
 
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
@@ -9056,21 +9460,23 @@ def create_return(
         raise ValueError("El total calculado de la devolución debe ser mayor a cero")
 
     paid_total = float(sale.total or 0.0)
-    if sale.is_separated and sale.separated_order:
-        separated = sale.separated_order
-        paid_total = float(separated.initial_payment or 0.0) + sum(
-            float(payment.amount or 0.0) for payment in separated.payments
-        )
+    if separated:
+        paid_total = float(separated.recorded_paid_total or 0.0)
     refunded_so_far = float(sale.refunded_total or 0.0)
     available_refund = max(0.0, paid_total - refunded_so_far)
 
     if sale.is_separated:
-        if available_refund <= 0.0:
-            raise ValueError(
-                "No hay abonos disponibles para reembolsar en esta venta separada"
-            )
-        if total_refund - available_refund > 0.01:
-            ratio = available_refund / total_refund if total_refund else 0.0
+        requested_refund = (
+            float(return_in.refund_amount)
+            if return_in.refund_amount is not None
+            else min(total_refund, available_refund)
+        )
+        if requested_refund - available_refund > 0.01:
+            raise ValueError("El reembolso supera los abonos disponibles")
+        if requested_refund - total_refund > 0.01:
+            raise ValueError("El reembolso supera el valor de los productos seleccionados")
+        if abs(total_refund - requested_refund) > 0.01:
+            ratio = requested_refund / total_refund if total_refund else 0.0
             for item_data in items_data:
                 item_data["unit_price_net"] = float(item_data["unit_price_net"]) * ratio
                 item_data["line_discount_value"] = (
@@ -9080,7 +9486,7 @@ def create_return(
                     float(item_data["cart_discount_share"]) * ratio
                 )
                 item_data["total_refund"] = float(item_data["total_refund"]) * ratio
-            total_refund = available_refund
+            total_refund = requested_refund
             pending_cancelled = max(0.0, original_total_refund - total_refund)
             note_prefix = (
                 f"Reembolso limitado a abonos (${total_refund:,.0f}). "
@@ -9204,8 +9610,99 @@ def create_return(
         sale.refunded_total = float(sale.refunded_total or 0.0) + total_refund
         sale.refund_count = int(sale.refund_count or 0) + 1
 
-    db.commit()
-    db.refresh(sale_return)
+    if status == "confirmed" and sync_separated and separated:
+        before_balance = float(separated_balance_before_return or 0.0)
+        original_line_total = sum(max(0.0, float(item.total or 0.0)) for item in sale.items or [])
+        remaining_line_total = 0.0
+        for item in sale.items or []:
+            quantity = max(0.0, float(item.quantity or 0.0))
+            if quantity <= 0:
+                continue
+            remaining_quantity = max(0.0, quantity - refunded_qty[int(item.id)])
+            remaining_line_total += max(0.0, float(item.total or 0.0)) * min(
+                1.0,
+                remaining_quantity / quantity,
+            )
+        original_contract_total = float(separated.total_amount or sale.total or 0.0)
+        active_contract_total = (
+            float(round(original_contract_total * remaining_line_total / original_line_total))
+            if original_line_total > 0.01
+            else 0.0
+        )
+        net_paid_after_refund = max(
+            0.0,
+            float(separated.recorded_paid_total or 0.0)
+            - float(sale.refunded_total or 0.0),
+        )
+        new_balance = max(
+            0.0,
+            active_contract_total
+            - net_paid_after_refund
+            - float(separated.reconciled_amount or 0.0),
+        )
+        full_product_return = remaining_line_total <= 0.01
+        if full_product_return:
+            separated.status = "cancelado"
+            separated.balance_before_resolution = before_balance
+            separated.balance = 0.0
+            separated.waived_amount = float(separated.waived_amount or 0.0) + before_balance
+            separated.pending_refund_amount = (
+                float(separated.pending_refund_amount or 0.0) + net_paid_after_refund
+            )
+            separated.cancelled_at = datetime.utcnow()
+            separated.resolved_at = separated.cancelled_at
+            separated.resolved_by_user_id = created_by_user_id
+            separated.inventory_released_at = separated.cancelled_at
+            separated.resolution_type = (
+                "cancel_refunded" if net_paid_after_refund <= 0.01 else "cancel_partial_refund"
+            )
+            separated.resolution_reason = (
+                return_in.notes or "Devolución total registrada desde el POS"
+            )
+            separated.resolution_reference = sale_return.document_number
+            _append_separated_resolution_event(
+                separated,
+                action="pos_return",
+                user_id=created_by_user_id,
+                before_balance=before_balance,
+                after_balance=0.0,
+                details={
+                    "return_document": sale_return.document_number,
+                    "refund_amount": round(total_refund, 2),
+                    "pending_refund_amount": round(net_paid_after_refund, 2),
+                    "full_product_return": True,
+                },
+            )
+        else:
+            separated.balance = new_balance
+            if new_balance <= 0.01:
+                separated.status = (
+                    "conciliado"
+                    if float(separated.reconciled_amount or 0.0) > 0.01
+                    else "pagado"
+                )
+                separated.completed_at = datetime.utcnow()
+            else:
+                separated.status = "reservado"
+            _append_separated_resolution_event(
+                separated,
+                action="pos_partial_return",
+                user_id=created_by_user_id,
+                before_balance=before_balance,
+                after_balance=new_balance,
+                details={
+                    "return_document": sale_return.document_number,
+                    "refund_amount": round(total_refund, 2),
+                    "active_total_amount": round(active_contract_total, 2),
+                    "full_product_return": False,
+                },
+            )
+
+    if commit:
+        db.commit()
+        db.refresh(sale_return)
+    else:
+        db.flush()
     return sale_return
 
 
@@ -14147,7 +14644,10 @@ def _build_pos_closure_snapshot(
         .filter(
             models.Sale.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
-            models.SeparatedOrder.status != "cancelado",
+            or_(
+                models.SeparatedOrder.status != "cancelado",
+                models.SeparatedOrder.resolution_type.isnot(None),
+            ),
             models.SeparatedOrderPayment.paid_at >= day_start,
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
@@ -14408,7 +14908,10 @@ def _build_pos_closure_snapshot(
             models.Sale.tenant_id == effective_tenant_id,
             models.SeparatedOrderPayment.closure_id.is_(None),
             models.SeparatedOrderPayment.paid_at <= range_end,
-            models.SeparatedOrder.status != "cancelado",
+            or_(
+                models.SeparatedOrder.status != "cancelado",
+                models.SeparatedOrder.resolution_type.isnot(None),
+            ),
             or_(
                 models.SeparatedOrderPayment.status.is_(None),
                 models.SeparatedOrderPayment.status != "voided",

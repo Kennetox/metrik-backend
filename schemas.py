@@ -2795,6 +2795,7 @@ class SaleReturnCreate(BaseModel):
     created_by: Optional[str] = None
     items: List[ReturnItemCreate]
     payments: Optional[List[ReturnPaymentCreate]] = None
+    refund_amount: Optional[float] = Field(default=None, gt=0)
 
 
 class SaleReturnRead(BaseModel):
@@ -3362,6 +3363,11 @@ class SaleRead(SaleBase):
     initial_payment_method: Optional[str] = None
     initial_payment_amount: Optional[float] = None
     balance: Optional[float] = None
+    separated_status: Optional[str] = None
+    separated_active_total_amount: Optional[float] = None
+    separated_recorded_paid_total: Optional[float] = None
+    separated_net_paid_total: Optional[float] = None
+    separated_reconciled_amount: Optional[float] = None
     adjustment_total_delta: float = 0.0
     adjustment_payment_delta: float = 0.0
     has_cash_payment: bool = False
@@ -3881,6 +3887,25 @@ class SeparatedOrderRead(BaseModel):
     updated_at: datetime
     completed_at: Optional[datetime] = None
     cancelled_at: Optional[datetime] = None
+    recorded_paid_total: float = 0.0
+    refunded_total: float = 0.0
+    net_paid_total: float = 0.0
+    active_total_amount: float = 0.0
+    reconciled_amount: float = 0.0
+    waived_amount: float = 0.0
+    retained_amount: float = 0.0
+    credit_amount: float = 0.0
+    pending_refund_amount: float = 0.0
+    balance_before_resolution: Optional[float] = None
+    resolution_type: Optional[str] = None
+    resolution_reason: Optional[str] = None
+    resolution_reference: Optional[str] = None
+    resolution_notes: Optional[str] = None
+    resolution_history: Optional[List[Dict[str, Any]]] = None
+    resolved_at: Optional[datetime] = None
+    resolved_by_user_id: Optional[int] = None
+    inventory_released_at: Optional[datetime] = None
+    items: List[SaleItemRead] = Field(default_factory=list)
     initial_payments: List[SalePaymentRead] = Field(default_factory=list)
     payments: List[SeparatedOrderPaymentRead] = []
 
@@ -3890,6 +3915,24 @@ class SeparatedOrderRead(BaseModel):
 
 class SeparatedOrderStatusUpdate(BaseModel):
     notes: Optional[str] = None
+
+
+SeparatedOrderResolutionAction = Literal["reconcile", "reschedule", "cancel", "refund_pending"]
+SeparatedOrderCancellationOutcome = Literal["cancelled", "uncollectible", "voided_error"]
+SeparatedOrderRemainderDisposition = Literal["retained", "credit", "pending_refund"]
+
+
+class SeparatedOrderResolveRequest(BaseModel):
+    action: SeparatedOrderResolutionAction
+    amount: Optional[float] = Field(default=None, gt=0)
+    reference: Optional[str] = Field(default=None, max_length=160)
+    reason: Optional[str] = Field(default=None, max_length=80)
+    notes: Optional[str] = Field(default=None, max_length=1200)
+    due_date: Optional[datetime] = None
+    cancellation_outcome: SeparatedOrderCancellationOutcome = "cancelled"
+    refund_amount: float = Field(default=0, ge=0)
+    refund_method: Optional[str] = Field(default=None, max_length=60)
+    remainder_disposition: SeparatedOrderRemainderDisposition = "retained"
 
 
 class PosClosureBase(BaseModel):

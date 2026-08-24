@@ -488,7 +488,12 @@ def get_payment_methods_summary(
                     models.SeparatedOrderPayment.status != "voided",
                 )
             )
-            .filter(models.SeparatedOrder.status != "cancelado")
+            .filter(
+                or_(
+                    models.SeparatedOrder.status != "cancelado",
+                    models.SeparatedOrder.resolution_type.isnot(None),
+                )
+            )
             .filter(models.SeparatedOrderPayment.paid_at >= start_utc)
             .filter(models.SeparatedOrderPayment.paid_at <= end_utc)
             .all()
@@ -700,7 +705,12 @@ def get_dashboard_summary(
                 models.SeparatedOrderPayment.status != "voided",
             )
         )
-        .filter(models.SeparatedOrder.status != "cancelado")
+        .filter(
+            or_(
+                models.SeparatedOrder.status != "cancelado",
+                models.SeparatedOrder.resolution_type.isnot(None),
+            )
+        )
         .filter(models.SeparatedOrderPayment.paid_at >= month_start_utc)
         .all()
     ) if include_metrik else []
@@ -768,7 +778,12 @@ def get_dashboard_summary(
                 models.SeparatedOrderPayment.status != "voided",
             )
         )
-        .filter(models.SeparatedOrder.status != "cancelado")
+        .filter(
+            or_(
+                models.SeparatedOrder.status != "cancelado",
+                models.SeparatedOrder.resolution_type.isnot(None),
+            )
+        )
         .filter(models.SeparatedOrderPayment.paid_at >= trend_start_utc)
         .all()
     ) if include_metrik else []

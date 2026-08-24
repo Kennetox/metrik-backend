@@ -1942,6 +1942,20 @@ class SeparatedOrder(Base):
     )
     completed_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
+    reconciled_amount = Column(Float, nullable=False, default=0)
+    waived_amount = Column(Float, nullable=False, default=0)
+    retained_amount = Column(Float, nullable=False, default=0)
+    credit_amount = Column(Float, nullable=False, default=0)
+    pending_refund_amount = Column(Float, nullable=False, default=0)
+    balance_before_resolution = Column(Float, nullable=True)
+    resolution_type = Column(String(40), nullable=True)
+    resolution_reason = Column(String(80), nullable=True)
+    resolution_reference = Column(String(160), nullable=True)
+    resolution_notes = Column(Text, nullable=True)
+    resolution_history = Column(JSON, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    inventory_released_at = Column(DateTime, nullable=True)
 
     sale = relationship("Sale", back_populates="separated_order")
     customer = relationship("PosCustomer")
@@ -1950,6 +1964,7 @@ class SeparatedOrder(Base):
         back_populates="separated_order",
         cascade="all, delete-orphan",
     )
+    resolved_by_user = relationship("PosUser", foreign_keys=[resolved_by_user_id])
 
     @property
     def initial_payments(self):
@@ -1957,6 +1972,62 @@ class SeparatedOrder(Base):
         if sale and getattr(sale, "payments", None):
             return sale.payments
         return []
+
+    @property
+    def items(self):
+        sale = getattr(self, "sale", None)
+        if sale and getattr(sale, "items", None):
+            return sale.items
+        return []
+
+    @property
+    def recorded_paid_total(self) -> float:
+        initial = sum(float(payment.amount or 0.0) for payment in self.initial_payments)
+        if not self.initial_payments:
+            initial = float(self.initial_payment or 0.0)
+        later = sum(
+            float(payment.amount or 0.0)
+            for payment in (self.payments or [])
+            if (payment.status or "active") != "voided"
+        )
+        return max(0.0, initial + later)
+
+    @property
+    def refunded_total(self) -> float:
+        sale = getattr(self, "sale", None)
+        return max(0.0, float(getattr(sale, "refunded_total", 0.0) or 0.0))
+
+    @property
+    def net_paid_total(self) -> float:
+        return max(0.0, self.recorded_paid_total - self.refunded_total)
+
+    @property
+    def active_total_amount(self) -> float:
+        sale = getattr(self, "sale", None)
+        items = list(getattr(sale, "items", None) or []) if sale else []
+        if not items:
+            return max(0.0, float(self.total_amount or 0.0))
+        returned_by_item: dict[int, float] = {}
+        for sale_return in getattr(sale, "returns", None) or []:
+            if (sale_return.status or "").strip().lower() != "confirmed" or sale_return.voided_at:
+                continue
+            for returned in sale_return.items or []:
+                item_id = int(returned.sale_item_id)
+                returned_by_item[item_id] = returned_by_item.get(item_id, 0.0) + float(returned.quantity or 0.0)
+        original_lines = 0.0
+        remaining_lines = 0.0
+        for item in items:
+            quantity = max(0.0, float(item.quantity or 0.0))
+            line_total = max(0.0, float(item.total or 0.0))
+            original_lines += line_total
+            if quantity <= 0:
+                continue
+            remaining_quantity = max(0.0, quantity - returned_by_item.get(int(item.id), 0.0))
+            remaining_lines += line_total * min(1.0, remaining_quantity / quantity)
+        if original_lines <= 0.01:
+            return 0.0 if remaining_lines <= 0.01 else max(0.0, float(self.total_amount or 0.0))
+        ratio = max(0.0, min(1.0, remaining_lines / original_lines))
+        return float(round(float(self.total_amount or 0.0) * ratio))
 
 
 class SeparatedOrderPayment(Base):

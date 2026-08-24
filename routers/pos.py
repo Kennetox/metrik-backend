@@ -699,15 +699,18 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
 
     order = getattr(sale, "separated_order", None)
     if order:
+        crud._apply_separated_order_view_totals(order)
         updates["is_separated"] = True
         order_total = crud.calculate_sale_total_from_items(sale)
         if order_total <= 0:
             order_total = float(order.total_amount or sale_schema.total or 0.0)
         updates["total"] = order_total
-        updates["balance"] = max(
-            0.0,
-            order_total - float(order.initial_payment or sale_schema.initial_payment_amount or 0.0),
-        )
+        updates["balance"] = float(order.balance or 0.0)
+        updates["separated_status"] = order.status
+        updates["separated_active_total_amount"] = float(order.active_total_amount or 0.0)
+        updates["separated_recorded_paid_total"] = float(order.recorded_paid_total or 0.0)
+        updates["separated_net_paid_total"] = float(order.net_paid_total or 0.0)
+        updates["separated_reconciled_amount"] = float(order.reconciled_amount or 0.0)
         updates["initial_payment_amount"] = float(
             order.initial_payment
             or sale_schema.initial_payment_amount

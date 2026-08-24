@@ -719,6 +719,53 @@ def _ensure_system_status_schema(connection, backend: str) -> None:
     )
 
 
+def _ensure_separated_resolution_schema(connection, backend: str) -> None:
+    table = "separated_orders"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        columns = {
+            "reconciled_amount": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "waived_amount": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "retained_amount": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "credit_amount": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "pending_refund_amount": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+            "balance_before_resolution": "DOUBLE PRECISION",
+            "resolution_type": "VARCHAR(40)",
+            "resolution_reason": "VARCHAR(80)",
+            "resolution_reference": "VARCHAR(160)",
+            "resolution_notes": "TEXT",
+            "resolution_history": "JSONB",
+            "resolved_at": "TIMESTAMP",
+            "resolved_by_user_id": "INTEGER REFERENCES pos_users(id)",
+            "inventory_released_at": "TIMESTAMP",
+        }
+        for column, ddl in columns.items():
+            _ensure_column_postgres(connection, table, column, ddl)
+        return
+
+    if not _table_exists(connection, table):
+        return
+    columns = {
+        "reconciled_amount": "FLOAT NOT NULL DEFAULT 0",
+        "waived_amount": "FLOAT NOT NULL DEFAULT 0",
+        "retained_amount": "FLOAT NOT NULL DEFAULT 0",
+        "credit_amount": "FLOAT NOT NULL DEFAULT 0",
+        "pending_refund_amount": "FLOAT NOT NULL DEFAULT 0",
+        "balance_before_resolution": "FLOAT",
+        "resolution_type": "TEXT",
+        "resolution_reason": "TEXT",
+        "resolution_reference": "TEXT",
+        "resolution_notes": "TEXT",
+        "resolution_history": "JSON",
+        "resolved_at": "DATETIME",
+        "resolved_by_user_id": "INTEGER",
+        "inventory_released_at": "DATETIME",
+    }
+    for column, ddl in columns.items():
+        _ensure_column(connection, table, column, ddl)
+
+
 def _column_exists_postgres(connection, table: str, column: str) -> bool:
     row = connection.execute(
         text(
@@ -1982,9 +2029,11 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_combo_schema(connection, backend="postgresql")
                 _ensure_inventory_recount_drafts_schema(connection, backend="postgresql")
                 _ensure_system_status_schema(connection, backend="postgresql")
+                _ensure_separated_resolution_schema(connection, backend="postgresql")
                 return
             if backend == "sqlite":
                 _ensure_system_status_schema(connection, backend="sqlite")
+                _ensure_separated_resolution_schema(connection, backend="sqlite")
                 _ensure_table_tenants(connection)
                 _ensure_table_demo_signup_audits(connection)
                 _ensure_table_user_notifications(connection)

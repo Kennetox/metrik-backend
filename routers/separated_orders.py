@@ -341,8 +341,48 @@ def cancel_separated_order(
         raise HTTPException(status_code=404, detail="Separado no encontrado")
     note = payload.notes if payload else None
     try:
-        updated = crud.cancel_separated_order(db, order, note)
+        updated = crud.resolve_separated_order(
+            db,
+            order,
+            schemas.SeparatedOrderResolveRequest(
+                action="cancel",
+                reason=(note or "Cancelación administrativa").strip(),
+                notes=note,
+                refund_amount=0,
+                remainder_disposition="retained",
+            ),
+            current_user,
+        )
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _SEPARATED_ORDERS_CACHE.clear()
+    return updated
+
+
+@router.post(
+    "/{order_id}/resolve",
+    response_model=schemas.SeparatedOrderRead,
+)
+def resolve_separated_order(
+    order_id: int,
+    payload: schemas.SeparatedOrderResolveRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_permission("documents.separated_orders")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Separado no encontrado")
+    try:
+        updated = crud.resolve_separated_order(db, order, payload, current_user)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
     _SEPARATED_ORDERS_CACHE.clear()
     return updated
