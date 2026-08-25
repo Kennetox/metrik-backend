@@ -78,12 +78,31 @@ def _create_product(*, tenant_id: int | None = None) -> models.Product:
         db.close()
 
 
+def _create_customer(*, tenant_id: int | None = None) -> models.PosCustomer:
+    db = TestingSessionLocal()
+    try:
+        customer = models.PosCustomer(
+            tenant_id=tenant_id or crud.get_default_tenant_id(db),
+            name="Cliente seguridad",
+            phone=f"3{uuid4().int % 10**9:09d}",
+            is_active=True,
+        )
+        db.add(customer)
+        db.commit()
+        db.refresh(customer)
+        db.expunge(customer)
+        return customer
+    finally:
+        db.close()
+
+
 def _sale_payload(
     product: models.Product,
     request_id: str,
     *,
     paid_amount: float = 50000.0,
 ) -> dict:
+    customer = _create_customer(tenant_id=product.tenant_id)
     return {
         "client_request_id": request_id,
         "payment_method": "cash",
@@ -92,6 +111,7 @@ def _sale_payload(
         "change_amount": max(0.0, paid_amount - 50000.0),
         "pos_name": "POS Web",
         "vendor_name": "Prueba seguridad",
+        "customer_id": customer.id,
         "items": [
             {
                 "product_id": product.id,

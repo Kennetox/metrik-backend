@@ -2,7 +2,7 @@ import json
 from datetime import datetime, date
 from typing import Any, Dict, Optional, List, Literal, Annotated
 
-from pydantic import BaseModel, EmailStr, constr, Field, field_validator, ConfigDict
+from pydantic import BaseModel, EmailStr, constr, Field, field_validator, model_validator, ConfigDict
 
 
 NonEmptyStr = Annotated[str, Field(strip_whitespace=True, min_length=1)]
@@ -2350,7 +2350,13 @@ class PosCustomerBase(BaseModel):
 
 
 class PosCustomerCreate(PosCustomerBase):
-    pass
+    @model_validator(mode="after")
+    def _require_additional_information(self):
+        if not any((self.phone, self.email, self.tax_id, self.address)):
+            raise ValueError(
+                "Registra al menos un dato adicional: teléfono, correo, documento o dirección"
+            )
+        return self
 
 
 class PosCustomerUpdate(BaseModel):
@@ -2370,6 +2376,21 @@ class PosCustomerRead(PosCustomerBase):
 
     class Config:
         from_attributes = True
+
+
+class PosCustomerSummaryRead(BaseModel):
+    total: int
+    active: int
+    with_email: int
+    web_guests: int
+
+
+class PosCustomerPage(BaseModel):
+    items: List[PosCustomerRead]
+    total: int
+    skip: int
+    limit: int
+    summary: PosCustomerSummaryRead
 
 
 class PosCustomerFrequentRead(PosCustomerRead):
@@ -3918,6 +3939,10 @@ class SeparatedOrderRead(BaseModel):
 
 class SeparatedOrderStatusUpdate(BaseModel):
     notes: Optional[str] = None
+
+
+class SeparatedOrderCustomerAssignRequest(BaseModel):
+    customer_id: int = Field(gt=0)
 
 
 SeparatedOrderResolutionAction = Literal["reconcile", "reschedule", "cancel", "refund_pending"]

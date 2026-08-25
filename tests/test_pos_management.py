@@ -1,7 +1,9 @@
 from datetime import datetime
+from io import BytesIO
 from typing import Optional
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 import models
 import schemas
@@ -766,6 +768,40 @@ def test_customer_crud_and_sales_association(client: TestClient):
     results = list_resp.json()
     assert any(entry["id"] == customer_id for entry in results)
 
+    page_resp = client.get(
+        "/pos/customers/page?search=ACME&status=active&segment=with_email&limit=8",
+        headers=headers,
+    )
+    assert page_resp.status_code == 200
+    customer_page = page_resp.json()
+    assert customer_page["total"] == 1
+    assert customer_page["summary"] == {
+        "total": 1,
+        "active": 1,
+        "with_email": 1,
+        "web_guests": 0,
+    }
+    assert [entry["id"] for entry in customer_page["items"]] == [customer_id]
+
+    export_resp = client.get(
+        "/pos/customers/export.xlsx?search=ACME&status=active&segment=with_email",
+        headers=headers,
+    )
+    assert export_resp.status_code == 200
+    assert export_resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    workbook = load_workbook(BytesIO(export_resp.content), read_only=True)
+    rows = list(workbook["Clientes"].iter_rows(values_only=True))
+    assert rows[0][:4] == ("Nombre", "Teléfono", "Correo", "Documento")
+    assert rows[1][:4] == (
+        payload["name"],
+        payload["phone"],
+        payload["email"],
+        payload["tax_id"],
+    )
+    assert len(rows) == 2
+
     update_resp = client.put(
         f"/pos/customers/{customer_id}",
         json={"phone": "3010000000"},
@@ -806,6 +842,15 @@ def test_customer_crud_and_sales_association(client: TestClient):
     assert list_inactive.status_code == 200
     assert len(list_inactive.json()) == 1
     assert list_inactive.json()[0]["is_active"] is False
+
+    inactive_page_resp = client.get(
+        "/pos/customers/page?search=ACME&status=inactive",
+        headers=headers,
+    )
+    assert inactive_page_resp.status_code == 200
+    inactive_page = inactive_page_resp.json()
+    assert inactive_page["total"] == 1
+    assert inactive_page["summary"]["active"] == 0
 
 
 def test_send_sale_email_requires_recipients(client: TestClient, monkeypatch):

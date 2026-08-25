@@ -35,6 +35,26 @@ def _clean_field(value):
     return value
 
 
+def _customer_has_additional_information(customer: Any) -> bool:
+    return any(
+        _clean_field(
+            getattr(customer, field, None)
+            or getattr(customer, f"customer_{field}", None)
+        )
+        for field in ("phone", "email", "tax_id", "address")
+    )
+
+
+def _validate_customer_identity(customer: Any) -> None:
+    name = getattr(customer, "name", None) or getattr(customer, "customer_name", None)
+    if not _clean_field(name):
+        raise ValueError("El nombre del cliente es obligatorio")
+    if not _customer_has_additional_information(customer):
+        raise ValueError(
+            "Registra al menos un dato adicional del cliente: teléfono, correo, documento o dirección"
+        )
+
+
 def _normalize_combo_context_json(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -8263,6 +8283,10 @@ def create_separated_order(
     if sale.separated_order:
         return sale.separated_order
 
+    if sale.customer_id is None:
+        raise ValueError("Debes asignar un cliente registrado para crear el separado")
+    _validate_customer_identity(sale)
+
     total_amount = calculate_sale_total_from_items(sale)
     if total_amount <= 0:
         total_amount = _round_currency_to_unit(float(sale.total or 0.0))
@@ -8580,6 +8604,52 @@ def _append_separated_resolution_event(
         }
     )
     order.resolution_history = history
+
+
+def assign_separated_order_customer(
+    db: Session,
+    order: models.SeparatedOrder,
+    customer: models.PosCustomer,
+    *,
+    user_id: Optional[int],
+) -> models.SeparatedOrder:
+    if not customer.is_active:
+        raise ValueError("El cliente seleccionado está inactivo")
+    if order.tenant_id is not None and customer.tenant_id != order.tenant_id:
+        raise ValueError("El cliente seleccionado no pertenece a este negocio")
+    _validate_customer_identity(customer)
+
+    previous_customer_id = order.customer_id
+    previous_customer_name = order.customer_name
+    sale = order.sale
+    order.customer_id = customer.id
+    order.customer_name = _clean_field(customer.name)
+    order.customer_phone = _clean_field(customer.phone)
+    order.customer_email = _clean_field(customer.email)
+    if sale is not None:
+        sale.customer_id = customer.id
+        sale.customer_name = _clean_field(customer.name)
+        sale.customer_phone = _clean_field(customer.phone)
+        sale.customer_email = _clean_field(customer.email)
+        sale.customer_tax_id = _clean_field(customer.tax_id)
+        sale.customer_address = _clean_field(customer.address)
+
+    _append_separated_resolution_event(
+        order,
+        action="customer_assigned",
+        user_id=user_id,
+        before_balance=float(order.balance or 0.0),
+        after_balance=float(order.balance or 0.0),
+        details={
+            "previous_customer_id": previous_customer_id,
+            "previous_customer_name": previous_customer_name,
+            "customer_id": customer.id,
+            "customer_name": customer.name,
+        },
+    )
+    db.commit()
+    db.refresh(order)
+    return _apply_separated_order_view_totals(order)
 
 
 def _remaining_separated_items(order: models.SeparatedOrder) -> list[tuple[models.SaleItem, float]]:
@@ -12533,6 +12603,27 @@ def complete_password_reset(
 # ===================== POS CUSTOMERS =====================
 
 
+def _repair_legacy_pos_customer_emails(
+    db: Session,
+    tenant_id: Optional[int],
+) -> None:
+    # Backward-compatibility repair: older guest checkout used a placeholder email
+    # with `.local`, which fails EmailStr validation in API responses.
+    legacy_guest_email = "__guest_checkout__@kensar.local"
+    canonical_guest_email = "__guest_checkout__@kensar.example.com"
+    repair_query = db.query(models.PosCustomer).filter(
+        func.lower(models.PosCustomer.email) == legacy_guest_email
+    )
+    if tenant_id is not None:
+        repair_query = repair_query.filter(models.PosCustomer.tenant_id == tenant_id)
+    legacy_rows = repair_query.all()
+    if legacy_rows:
+        for row in legacy_rows:
+            row.email = canonical_guest_email
+            db.add(row)
+        db.commit()
+
+
 def list_pos_customers(
     db: Session,
     search: Optional[str] = None,
@@ -12542,22 +12633,8 @@ def list_pos_customers(
     include_web_customers: bool = True,
     tenant_id: Optional[int] = None,
 ):
-    # Backward-compatibility repair: older guest checkout used a placeholder email
-    # with `.local`, which fails EmailStr validation in API responses.
-    legacy_guest_email = "__guest_checkout__@kensar.local"
-    canonical_guest_email = "__guest_checkout__@kensar.example.com"
-    repair_query = db.query(models.PosCustomer).filter(
-        func.lower(models.PosCustomer.email) == legacy_guest_email
-    )
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
-    if effective_tenant_id is not None:
-        repair_query = repair_query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
-    legacy_rows = repair_query.all()
-    if legacy_rows:
-        for row in legacy_rows:
-            row.email = canonical_guest_email
-            db.add(row)
-        db.commit()
+    _repair_legacy_pos_customer_emails(db, effective_tenant_id)
 
     query = db.query(models.PosCustomer)
     if effective_tenant_id is not None:
@@ -12584,6 +12661,128 @@ def list_pos_customers(
         .limit(limit)
         .all()
     )
+
+
+def _pos_customers_management_query(
+    db: Session,
+    search: Optional[str] = None,
+    status: str = "active",
+    segment: str = "all",
+    tenant_id: Optional[int] = None,
+):
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    _repair_legacy_pos_customer_emails(db, effective_tenant_id)
+    query = db.query(models.PosCustomer)
+
+    if effective_tenant_id is not None:
+        query = query.filter(models.PosCustomer.tenant_id == effective_tenant_id)
+    if status == "active":
+        query = query.filter(models.PosCustomer.is_active.is_(True))
+    elif status == "inactive":
+        query = query.filter(models.PosCustomer.is_active.is_(False))
+
+    if search:
+        pattern = f"%{search.lower()}%"
+        query = query.filter(
+            or_(
+                func.lower(models.PosCustomer.name).like(pattern),
+                func.lower(models.PosCustomer.phone).like(pattern),
+                func.lower(models.PosCustomer.email).like(pattern),
+                func.lower(models.PosCustomer.tax_id).like(pattern),
+            )
+        )
+
+    has_email = and_(
+        models.PosCustomer.email.isnot(None),
+        func.trim(models.PosCustomer.email) != "",
+    )
+    has_phone = and_(
+        models.PosCustomer.phone.isnot(None),
+        func.trim(models.PosCustomer.phone) != "",
+    )
+    has_tax_id = and_(
+        models.PosCustomer.tax_id.isnot(None),
+        func.trim(models.PosCustomer.tax_id) != "",
+    )
+    is_web_guest = func.lower(models.PosCustomer.email).contains(
+        "__guest_checkout__",
+        autoescape=True,
+    )
+
+    if segment == "with_email":
+        query = query.filter(has_email)
+    elif segment == "with_phone":
+        query = query.filter(has_phone)
+    elif segment == "with_tax_id":
+        query = query.filter(has_tax_id)
+    elif segment == "without_contact":
+        query = query.filter(not_(or_(has_email, has_phone)))
+    elif segment == "web_guest":
+        query = query.filter(is_web_guest)
+
+    return query, has_email, is_web_guest
+
+
+def list_pos_customers_page(
+    db: Session,
+    search: Optional[str] = None,
+    status: str = "active",
+    segment: str = "all",
+    skip: int = 0,
+    limit: int = 8,
+    tenant_id: Optional[int] = None,
+) -> schemas.PosCustomerPage:
+    query, has_email, is_web_guest = _pos_customers_management_query(
+        db,
+        search=search,
+        status=status,
+        segment=segment,
+        tenant_id=tenant_id,
+    )
+
+    totals = query.with_entities(
+        func.count(models.PosCustomer.id).label("total"),
+        func.sum(case((models.PosCustomer.is_active.is_(True), 1), else_=0)).label("active"),
+        func.sum(case((has_email, 1), else_=0)).label("with_email"),
+        func.sum(case((is_web_guest, 1), else_=0)).label("web_guests"),
+    ).one()
+    total = int(totals.total or 0)
+    items = (
+        query.order_by(models.PosCustomer.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return schemas.PosCustomerPage(
+        items=items,
+        total=total,
+        skip=skip,
+        limit=limit,
+        summary=schemas.PosCustomerSummaryRead(
+            total=total,
+            active=int(totals.active or 0),
+            with_email=int(totals.with_email or 0),
+            web_guests=int(totals.web_guests or 0),
+        ),
+    )
+
+
+def list_pos_customers_for_export(
+    db: Session,
+    search: Optional[str] = None,
+    status: str = "active",
+    segment: str = "all",
+    tenant_id: Optional[int] = None,
+):
+    query, _, _ = _pos_customers_management_query(
+        db,
+        search=search,
+        status=status,
+        segment=segment,
+        tenant_id=tenant_id,
+    )
+    return query.order_by(models.PosCustomer.created_at.desc()).all()
 
 
 def list_pos_frequent_customers(
@@ -12656,13 +12855,14 @@ def create_pos_customer(
     tenant_id: Optional[int] = None,
 ) -> models.PosCustomer:
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    _validate_customer_identity(customer_in)
     customer = models.PosCustomer(
         tenant_id=effective_tenant_id,
-        name=customer_in.name,
-        phone=customer_in.phone,
-        email=customer_in.email,
-        tax_id=customer_in.tax_id,
-        address=customer_in.address,
+        name=_clean_field(customer_in.name),
+        phone=_clean_field(customer_in.phone),
+        email=_clean_field(customer_in.email),
+        tax_id=_clean_field(customer_in.tax_id),
+        address=_clean_field(customer_in.address),
         is_active=True,
     )
     db.add(customer)
@@ -12678,11 +12878,20 @@ def update_pos_customer(
 ) -> models.PosCustomer:
     data = customer_in.model_dump(exclude_unset=True)
 
+    merged = SimpleNamespace(
+        name=data.get("name", customer.name),
+        phone=data.get("phone", customer.phone),
+        email=data.get("email", customer.email),
+        tax_id=data.get("tax_id", customer.tax_id),
+        address=data.get("address", customer.address),
+    )
+    _validate_customer_identity(merged)
+
     for field, value in data.items():
         if field == "is_active":
             customer.is_active = bool(value)
             continue
-        setattr(customer, field, value)
+        setattr(customer, field, _clean_field(value))
 
     db.commit()
     db.refresh(customer)

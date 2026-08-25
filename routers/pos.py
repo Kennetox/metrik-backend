@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 import functools
+import io
 import inspect
 import logging
 from typing import Any, List, Optional, Literal
@@ -23,6 +24,10 @@ from fastapi import (
 from sqlalchemy.orm import Session
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 import schemas, crud, models
 from database import get_db
@@ -2645,6 +2650,111 @@ def list_pos_customers(
     return customers
 
 
+@router.get("/customers/page", response_model=schemas.PosCustomerPage)
+def list_pos_customers_page(
+    search: Optional[str] = None,
+    status: Literal["active", "inactive", "all"] = "active",
+    segment: Literal[
+        "all",
+        "with_email",
+        "with_phone",
+        "with_tax_id",
+        "web_guest",
+        "without_contact",
+    ] = "all",
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=8, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    return crud.list_pos_customers_page(
+        db,
+        search=search,
+        status=status,
+        segment=segment,
+        skip=skip,
+        limit=limit,
+        tenant_id=tenant_id,
+    )
+
+
+@router.get("/customers/export.xlsx")
+def export_pos_customers_xlsx(
+    search: Optional[str] = None,
+    status: Literal["active", "inactive", "all"] = "active",
+    segment: Literal[
+        "all",
+        "with_email",
+        "with_phone",
+        "with_tax_id",
+        "web_guest",
+        "without_contact",
+    ] = "all",
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.customers")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    customers = crud.list_pos_customers_for_export(
+        db,
+        search=search,
+        status=status,
+        segment=segment,
+        tenant_id=tenant_id,
+    )
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Clientes"
+    columns = [
+        ("Nombre", 34),
+        ("Teléfono", 18),
+        ("Correo", 38),
+        ("Documento", 20),
+        ("Dirección", 42),
+        ("Estado", 12),
+        ("Invitado web", 16),
+        ("Fecha de creación", 22),
+    ]
+    sheet.append([label for label, _ in columns])
+    header_fill = PatternFill("solid", fgColor="059669")
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+
+    for customer in customers:
+        email = customer.email or ""
+        sheet.append(
+            [
+                customer.name,
+                customer.phone or "",
+                email,
+                customer.tax_id or "",
+                customer.address or "",
+                "Activo" if customer.is_active else "Inactivo",
+                "Sí" if "__guest_checkout__" in email.lower() else "No",
+                customer.created_at,
+            ]
+        )
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for index, (_, width) in enumerate(columns, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row in range(2, sheet.max_row + 1):
+        sheet.cell(row=row, column=8).number_format = "dd/mm/yyyy hh:mm"
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    filename = f"clientes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/customers/frequent", response_model=List[schemas.PosCustomerFrequentRead])
 def list_pos_frequent_customers(
     min_sales: int = 5,
@@ -2674,7 +2784,10 @@ def create_pos_customer(
     current_user: models.PosUser = Depends(require_permission("pos.customers")),
 ):
     tenant_id = crud.resolve_user_tenant_id(db, current_user)
-    customer = crud.create_pos_customer(db, customer_in, tenant_id=tenant_id)
+    try:
+        customer = crud.create_pos_customer(db, customer_in, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return customer
 
 
@@ -2689,7 +2802,10 @@ def update_pos_customer(
     customer = crud.get_pos_customer(db, customer_id, tenant_id=tenant_id)
     if not customer:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
-    updated = crud.update_pos_customer(db, customer, customer_in)
+    try:
+        updated = crud.update_pos_customer(db, customer, customer_in)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated
 
 

@@ -244,6 +244,39 @@ def get_separated_order(
     return order
 
 
+@router.patch(
+    "/{order_id}/customer",
+    response_model=schemas.SeparatedOrderRead,
+)
+def assign_separated_customer(
+    order_id: int,
+    payload: schemas.SeparatedOrderCustomerAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(
+        require_permission("documents.separated_orders")
+    ),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    order = crud.get_separated_order(db, order_id, tenant_id=tenant_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Separado no encontrado")
+    customer = crud.get_pos_customer(db, payload.customer_id, tenant_id=tenant_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    try:
+        updated = crud.assign_separated_order_customer(
+            db,
+            order,
+            customer,
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _SEPARATED_ORDERS_CACHE.clear()
+    return updated
+
+
 @router.post(
     "/{order_id}/payments",
     response_model=schemas.SeparatedOrderRead,

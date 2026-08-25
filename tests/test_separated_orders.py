@@ -45,6 +45,16 @@ def _create_product():
     return product
 
 
+def _create_customer(client: TestClient, headers: dict[str, str], name: str = "Cliente Separado"):
+    response = client.post(
+        "/pos/customers",
+        json={"name": name, "phone": f"3{uuid4().int % 10**9:09d}"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def _create_test_separated(
     client: TestClient,
     headers: dict[str, str],
@@ -54,6 +64,7 @@ def _create_test_separated(
     due_days: int = 2,
 ):
     product = _create_product()
+    customer = _create_customer(client, headers, "Cliente Resolución")
     total = 50000.0 * quantity
     payload = {
         "payment_method": "cash",
@@ -62,7 +73,7 @@ def _create_test_separated(
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
-        "customer_name": "Cliente Resolución",
+        "customer_id": customer["id"],
         "notes": "Caso administrativo",
         "pos_name": "POS Principal",
         "vendor_name": "Vendedor 1",
@@ -81,13 +92,14 @@ def _create_test_separated(
         "due_date": (datetime.utcnow() + timedelta(days=due_days)).isoformat(),
     }
     response = client.post("/separated-orders", json=payload, headers=headers)
-    assert response.status_code == 201
+    assert response.status_code == 201, response.text
     return response.json()
 
 
 def test_create_and_pay_separated_order(client: TestClient):
     headers = _auth_headers(client)
     product = _create_product()
+    customer = _create_customer(client, headers)
     payload = {
         "payment_method": "cash",
         "total": 584000.0,
@@ -95,7 +107,7 @@ def test_create_and_pay_separated_order(client: TestClient):
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
-        "customer_name": "Cliente Separado",
+        "customer_id": customer["id"],
         "notes": "Apartado especial",
         "pos_name": "POS Principal",
         "vendor_name": "Vendedor 1",
@@ -118,7 +130,7 @@ def test_create_and_pay_separated_order(client: TestClient):
     }
 
     resp = client.post("/separated-orders", json=payload, headers=headers)
-    assert resp.status_code == 201
+    assert resp.status_code == 201, resp.text
     data = resp.json()
     assert data["total_amount"] == 584000.0
     assert data["initial_payment"] == 400000.0
@@ -186,6 +198,7 @@ def test_create_and_pay_separated_order(client: TestClient):
 def test_voiding_sale_cancels_linked_separated_order(client: TestClient):
     headers = _auth_headers(client)
     product = _create_product()
+    customer = _create_customer(client, headers, "Cliente Anulación")
     payload = {
         "payment_method": "cash",
         "total": 50000.0,
@@ -193,7 +206,7 @@ def test_voiding_sale_cancels_linked_separated_order(client: TestClient):
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
-        "customer_name": "Cliente Anulación",
+        "customer_id": customer["id"],
         "notes": "Separado a corregir",
         "pos_name": "POS Principal",
         "vendor_name": "Vendedor 1",
@@ -215,7 +228,7 @@ def test_voiding_sale_cancels_linked_separated_order(client: TestClient):
     }
 
     resp = client.post("/separated-orders", json=payload, headers=headers)
-    assert resp.status_code == 201
+    assert resp.status_code == 201, resp.text
     data = resp.json()
     order_id = data["id"]
     sale_id = data["sale_id"]
@@ -511,3 +524,68 @@ def test_overdue_payment_requires_and_records_acknowledgement(client: TestClient
     assert event["amount"] == 5000
     assert event["days_overdue"] >= 1
     assert event["created_by_user_id"] is not None
+
+
+def test_customer_requires_name_and_additional_information(client: TestClient):
+    headers = _auth_headers(client)
+
+    missing_detail = client.post(
+        "/pos/customers",
+        json={"name": "Solo nombre"},
+        headers=headers,
+    )
+
+    assert missing_detail.status_code == 422
+    assert "dato adicional" in missing_detail.text.lower()
+
+
+def test_separated_order_requires_registered_customer(client: TestClient):
+    headers = _auth_headers(client)
+    product = _create_product()
+    payload = {
+        "payment_method": "cash",
+        "total": 50000,
+        "paid_amount": 10000,
+        "change_amount": 0,
+        "customer_name": "Nombre suelto",
+        "items": [
+            {
+                "product_id": product.id,
+                "quantity": 1,
+                "unit_price": 50000,
+                "product_name": product.name,
+            }
+        ],
+        "payments": [{"method": "cash", "amount": 10000}],
+    }
+
+    response = client.post("/separated-orders", json=payload, headers=headers)
+
+    assert response.status_code == 400
+    assert "cliente registrado" in response.json()["detail"].lower()
+
+
+def test_assign_customer_updates_historical_separated_and_sale(client: TestClient):
+    headers = _auth_headers(client)
+    order = _create_test_separated(client, headers)
+    replacement = _create_customer(client, headers, "Cliente corregido")
+
+    response = client.patch(
+        f"/separated-orders/{order['id']}/customer",
+        json={"customer_id": replacement["id"]},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["customer_id"] == replacement["id"]
+    assert updated["customer_name"] == "Cliente corregido"
+    assert updated["resolution_history"][-1]["action"] == "customer_assigned"
+
+    db = TestingSessionLocal()
+    try:
+        sale = db.query(models.Sale).filter(models.Sale.id == order["sale_id"]).one()
+        assert sale.customer_id == replacement["id"]
+        assert sale.customer_name == "Cliente corregido"
+    finally:
+        db.close()
