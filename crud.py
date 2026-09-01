@@ -9508,18 +9508,41 @@ def resolve_operation_document(
     chain = [
         {"document_type": "sale", "document_id": sale.id,
          "document_number": sale.document_number or f"V-{sale.id:06d}",
-         "status": sale.status, "created_at": sale.created_at}
+         "status": sale.status, "created_at": sale.created_at,
+         "items": [
+             {"action": "purchased", "product_id": item.product_id,
+              "product_name": item.product_name, "product_sku": item.product_sku,
+              "quantity": float(item.quantity or 0.0)}
+             for item in sale.items
+         ]}
     ]
     chain.extend(
         {"document_type": "change", "document_id": entry.id,
          "document_number": entry.document_number or f"CB-{entry.id:06d}",
-         "status": entry.status, "created_at": entry.created_at}
+         "status": entry.status, "created_at": entry.created_at,
+         "items": [
+             {"action": "returned", "product_id": item.product_id,
+              "product_name": item.product_name, "product_sku": item.product_sku,
+              "quantity": float(item.quantity or 0.0)}
+             for item in entry.items_returned
+         ] + [
+             {"action": "received", "product_id": item.product_id,
+              "product_name": item.product_name, "product_sku": item.product_sku,
+              "quantity": float(item.quantity or 0.0)}
+             for item in entry.items_new
+         ]}
         for entry in sorted(sale.changes, key=lambda row: row.created_at)
     )
     chain.extend(
         {"document_type": "return", "document_id": entry.id,
          "document_number": entry.document_number or f"DV-{entry.id:06d}",
-         "status": entry.status, "created_at": entry.created_at}
+         "status": entry.status, "created_at": entry.created_at,
+         "items": [
+             {"action": "returned", "product_id": item.product_id,
+              "product_name": item.product_name, "product_sku": item.product_sku,
+              "quantity": float(item.quantity or 0.0)}
+             for item in entry.items
+         ]}
         for entry in sorted(sale.returns, key=lambda row: row.created_at)
     )
     chain.sort(key=lambda entry: entry["created_at"])

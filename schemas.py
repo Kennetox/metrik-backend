@@ -2978,12 +2978,21 @@ class OperationSourceLineRead(BaseModel):
     unit_value: float
 
 
+class OperationChainItemRead(BaseModel):
+    action: str
+    product_id: int
+    product_name: str
+    product_sku: Optional[str] = None
+    quantity: float
+
+
 class OperationChainEntryRead(BaseModel):
     document_type: str
     document_id: int
     document_number: str
     status: str
     created_at: datetime
+    items: List[OperationChainItemRead] = []
 
 
 class OperationDocumentRead(BaseModel):

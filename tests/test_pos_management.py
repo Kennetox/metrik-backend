@@ -1419,6 +1419,31 @@ def test_chained_change_can_be_returned_once_and_preserves_lineage(client: TestC
     assert returned_data["source_document_number"] == second_data["document_number"]
     assert returned_data["total_refund"] == 18000
 
+    resolved_chain = client.get(
+        "/pos/operation-documents/resolve",
+        params={"code": returned_data["document_number"]},
+        headers=headers,
+    )
+    assert resolved_chain.status_code == 200
+    chain = resolved_chain.json()["chain"]
+    assert [entry["document_type"] for entry in chain] == [
+        "sale", "change", "change", "return"
+    ]
+    assert [(item["action"], item["product_name"], item["quantity"]) for item in chain[0]["items"]] == [
+        ("purchased", "Producto cadena original", 1)
+    ]
+    assert [(item["action"], item["product_name"]) for item in chain[1]["items"]] == [
+        ("returned", "Producto cadena original"),
+        ("received", "Producto cadena cambio uno"),
+    ]
+    assert [(item["action"], item["product_name"]) for item in chain[2]["items"]] == [
+        ("returned", "Producto cadena cambio uno"),
+        ("received", "Producto cadena cambio dos"),
+    ]
+    assert [(item["action"], item["product_name"]) for item in chain[3]["items"]] == [
+        ("returned", "Producto cadena cambio dos")
+    ]
+
     cannot_void_parent = client.post(
         f"/pos/changes/{first_data['id']}/void",
         json={"reason": "No debe romper la cadena"},
