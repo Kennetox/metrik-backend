@@ -9429,6 +9429,117 @@ def get_sale_change(
     return query.first()
 
 
+def resolve_operation_document(
+    db: Session,
+    code: str,
+    tenant_id: Optional[int] = None,
+) -> dict:
+    normalized = re.sub(r"\s+", "", (code or "").strip().upper())
+    if not normalized:
+        raise ValueError("Escanea o ingresa un documento")
+    effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
+    sale = None
+    change = None
+    sale_return = None
+    if normalized.startswith("CB"):
+        digits = re.sub(r"\D", "", normalized)
+        query = db.query(models.SaleChange)
+        if effective_tenant_id is not None:
+            query = query.filter(models.SaleChange.tenant_id == effective_tenant_id)
+        change = query.filter(or_(models.SaleChange.document_number == normalized, models.SaleChange.id == int(digits or 0))).first()
+        sale = change.sale if change else None
+    elif normalized.startswith("DV"):
+        digits = re.sub(r"\D", "", normalized)
+        query = db.query(models.SaleReturn)
+        if effective_tenant_id is not None:
+            query = query.filter(models.SaleReturn.tenant_id == effective_tenant_id)
+        sale_return = query.filter(or_(models.SaleReturn.document_number == normalized, models.SaleReturn.id == int(digits or 0))).first()
+        sale = sale_return.sale if sale_return else None
+    else:
+        digits = re.sub(r"\D", "", normalized)
+        query = db.query(models.Sale)
+        if effective_tenant_id is not None:
+            query = query.filter(models.Sale.tenant_id == effective_tenant_id)
+        filters = [models.Sale.document_number == normalized]
+        if digits:
+            filters.extend([models.Sale.sale_number == int(digits), models.Sale.id == int(digits)])
+        sale = query.filter(or_(*filters)).first()
+    if not sale:
+        raise ValueError("Documento no encontrado")
+
+    if change:
+        document_type, document_id = "change", change.id
+        document_number, status = change.document_number, change.status
+        source_number = change.source_document_number or sale.document_number
+        raw_lines = [("change", item.id, item) for item in change.items_new]
+    elif sale_return:
+        document_type, document_id = "return", sale_return.id
+        document_number, status = sale_return.document_number, sale_return.status
+        source_number = sale_return.source_document_number or sale.document_number
+        raw_lines = []
+    else:
+        document_type, document_id = "sale", sale.id
+        document_number, status = sale.document_number, sale.status
+        source_number = None
+        raw_lines = [("sale", item.id, item) for item in sale.items]
+
+    lines = []
+    for source_type, source_item_id, item in raw_lines:
+        consumed = _consumed_source_quantity(
+            db, source_type=source_type, source_item_id=source_item_id,
+            tenant_id=effective_tenant_id,
+        )
+        quantity = float(item.quantity or 0.0)
+        if source_type == "sale":
+            source = _resolve_operation_source(
+                db, sale=sale, source_type=source_type, source_item_id=source_item_id,
+                tenant_id=effective_tenant_id,
+            )
+            unit_value = float(source["unit_credit"])
+        else:
+            unit_value = float(item.unit_price or 0.0)
+        lines.append({
+            "source_type": source_type, "source_item_id": source_item_id,
+            "product_id": item.product_id, "product_name": item.product_name,
+            "product_sku": item.product_sku, "product_barcode": item.product_barcode,
+            "quantity": quantity, "consumed_quantity": consumed,
+            "available_quantity": max(0.0, quantity - consumed), "unit_value": unit_value,
+        })
+    chain = [
+        {"document_type": "sale", "document_id": sale.id,
+         "document_number": sale.document_number or f"V-{sale.id:06d}",
+         "status": sale.status, "created_at": sale.created_at}
+    ]
+    chain.extend(
+        {"document_type": "change", "document_id": entry.id,
+         "document_number": entry.document_number or f"CB-{entry.id:06d}",
+         "status": entry.status, "created_at": entry.created_at}
+        for entry in sorted(sale.changes, key=lambda row: row.created_at)
+    )
+    chain.extend(
+        {"document_type": "return", "document_id": entry.id,
+         "document_number": entry.document_number or f"DV-{entry.id:06d}",
+         "status": entry.status, "created_at": entry.created_at}
+        for entry in sorted(sale.returns, key=lambda row: row.created_at)
+    )
+    chain.sort(key=lambda entry: entry["created_at"])
+    can_consume = status == "confirmed" if document_type != "sale" else status != "voided"
+    has_available = any(line["available_quantity"] > 0.0001 for line in lines)
+    allowed_actions = ["return"] if can_consume and has_available else []
+    if can_consume and has_available and (
+        not sale.is_separated or float(sale.separated_order.balance or 0.0) <= 0.01
+    ):
+        allowed_actions.insert(0, "change")
+    return {
+        "document_type": document_type, "document_id": document_id,
+        "document_number": document_number or f"V-{sale.id:06d}", "status": status,
+        "root_sale_id": sale.id,
+        "root_sale_document_number": sale.document_number or f"V-{sale.id:06d}",
+        "source_document_number": source_number, "items": lines, "chain": chain,
+        "allowed_actions": allowed_actions,
+    }
+
+
 def _create_inventory_movement(
     db: Session,
     *,
@@ -9455,6 +9566,141 @@ def _create_inventory_movement(
             created_by_user_id=created_by_user_id,
         )
     )
+
+
+def _normalized_operation_source(source_type: Optional[str], source_item_id: Optional[int], sale_item_id: Optional[int]) -> tuple[str, int]:
+    normalized = (source_type or "sale").strip().lower()
+    if normalized not in {"sale", "change"}:
+        raise ValueError("El origen del producto debe ser una venta o un cambio")
+    resolved_id = source_item_id if source_item_id is not None else sale_item_id
+    if resolved_id is None:
+        raise ValueError("Falta identificar la línea de origen")
+    return normalized, int(resolved_id)
+
+
+def _consumed_source_quantity(
+    db: Session,
+    *,
+    source_type: str,
+    source_item_id: int,
+    tenant_id: Optional[int],
+) -> float:
+    """Quantity already consumed by confirmed, non-voided returns/changes."""
+    return_filter = (
+        models.SaleReturnItem.sale_item_id == source_item_id
+        if source_type == "sale"
+        else false()
+    )
+    change_filter = (
+        models.SaleChangeReturnItem.sale_item_id == source_item_id
+        if source_type == "sale"
+        else false()
+    )
+    return_filter = or_(
+        and_(
+            func.coalesce(models.SaleReturnItem.source_type, "sale") == source_type,
+            func.coalesce(models.SaleReturnItem.source_item_id, models.SaleReturnItem.sale_item_id) == source_item_id,
+        ),
+        and_(models.SaleReturnItem.source_item_id.is_(None), return_filter),
+    )
+    change_filter = or_(
+        and_(
+            func.coalesce(models.SaleChangeReturnItem.source_type, "sale") == source_type,
+            func.coalesce(models.SaleChangeReturnItem.source_item_id, models.SaleChangeReturnItem.sale_item_id) == source_item_id,
+        ),
+        and_(models.SaleChangeReturnItem.source_item_id.is_(None), change_filter),
+    )
+    returned = (
+        db.query(func.coalesce(func.sum(models.SaleReturnItem.quantity), 0.0))
+        .join(models.SaleReturn, models.SaleReturnItem.return_id == models.SaleReturn.id)
+        .filter(models.SaleReturn.status == "confirmed", return_filter)
+    )
+    changed = (
+        db.query(func.coalesce(func.sum(models.SaleChangeReturnItem.quantity), 0.0))
+        .join(models.SaleChange, models.SaleChangeReturnItem.change_id == models.SaleChange.id)
+        .filter(models.SaleChange.status == "confirmed", change_filter)
+    )
+    if tenant_id is not None:
+        returned = returned.filter(models.SaleReturn.tenant_id == tenant_id)
+        changed = changed.filter(models.SaleChange.tenant_id == tenant_id)
+    return float(returned.scalar() or 0.0) + float(changed.scalar() or 0.0)
+
+
+def _resolve_operation_source(
+    db: Session,
+    *,
+    sale: models.Sale,
+    source_type: str,
+    source_item_id: int,
+    tenant_id: Optional[int],
+) -> dict:
+    if source_type == "sale":
+        source = (
+            db.query(models.SaleItem)
+            .filter(models.SaleItem.id == source_item_id, models.SaleItem.sale_id == sale.id)
+            .with_for_update()
+            .first()
+        )
+        if not source:
+            raise ValueError(f"El ítem {source_item_id} no pertenece a la venta especificada")
+        quantity = float(source.quantity or 0.0)
+        unit_net = float(source.total or 0.0) / quantity if quantity else 0.0
+        subtotal_after_lines = sum(float(item.total or 0.0) for item in sale.items)
+        unit_cart_share = 0.0
+        if subtotal_after_lines > 0 and float(sale.cart_discount_value or 0.0) > 0 and quantity:
+            unit_cart_share = (
+                (float(source.total or 0.0) / subtotal_after_lines)
+                * float(sale.cart_discount_value or 0.0)
+                / quantity
+            )
+        _, total_deltas = _collect_sale_adjustments(db, [sale.id], tenant_id=tenant_id)
+        total_delta = float(total_deltas.get(sale.id, 0.0))
+        unit_adjustment = (
+            (float(source.total or 0.0) / subtotal_after_lines) * total_delta / quantity
+            if subtotal_after_lines > 0 and quantity
+            else 0.0
+        )
+        return {
+            "source_type": "sale", "source_item_id": source.id,
+            "parent_type": "sale", "parent_id": sale.id, "parent_number": sale.document_number,
+            "compat_sale_item_id": source.id, "product_id": source.product_id,
+            "product_name": source.product_name, "product_sku": source.product_sku,
+            "product_barcode": source.product_barcode, "quantity": quantity,
+            "unit_price_original": float(source.unit_price_original or source.unit_price or 0.0),
+            "unit_credit": max(0.0, unit_net + unit_adjustment - unit_cart_share),
+            "line_discount_per_unit": float(source.line_discount_value or 0.0) / quantity if quantity else 0.0,
+            "cart_share_per_unit": unit_cart_share,
+        }
+
+    source = (
+        db.query(models.SaleChangeNewItem)
+        .join(models.SaleChange, models.SaleChangeNewItem.change_id == models.SaleChange.id)
+        .filter(
+            models.SaleChangeNewItem.id == source_item_id,
+            models.SaleChange.sale_id == sale.id,
+            models.SaleChange.status == "confirmed",
+        )
+        .with_for_update()
+        .first()
+    )
+    if not source:
+        raise ValueError(f"La línea de cambio {source_item_id} no está disponible")
+    origin_change = source.change
+    compatibility_item = next((item.sale_item_id for item in origin_change.items_returned if item.sale_item_id), None)
+    if compatibility_item is None:
+        compatibility_item = next((item.id for item in sale.items), None)
+    if compatibility_item is None:
+        raise ValueError("No se pudo establecer la trazabilidad con la venta original")
+    return {
+        "source_type": "change", "source_item_id": source.id,
+        "parent_type": "change", "parent_id": origin_change.id, "parent_number": origin_change.document_number,
+        "compat_sale_item_id": compatibility_item, "product_id": source.product_id,
+        "product_name": source.product_name, "product_sku": source.product_sku,
+        "product_barcode": source.product_barcode, "quantity": float(source.quantity or 0.0),
+        "unit_price_original": float(source.unit_price or 0.0),
+        "unit_credit": float(source.unit_price or 0.0),
+        "line_discount_per_unit": 0.0, "cart_share_per_unit": 0.0,
+    }
 
 
 def create_return(
@@ -9510,9 +9756,14 @@ def create_return(
         if previous_return.status not in confirmed_statuses:
             continue
         for previous_item in previous_return.items:
-            refunded_qty[previous_item.sale_item_id] += float(
-                previous_item.quantity or 0.0
-            )
+            if (previous_item.source_type or "sale") == "sale":
+                refunded_qty[previous_item.sale_item_id] += float(previous_item.quantity or 0.0)
+    for previous_change in sale.changes:
+        if previous_change.status not in confirmed_statuses:
+            continue
+        for previous_item in previous_change.items_returned:
+            if (previous_item.source_type or "sale") == "sale":
+                refunded_qty[previous_item.sale_item_id] += float(previous_item.quantity or 0.0)
 
     subtotal_after_lines = sum(float(item.total or 0.0) for item in sale.items)
     cart_discount_value = float(sale.cart_discount_value or 0.0)
@@ -9533,57 +9784,54 @@ def create_return(
     total_refund = 0.0
     original_total_refund = 0.0
 
+    source_documents: set[tuple[str, int, str | None]] = set()
     for item_in in return_in.items:
-        sale_item = sale_items.get(item_in.sale_item_id)
-        if not sale_item:
-            raise ValueError(
-                f"El ítem {item_in.sale_item_id} no pertenece a la venta especificada"
-            )
-
         requested_qty = float(item_in.quantity or 0.0)
         if requested_qty <= 0:
             raise ValueError("La cantidad a devolver debe ser mayor a cero")
-
-        already_refunded = refunded_qty[sale_item.id]
-        available_qty = float(sale_item.quantity or 0.0) - already_refunded
+        source_type, source_item_id = _normalized_operation_source(
+            item_in.source_type, item_in.source_item_id, item_in.sale_item_id
+        )
+        source = _resolve_operation_source(
+            db, sale=sale, source_type=source_type, source_item_id=source_item_id,
+            tenant_id=effective_tenant_id,
+        )
+        already_refunded = _consumed_source_quantity(
+            db, source_type=source_type, source_item_id=source_item_id,
+            tenant_id=effective_tenant_id,
+        )
+        available_qty = float(source["quantity"]) - already_refunded
         if requested_qty - available_qty > 0.0001:
             raise ValueError(
-                f"La cantidad disponible para el ítem {sale_item.id} es {available_qty},"
-                " no se puede devolver más de lo vendido"
+                f"La cantidad disponible para la línea {source_item_id} es {available_qty}"
             )
-
-        line_quantity = float(sale_item.quantity or 0.0)
-        unit_net_after_line = (
-            float(sale_item.total or 0.0) / line_quantity if line_quantity else 0.0
-        )
-        unit_cart_share = cart_share_per_unit.get(sale_item.id, 0.0)
-        unit_refund_value = max(0.0, unit_net_after_line - unit_cart_share)
+        unit_refund_value = float(source["unit_credit"])
         line_total_refund = unit_refund_value * requested_qty
-
-        # Descuento por línea correspondiente a la cantidad devuelta
-        line_discount_per_unit = (
-            float(sale_item.line_discount_value or 0.0) / line_quantity
-            if line_quantity
-            else 0.0
-        )
-        line_discount_value = line_discount_per_unit * requested_qty
-        cart_discount_share_value = unit_cart_share * requested_qty
-
+        line_discount_value = float(source["line_discount_per_unit"]) * requested_qty
+        cart_discount_share_value = float(source["cart_share_per_unit"]) * requested_qty
+        source_documents.add((source["parent_type"], int(source["parent_id"]), source["parent_number"]))
         items_data.append(
             {
-                "sale_item": sale_item,
+                **source,
                 "quantity": requested_qty,
                 "reason": item_in.reason,
-                "unit_price_original": float(sale_item.unit_price_original or 0.0),
-                "unit_price_net": unit_net_after_line,
+                "unit_price_net": unit_refund_value,
                 "line_discount_value": line_discount_value,
                 "cart_discount_share": cart_discount_share_value,
                 "total_refund": line_total_refund,
             }
         )
-
         total_refund += line_total_refund
-        refunded_qty[sale_item.id] += requested_qty
+        if source_type == "sale":
+            refunded_qty[source_item_id] += requested_qty
+
+    if len(source_documents) != 1:
+        raise ValueError("Todos los productos deben pertenecer al mismo documento de origen")
+    source_document_type, source_document_id, source_document_number = next(iter(source_documents))
+    if return_in.source_document_number and (
+        return_in.source_document_number.strip().upper() != (source_document_number or "").strip().upper()
+    ):
+        raise ValueError("El documento escaneado no coincide con las líneas seleccionadas")
 
     original_total_refund = total_refund
     if total_refund <= 0:
@@ -9591,7 +9839,11 @@ def create_return(
 
     paid_total = float(sale.total or 0.0)
     if separated:
-        paid_total = float(separated.recorded_paid_total or 0.0)
+        paid_total = float(separated.recorded_paid_total or 0.0) + sum(
+            float(change.extra_payment or 0.0) - float(change.refund_due or 0.0)
+            for change in sale.changes
+            if change.status == "confirmed"
+        )
     refunded_so_far = float(sale.refunded_total or 0.0)
     available_refund = max(0.0, paid_total - refunded_so_far)
 
@@ -9629,7 +9881,15 @@ def create_return(
             )
     else:
         projected_total_refunded = refunded_so_far + total_refund
-        if projected_total_refunded - float(sale.total or 0.0) > 0.01:
+        _, total_deltas = _collect_sale_adjustments(db, [sale.id], tenant_id=effective_tenant_id)
+        adjusted_sale_total = float(sale.total or 0.0) + float(total_deltas.get(sale.id, 0.0))
+        confirmed_change_delta = sum(
+            float(change.extra_payment or 0.0) - float(change.refund_due or 0.0)
+            for change in sale.changes
+            if change.status == "confirmed"
+        )
+        refundable_ceiling = max(0.0, adjusted_sale_total + confirmed_change_delta)
+        if projected_total_refunded - refundable_ceiling > 0.01:
             raise ValueError("El total devuelto supera el total cobrado en la venta")
 
     if return_in.payments and len(return_in.payments) > 0:
@@ -9672,13 +9932,20 @@ def create_return(
         )
 
     status = return_in.status or "confirmed"
+    actor = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first() if created_by_user_id else None
 
     sale_return = models.SaleReturn(
         tenant_id=sale.tenant_id or get_default_tenant_id(db),
         sale_id=sale.id,
         status=status,
         notes=return_in.notes,
-        created_by=return_in.created_by,
+        created_by=return_in.created_by or (actor.name if actor else None),
+        created_by_user_id=created_by_user_id,
+        operation_pos_name=_clean_field(return_in.pos_name) or sale.pos_name,
+        operation_station_id=_clean_field(return_in.station_id),
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        source_document_number=source_document_number,
         total_refund=total_refund,
     )
     db.add(sale_return)
@@ -9696,15 +9963,16 @@ def create_return(
     movement_note = " | ".join(part for part in movement_note_parts if part)
 
     for item_data in items_data:
-        sale_item = item_data["sale_item"]
         db_return_item = models.SaleReturnItem(
             tenant_id=sale_return.tenant_id,
             return_id=sale_return.id,
-            sale_item_id=sale_item.id,
-            product_id=sale_item.product_id,
-            product_name=sale_item.product_name,
-            product_sku=sale_item.product_sku,
-            product_barcode=sale_item.product_barcode,
+            sale_item_id=item_data["compat_sale_item_id"],
+            source_type=item_data["source_type"],
+            source_item_id=item_data["source_item_id"],
+            product_id=item_data["product_id"],
+            product_name=item_data["product_name"],
+            product_sku=item_data["product_sku"],
+            product_barcode=item_data["product_barcode"],
             reason=item_data["reason"],
             quantity=item_data["quantity"],
             unit_price_original=item_data["unit_price_original"],
@@ -9714,11 +9982,12 @@ def create_return(
             total_refund=item_data["total_refund"],
         )
         db.add(db_return_item)
-        if status == "confirmed" and not sale_product_flags.get(int(sale_item.product_id or 0), False):
+        product_is_service = bool(db.query(models.Product.service).filter(models.Product.id == item_data["product_id"]).scalar())
+        if status == "confirmed" and not product_is_service:
             _create_inventory_movement(
                 db,
                 tenant_id=sale_return.tenant_id,
-                product_id=int(sale_item.product_id),
+                product_id=int(item_data["product_id"]),
                 qty_delta=abs(float(item_data["quantity"] or 0.0)),
                 reason="transfer_in",
                 notes=movement_note,
@@ -9862,6 +10131,12 @@ def create_change(
         raise ValueError(
             "No encontramos la venta asociada (usa sale_id o sale_document_number)"
         )
+    if sale.is_separated:
+        _apply_separated_order_view_totals(sale.separated_order)
+        if float(sale.separated_order.balance or 0.0) > 0.01:
+            raise ValueError(
+                "El separado debe estar totalmente pagado antes de realizar un cambio"
+            )
 
     sale_items = {item.id: item for item in sale.items}
     if not sale_items:
@@ -9882,16 +10157,14 @@ def create_change(
         if previous_return.status not in confirmed_statuses:
             continue
         for previous_item in previous_return.items:
-            refunded_qty[previous_item.sale_item_id] += float(
-                previous_item.quantity or 0.0
-            )
+            if (previous_item.source_type or "sale") == "sale":
+                refunded_qty[previous_item.sale_item_id] += float(previous_item.quantity or 0.0)
     for previous_change in sale.changes:
         if previous_change.status not in confirmed_statuses:
             continue
         for previous_item in previous_change.items_returned:
-            refunded_qty[previous_item.sale_item_id] += float(
-                previous_item.quantity or 0.0
-            )
+            if (previous_item.source_type or "sale") == "sale":
+                refunded_qty[previous_item.sale_item_id] += float(previous_item.quantity or 0.0)
 
     subtotal_after_lines = sum(float(item.total or 0.0) for item in sale.items)
     cart_discount_value = float(sale.cart_discount_value or 0.0)
@@ -9911,56 +10184,54 @@ def create_change(
     returned_items_data = []
     total_credit = 0.0
 
+    source_documents: set[tuple[str, int, str | None]] = set()
     for item_in in change_in.return_items:
-        sale_item = sale_items.get(item_in.sale_item_id)
-        if not sale_item:
-            raise ValueError(
-                f"El ítem {item_in.sale_item_id} no pertenece a la venta especificada"
-            )
-
         requested_qty = float(item_in.quantity or 0.0)
         if requested_qty <= 0:
             raise ValueError("La cantidad devuelta debe ser mayor a cero")
-
-        already_refunded = refunded_qty[sale_item.id]
-        available_qty = float(sale_item.quantity or 0.0) - already_refunded
+        source_type, source_item_id = _normalized_operation_source(
+            item_in.source_type, item_in.source_item_id, item_in.sale_item_id
+        )
+        source = _resolve_operation_source(
+            db, sale=sale, source_type=source_type, source_item_id=source_item_id,
+            tenant_id=effective_tenant_id,
+        )
+        already_refunded = _consumed_source_quantity(
+            db, source_type=source_type, source_item_id=source_item_id,
+            tenant_id=effective_tenant_id,
+        )
+        available_qty = float(source["quantity"]) - already_refunded
         if requested_qty - available_qty > 0.0001:
             raise ValueError(
-                f"La cantidad disponible para el ítem {sale_item.id} es {available_qty},"
-                " no se puede devolver más de lo vendido"
+                f"La cantidad disponible para la línea {source_item_id} es {available_qty}"
             )
-
-        line_quantity = float(sale_item.quantity or 0.0)
-        unit_net_after_line = (
-            float(sale_item.total or 0.0) / line_quantity if line_quantity else 0.0
-        )
-        unit_cart_share = cart_share_per_unit.get(sale_item.id, 0.0)
-        unit_credit_value = max(0.0, unit_net_after_line - unit_cart_share)
+        unit_credit_value = float(source["unit_credit"])
         line_total_credit = _round_currency_to_unit(unit_credit_value * requested_qty)
-
-        line_discount_per_unit = (
-            float(sale_item.line_discount_value or 0.0) / line_quantity
-            if line_quantity
-            else 0.0
-        )
-        line_discount_value = _round_currency_to_unit(line_discount_per_unit * requested_qty)
-        cart_discount_share_value = _round_currency_to_unit(unit_cart_share * requested_qty)
-
+        line_discount_value = _round_currency_to_unit(float(source["line_discount_per_unit"]) * requested_qty)
+        cart_discount_share_value = _round_currency_to_unit(float(source["cart_share_per_unit"]) * requested_qty)
+        source_documents.add((source["parent_type"], int(source["parent_id"]), source["parent_number"]))
         returned_items_data.append(
             {
-                "sale_item": sale_item,
+                **source,
                 "quantity": requested_qty,
                 "reason": item_in.reason,
-                "unit_price_original": float(sale_item.unit_price_original or 0.0),
-                "unit_price_net": unit_net_after_line,
+                "unit_price_net": unit_credit_value,
                 "line_discount_value": line_discount_value,
                 "cart_discount_share": cart_discount_share_value,
                 "total_credit": line_total_credit,
             }
         )
-
         total_credit += line_total_credit
-        refunded_qty[sale_item.id] += requested_qty
+        if source_type == "sale":
+            refunded_qty[source_item_id] += requested_qty
+
+    if len(source_documents) != 1:
+        raise ValueError("Todos los productos deben pertenecer al mismo documento de origen")
+    source_document_type, source_document_id, source_document_number = next(iter(source_documents))
+    if change_in.source_document_number and (
+        change_in.source_document_number.strip().upper() != (source_document_number or "").strip().upper()
+    ):
+        raise ValueError("El documento escaneado no coincide con las líneas seleccionadas")
 
     new_items_data = []
     total_new = 0.0
@@ -10033,8 +10304,14 @@ def create_change(
             )
     elif change_in.payments:
         raise ValueError("No debes registrar pagos cuando no hay excedente")
+    refund_method = _clean_field(change_in.refund_method)
+    if refund_due > 0 and not refund_method:
+        raise ValueError("Debes seleccionar el método usado para devolver el saldo")
+    if refund_due <= 0:
+        refund_method = None
 
     status = change_in.status or "confirmed"
+    actor = db.query(models.PosUser).filter(models.PosUser.id == created_by_user_id).first() if created_by_user_id else None
     requested_pos_name = _clean_field(change_in.pos_name)
     requested_station_id = _clean_field(change_in.station_id)
     target_pos_name = requested_pos_name or sale.pos_name
@@ -10048,15 +10325,20 @@ def create_change(
         sale_id=sale.id,
         status=status,
         notes=change_in.notes,
-        created_by=change_in.created_by,
+        created_by=change_in.created_by or (actor.name if actor else None),
+        created_by_user_id=created_by_user_id,
         total_credit=total_credit,
         total_new=total_new,
         net_total=net_total,
         extra_payment=extra_payment,
         refund_due=refund_due,
         pos_name=target_pos_name,
-        seller_name=change_in.created_by or sale.vendor_name,
+        seller_name=change_in.created_by or (actor.name if actor else sale.vendor_name),
         station_id=target_station_id,
+        source_document_type=source_document_type,
+        source_document_id=source_document_id,
+        source_document_number=source_document_number,
+        refund_method=refund_method,
     )
     db.add(sale_change)
     db.flush()
@@ -10073,15 +10355,16 @@ def create_change(
     movement_note = " | ".join(part for part in movement_note_parts if part)
 
     for item_data in returned_items_data:
-        sale_item = item_data["sale_item"]
         db_return_item = models.SaleChangeReturnItem(
             tenant_id=sale_change.tenant_id,
             change_id=sale_change.id,
-            sale_item_id=sale_item.id,
-            product_id=sale_item.product_id,
-            product_name=sale_item.product_name,
-            product_sku=sale_item.product_sku,
-            product_barcode=sale_item.product_barcode,
+            sale_item_id=item_data["compat_sale_item_id"],
+            source_type=item_data["source_type"],
+            source_item_id=item_data["source_item_id"],
+            product_id=item_data["product_id"],
+            product_name=item_data["product_name"],
+            product_sku=item_data["product_sku"],
+            product_barcode=item_data["product_barcode"],
             reason=item_data["reason"],
             quantity=item_data["quantity"],
             unit_price_original=item_data["unit_price_original"],
@@ -10091,11 +10374,12 @@ def create_change(
             total_credit=item_data["total_credit"],
         )
         db.add(db_return_item)
-        if status == "confirmed" and not sale_product_flags.get(int(sale_item.product_id or 0), False):
+        product_is_service = bool(db.query(models.Product.service).filter(models.Product.id == item_data["product_id"]).scalar())
+        if status == "confirmed" and not product_is_service:
             _create_inventory_movement(
                 db,
                 tenant_id=sale_change.tenant_id,
-                product_id=int(sale_item.product_id),
+                product_id=int(item_data["product_id"]),
                 qty_delta=abs(float(item_data["quantity"] or 0.0)),
                 reason="transfer_in",
                 notes=movement_note,
@@ -10297,6 +10581,17 @@ def void_change(
         raise ValueError(
             "No se puede anular un cambio cerrado; registra un ajuste nuevo"
         )
+    for item in sale_change.items_new:
+        consumed = _consumed_source_quantity(
+            db,
+            source_type="change",
+            source_item_id=item.id,
+            tenant_id=sale_change.tenant_id,
+        )
+        if consumed > 0.0001:
+            raise ValueError(
+                "No se puede anular este cambio porque uno de sus productos ya fue cambiado o devuelto"
+            )
 
     sale_change.status = "voided"
     sale_change.voided_at = datetime.utcnow()
@@ -15318,9 +15613,12 @@ def _build_pos_closure_snapshot(
                 station_bucket[f"total_{key}"] += payment_amount
             _add_method_amount(payment.method, payment_amount, refund=False)
         if float(change.refund_due or 0.0) > 0:
-            payment_totals["cash"] -= float(change.refund_due or 0.0)
-            station_bucket["total_cash"] -= float(change.refund_due or 0.0)
-            _add_method_amount("cash", float(change.refund_due or 0.0), refund=True)
+            refund_method = change.refund_method or "cash"
+            refund_key = method_map.get(refund_method.lower())
+            if refund_key:
+                payment_totals[refund_key] -= float(change.refund_due or 0.0)
+                station_bucket[f"total_{refund_key}"] -= float(change.refund_due or 0.0)
+            _add_method_amount(refund_method, float(change.refund_due or 0.0), refund=True)
 
     net_amount = total_amount - total_refunds + change_extra_total - change_refund_total
 

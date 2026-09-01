@@ -2076,6 +2076,12 @@ class SaleReturn(Base):
     adjustment_reference = Column(String, nullable=True)
     total_refund = Column(Float, nullable=False, default=0)
     closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True)
+    operation_pos_name = Column(String, nullable=True)
+    operation_station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    source_document_type = Column(String(16), nullable=False, default="sale")
+    source_document_id = Column(Integer, nullable=True)
+    source_document_number = Column(String, nullable=True)
 
     sale = relationship("Sale", back_populates="returns")
     closure = relationship("PosClosure", back_populates="returns")
@@ -2092,11 +2098,11 @@ class SaleReturn(Base):
 
     @property
     def station_id(self) -> Optional[str]:
-        return self.sale.station_id if self.sale else None
+        return self.operation_station_id or (self.sale.station_id if self.sale else None)
 
     @property
     def pos_name(self) -> Optional[str]:
-        return self.sale.pos_name if self.sale else None
+        return self.operation_pos_name or (self.sale.pos_name if self.sale else None)
 
     @property
     def sale_document_number(self) -> Optional[str]:
@@ -2115,6 +2121,8 @@ class SaleReturnItem(Base):
         index=True,
     )
     sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=False)
+    source_type = Column(String(16), nullable=False, default="sale")
+    source_item_id = Column(Integer, nullable=True, index=True)
 
     product_id = Column(Integer, nullable=False)
     product_name = Column(String, nullable=False)
@@ -2172,6 +2180,11 @@ class SaleChange(Base):
     pos_name = Column(String, nullable=True)
     seller_name = Column(String, nullable=True)
     station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    source_document_type = Column(String(16), nullable=False, default="sale")
+    source_document_id = Column(Integer, nullable=True)
+    source_document_number = Column(String, nullable=True)
+    refund_method = Column(String, nullable=True)
 
     total_credit = Column(Float, nullable=False, default=0)
     total_new = Column(Float, nullable=False, default=0)
@@ -2214,6 +2227,8 @@ class SaleChangeReturnItem(Base):
         index=True,
     )
     sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=False)
+    source_type = Column(String(16), nullable=False, default="sale")
+    source_item_id = Column(Integer, nullable=True, index=True)
 
     product_id = Column(Integer, nullable=False)
     product_name = Column(String, nullable=False)

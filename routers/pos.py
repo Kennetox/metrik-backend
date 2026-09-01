@@ -1605,6 +1605,20 @@ def create_return(
     return sale_return
 
 
+@router.get("/operation-documents/resolve", response_model=schemas.OperationDocumentRead)
+def resolve_operation_document(
+    code: str,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.returns")),
+):
+    """Resuelve códigos V/CB/DV y expone únicamente líneas aún disponibles."""
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    try:
+        return crud.resolve_operation_document(db, code, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/changes", response_model=schemas.SaleChangeRead, status_code=201)
 def create_change(
     change_in: schemas.SaleChangeCreate,

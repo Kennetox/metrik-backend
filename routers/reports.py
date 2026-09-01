@@ -708,11 +708,10 @@ def get_products_sold_report(
                     quantity = float(returned.quantity or 0.0)
                     if quantity <= 0:
                         continue
-                    key = _item_key_from_values(
-                        returned.sale_item_id,
-                        returned.product_id,
-                        returned.product_sku,
-                        returned.product_name,
+                    key = (
+                        f"change:{returned.source_item_id}"
+                        if (returned.source_type or "sale") == "change" and returned.source_item_id
+                        else _item_key_from_values(returned.sale_item_id, returned.product_id, returned.product_sku, returned.product_name)
                     )
                     existing = item_map.get(key)
                     if not existing:
@@ -733,11 +732,10 @@ def get_products_sold_report(
                     quantity = float(returned.quantity or 0.0)
                     if quantity <= 0:
                         continue
-                    key = _item_key_from_values(
-                        returned.sale_item_id,
-                        returned.product_id,
-                        returned.product_sku,
-                        returned.product_name,
+                    key = (
+                        f"change:{returned.source_item_id}"
+                        if (returned.source_type or "sale") == "change" and returned.source_item_id
+                        else _item_key_from_values(returned.sale_item_id, returned.product_id, returned.product_sku, returned.product_name)
                     )
                     existing = item_map.get(key)
                     if not existing:
@@ -754,12 +752,7 @@ def get_products_sold_report(
                     quantity = float(new_item.quantity or 0.0)
                     if quantity <= 0:
                         continue
-                    key = _item_key_from_values(
-                        None,
-                        new_item.product_id,
-                        new_item.product_sku,
-                        new_item.product_name,
-                    )
+                    key = f"change:{new_item.id}"
                     existing = item_map.get(key)
                     unit_price = float(new_item.unit_price or 0.0)
                     if existing:

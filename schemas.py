@@ -2786,7 +2786,9 @@ class ReturnPaymentRead(ReturnPaymentBase):
 
 
 class ReturnItemCreate(BaseModel):
-    sale_item_id: int
+    sale_item_id: Optional[int] = None
+    source_type: str = "sale"
+    source_item_id: Optional[int] = None
     quantity: float
     reason: Optional[str] = None
 
@@ -2794,6 +2796,8 @@ class ReturnItemCreate(BaseModel):
 class ReturnItemRead(BaseModel):
     id: int
     sale_item_id: int
+    source_type: str = "sale"
+    source_item_id: Optional[int] = None
     product_id: int
     product_name: str
     product_sku: Optional[str] = None
@@ -2816,6 +2820,9 @@ class SaleReturnCreate(BaseModel):
     status: Optional[str] = "confirmed"
     notes: Optional[str] = None
     created_by: Optional[str] = None
+    pos_name: Optional[str] = None
+    station_id: Optional[str] = None
+    source_document_number: Optional[str] = None
     items: List[ReturnItemCreate]
     payments: Optional[List[ReturnPaymentCreate]] = None
     refund_amount: Optional[float] = Field(default=None, gt=0)
@@ -2838,6 +2845,9 @@ class SaleReturnRead(BaseModel):
     created_at: datetime
     pos_name: Optional[str] = None
     station_id: Optional[str] = None
+    source_document_type: str = "sale"
+    source_document_id: Optional[int] = None
+    source_document_number: Optional[str] = None
     items: List[ReturnItemRead]
     payments: List[ReturnPaymentRead]
 
@@ -2846,7 +2856,9 @@ class SaleReturnRead(BaseModel):
 
 
 class SaleChangeReturnItemCreate(BaseModel):
-    sale_item_id: int
+    sale_item_id: Optional[int] = None
+    source_type: str = "sale"
+    source_item_id: Optional[int] = None
     quantity: float
     reason: Optional[str] = None
 
@@ -2869,6 +2881,8 @@ class SaleChangeCreate(BaseModel):
     status: Optional[str] = "confirmed"
     notes: Optional[str] = None
     created_by: Optional[str] = None
+    source_document_number: Optional[str] = None
+    refund_method: Optional[str] = None
     return_items: List[SaleChangeReturnItemCreate]
     new_items: List[SaleChangeNewItemCreate]
     payments: Optional[List[SaleChangePaymentCreate]] = None
@@ -2876,6 +2890,9 @@ class SaleChangeCreate(BaseModel):
 
 class SaleChangeReturnItemRead(BaseModel):
     id: int
+    sale_item_id: int
+    source_type: str = "sale"
+    source_item_id: Optional[int] = None
     product_id: int
     product_name: str
     product_sku: Optional[str] = None
@@ -2931,6 +2948,10 @@ class SaleChangeRead(BaseModel):
     pos_name: Optional[str] = None
     seller_name: Optional[str] = None
     station_id: Optional[str] = None
+    source_document_type: str = "sale"
+    source_document_id: Optional[int] = None
+    source_document_number: Optional[str] = None
+    refund_method: Optional[str] = None
     total_credit: float
     total_new: float
     net_total: float
@@ -2942,6 +2963,40 @@ class SaleChangeRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class OperationSourceLineRead(BaseModel):
+    source_type: str
+    source_item_id: int
+    product_id: int
+    product_name: str
+    product_sku: Optional[str] = None
+    product_barcode: Optional[str] = None
+    quantity: float
+    consumed_quantity: float
+    available_quantity: float
+    unit_value: float
+
+
+class OperationChainEntryRead(BaseModel):
+    document_type: str
+    document_id: int
+    document_number: str
+    status: str
+    created_at: datetime
+
+
+class OperationDocumentRead(BaseModel):
+    document_type: str
+    document_id: int
+    document_number: str
+    status: str
+    root_sale_id: int
+    root_sale_document_number: str
+    source_document_number: Optional[str] = None
+    items: List[OperationSourceLineRead] = []
+    chain: List[OperationChainEntryRead] = []
+    allowed_actions: List[str] = []
 
 
 class VoidRequest(BaseModel):

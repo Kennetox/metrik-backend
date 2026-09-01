@@ -128,6 +128,53 @@ def _ensure_combo_context_schema(connection, backend: str) -> None:
         _ensure_column(connection, table, column, "JSON")
 
 
+def _ensure_return_change_lineage_schema(connection, backend: str) -> None:
+    """Adds the polymorphic source needed for chained changes and returns."""
+    columns = {
+        "sale_returns": {
+            "operation_pos_name": "VARCHAR(255)",
+            "operation_station_id": "VARCHAR(255)",
+            "created_by_user_id": "INTEGER",
+            "source_document_type": "VARCHAR(16) NOT NULL DEFAULT 'sale'",
+            "source_document_id": "INTEGER",
+            "source_document_number": "VARCHAR(255)",
+        },
+        "sale_return_items": {
+            "source_type": "VARCHAR(16) NOT NULL DEFAULT 'sale'",
+            "source_item_id": "INTEGER",
+        },
+        "sale_changes": {
+            "created_by_user_id": "INTEGER",
+            "source_document_type": "VARCHAR(16) NOT NULL DEFAULT 'sale'",
+            "source_document_id": "INTEGER",
+            "source_document_number": "VARCHAR(255)",
+            "refund_method": "VARCHAR(255)",
+        },
+        "sale_change_return_items": {
+            "source_type": "VARCHAR(16) NOT NULL DEFAULT 'sale'",
+            "source_item_id": "INTEGER",
+        },
+    }
+    for table, table_columns in columns.items():
+        exists = _table_exists_postgres(connection, table) if backend == "postgresql" else _table_exists(connection, table)
+        if not exists:
+            continue
+        for column, ddl in table_columns.items():
+            if backend == "postgresql":
+                _ensure_column_postgres(connection, table, column, ddl)
+            else:
+                sqlite_ddl = ddl.replace("VARCHAR(255)", "TEXT").replace("VARCHAR(16)", "TEXT")
+                _ensure_column(connection, table, column, sqlite_ddl)
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS sale_return_items_source_idx "
+        "ON sale_return_items (tenant_id, source_type, source_item_id)"
+    ))
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS sale_change_return_items_source_idx "
+        "ON sale_change_return_items (tenant_id, source_type, source_item_id)"
+    ))
+
+
 def _ensure_web_catalog_category_home_schema(connection, backend: str) -> None:
     table = "web_catalog_categories"
     if backend == "postgresql":
@@ -2009,6 +2056,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "web_orders", "internal_approval_email_last_error", "TEXT")
                 _ensure_column_postgres(connection, "web_orders", "checkout_context_json", "JSON")
                 _ensure_combo_context_schema(connection, backend="postgresql")
+                _ensure_return_change_lineage_schema(connection, backend="postgresql")
                 _ensure_products_tenant_scoped_unique_indexes(connection, backend="postgresql")
                 _ensure_products_updated_at_trigger(connection, backend="postgresql")
                 _ensure_payment_methods_tenant_scoped_unique_indexes(connection, backend="postgresql")
@@ -2791,6 +2839,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 "FLOAT DEFAULT 0",
             )
             _ensure_combo_context_schema(connection, backend="sqlite")
+            _ensure_return_change_lineage_schema(connection, backend="sqlite")
 
             if not _table_exists(connection, "pos_customers"):
                 connection.execute(

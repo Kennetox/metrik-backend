@@ -1059,13 +1059,20 @@ def _generate_code128_svg(
 ) -> str:
     if not value:
         return ""
-    data = _sanitize_code128c_value(value)
-    if len(data) % 2 == 1:
-        data = f"0{data}"
-
-    codes = [105]  # Start Code C
-    for idx in range(0, len(data), 2):
-        codes.append(int(data[idx : idx + 2]))
+    raw = (value or "").strip().upper()
+    use_code_c = raw.isdigit()
+    data = _sanitize_code128c_value(raw) if use_code_c else "".join(
+        ch for ch in raw if 32 <= ord(ch) <= 126
+    ) or "0"
+    if use_code_c:
+        if len(data) % 2 == 1:
+            data = f"0{data}"
+        codes = [105]  # Start Code C
+        for idx in range(0, len(data), 2):
+            codes.append(int(data[idx : idx + 2]))
+    else:
+        codes = [104]  # Start Code B
+        codes.extend(ord(ch) - 32 for ch in data)
 
     checksum = codes[0]
     for idx in range(1, len(codes)):
@@ -1136,12 +1143,7 @@ def _render_modern_ticket_html(
     customer_block = _customer_block(sale)
     cart_discount_label, cart_discount_display = _cart_discount_meta(sale)
     footer_html = _footer_lines(company["footer"])
-    sale_number_str = str(sale_number or "")
-    numeric_sale = "".join(ch for ch in sale_number_str if ch.isdigit()) or sale_number_str
-    if not numeric_sale.isdigit():
-        numeric_sale = ""
-    padded_sale = numeric_sale.zfill(6) if numeric_sale else "000000"
-    barcode_svg = _generate_code128_svg(padded_sale, height=90.0, module_width=2.0, include_text=True, font_size=14.0, quiet_zone_modules=10)
+    barcode_svg = _generate_code128_svg(document_number, height=90.0, module_width=2.0, include_text=True, font_size=14.0, quiet_zone_modules=10)
     total_amount = _effective_total(sale)
     adjustment_badge, adjustment_note = _adjustment_meta(sale)
 
@@ -1305,11 +1307,8 @@ def _render_thermal_ticket_html(
             "</div>"
         )
 
-    sale_number_str = str(sale.sale_number or sale.id or "")
-    numeric_sale = "".join(ch for ch in sale_number_str if ch.isdigit())
-    padded_sale = (numeric_sale or "0").zfill(6)
     barcode_svg = _generate_code128_svg(
-        padded_sale,
+        document_number,
         height=30.0,
         module_width=2.0,
         include_text=True,

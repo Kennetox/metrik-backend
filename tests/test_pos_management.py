@@ -1079,8 +1079,9 @@ def _create_change_test_sale(
         .filter(models.SaleItem.sale_id == sale.id)
         .scalar()
     )
+    result = (sale.id, sale_item_id, sale_product.id, new_product.id)
     db.close()
-    return sale.id, sale_item_id, sale_product.id, new_product.id
+    return result
 
 
 def _create_change_discounted_sale():
@@ -1179,8 +1180,9 @@ def _create_change_discounted_sale():
         .filter(models.SaleItem.product_id == sale_product.id)
         .scalar()
     )
+    result = (sale.id, sale_item_id, sale_product.id, new_product.id)
     db.close()
-    return sale.id, sale_item_id, sale_product.id, new_product.id
+    return result
 
 
 def test_return_creates_inventory_entry(client: TestClient):
@@ -1309,3 +1311,118 @@ def test_change_accepts_discounted_ticket_with_integer_payment(client: TestClien
     assert data["extra_payment"] == 1000
     assert data["refund_due"] == 0
     assert data["payments"][0]["amount"] == 1000
+
+
+def test_chained_change_can_be_returned_once_and_preserves_lineage(client: TestClient):
+    headers = _auth_headers(client)
+    sale_id, sale_item_id, _, first_new_product_id = _create_change_test_sale(
+        sale_name="Producto cadena original",
+        sale_price=20000.0,
+        new_name="Producto cadena cambio uno",
+        new_price=20000.0,
+    )
+    first = client.post(
+        "/pos/changes",
+        json={
+            "sale_id": sale_id,
+            "return_items": [{"sale_item_id": sale_item_id, "quantity": 1}],
+            "new_items": [{"product_id": first_new_product_id, "quantity": 1}],
+        },
+        headers=headers,
+    )
+    assert first.status_code == 201, first.text
+    first_data = first.json()
+    first_source_id = first_data["items_new"][0]["id"]
+
+    db = TestingSessionLocal()
+    tenant_id = crud.get_default_tenant_id(db)
+    second_product = models.Product(
+        tenant_id=tenant_id,
+        name="Producto cadena cambio dos",
+        price=18000.0,
+        cost=9000.0,
+        unit="UND",
+        active=True,
+        service=False,
+        includes_tax=False,
+    )
+    db.add(second_product)
+    db.commit()
+    second_product_id = second_product.id
+    db.close()
+
+    second = client.post(
+        "/pos/changes",
+        json={
+            "sale_id": sale_id,
+            "source_document_number": first_data["document_number"],
+            "return_items": [{
+                "source_type": "change",
+                "source_item_id": first_source_id,
+                "quantity": 1,
+            }],
+            "new_items": [{"product_id": second_product_id, "quantity": 1}],
+            "refund_method": "card",
+        },
+        headers=headers,
+    )
+    assert second.status_code == 201, second.text
+    second_data = second.json()
+    assert second_data["source_document_type"] == "change"
+    assert second_data["source_document_number"] == first_data["document_number"]
+    assert second_data["refund_due"] == 2000
+    assert second_data["refund_method"] == "card"
+
+    duplicate = client.post(
+        "/pos/returns",
+        json={
+            "sale_id": sale_id,
+            "items": [{
+                "source_type": "change",
+                "source_item_id": first_source_id,
+                "quantity": 1,
+            }],
+            "payments": [{"method": "cash", "amount": 20000}],
+        },
+        headers=headers,
+    )
+    assert duplicate.status_code == 400
+    assert "cantidad disponible" in duplicate.json()["detail"].lower()
+
+    resolved_first = client.get(
+        "/pos/operation-documents/resolve",
+        params={"code": first_data["document_number"]},
+        headers=headers,
+    )
+    assert resolved_first.status_code == 200
+    assert resolved_first.json()["items"][0]["available_quantity"] == 0
+    assert resolved_first.json()["allowed_actions"] == []
+
+    second_source_id = second_data["items_new"][0]["id"]
+    returned = client.post(
+        "/pos/returns",
+        json={
+            "sale_id": sale_id,
+            "source_document_number": second_data["document_number"],
+            "items": [{
+                "source_type": "change",
+                "source_item_id": second_source_id,
+                "quantity": 1,
+            }],
+            "payments": [{"method": "card", "amount": 18000}],
+        },
+        headers=headers,
+    )
+    assert returned.status_code == 201, returned.text
+    returned_data = returned.json()
+    assert returned_data["source_document_type"] == "change"
+    assert returned_data["source_document_number"] == second_data["document_number"]
+    assert returned_data["total_refund"] == 18000
+
+    cannot_void_parent = client.post(
+        f"/pos/changes/{first_data['id']}/void",
+        json={"reason": "No debe romper la cadena"},
+        headers=headers,
+    )
+    assert cannot_void_parent.status_code == 400
+    assert "ya fue cambiado o devuelto" in cannot_void_parent.json()["detail"]

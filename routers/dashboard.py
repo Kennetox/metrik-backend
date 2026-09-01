@@ -565,7 +565,10 @@ def get_payment_methods_summary(
                 )
                 payment_totals[method] += float(payment.amount or 0.0)
             if float(change.refund_due or 0.0) > 0:
-                payment_totals["cash"] -= float(change.refund_due or 0.0)
+                refund_method = _normalize_payment_method_for_summary(
+                    change.refund_method or "cash", payment_method_aliases
+                )
+                payment_totals[refund_method] -= float(change.refund_due or 0.0)
 
         payment_methods: List[schemas.PaymentMethodSummary] = []
         for method, total in payment_totals.items():
@@ -993,7 +996,10 @@ def get_dashboard_summary(
             )
             payment_totals[method] += float(payment.amount or 0.0)
         if float(change.refund_due or 0.0) > 0:
-            payment_totals["cash"] -= float(change.refund_due or 0.0)
+            refund_method = _normalize_payment_method_for_summary(
+                change.refund_method or "cash", payment_method_aliases
+            )
+            payment_totals[refund_method] -= float(change.refund_due or 0.0)
 
     payment_methods: List[schemas.PaymentMethodSummary] = []
     for method, total in payment_totals.items():
