@@ -179,14 +179,16 @@ def create_user_notification(
     action_label: str | None = None,
     action_href: str | None = None,
     dedupe_key: str | None = None,
+    supersede_dedupe_prefix: str | None = None,
     payload: dict[str, Any] | None = None,
     expires_at: datetime | None = None,
     commit: bool = True,
 ) -> tuple[models.UserNotification, bool]:
     """Creates one inbox item, returning ``(notification, created)``.
 
-    ``dedupe_key`` makes recurring producers idempotent per tenant and recipient;
-    Kora can use a value such as ``web-opportunities:2026-W30``.
+    ``dedupe_key`` makes recurring producers idempotent per tenant and recipient.
+    ``supersede_dedupe_prefix`` turns recurring notices into a thread: a new
+    cycle dismisses older visible cycles with the same prefix.
     """
 
     clean_title, clean_message = _validate_notification_content(
@@ -208,6 +210,14 @@ def create_user_notification(
         raise ValueError("El destinatario no pertenece a la empresa indicada")
 
     clean_dedupe_key = dedupe_key.strip() if dedupe_key else None
+    clean_supersede_prefix = (
+        supersede_dedupe_prefix.strip() if supersede_dedupe_prefix else None
+    )
+    if clean_supersede_prefix and (
+        not clean_dedupe_key or not clean_dedupe_key.startswith(clean_supersede_prefix)
+    ):
+        raise ValueError("El hilo de notificación no coincide con su clave de deduplicación")
+    existing = None
     if clean_dedupe_key:
         existing = (
             db.query(models.UserNotification)
@@ -218,8 +228,35 @@ def create_user_notification(
             )
             .first()
         )
-        if existing:
-            return existing, False
+
+    if clean_supersede_prefix:
+        now = datetime.utcnow()
+        previous_query = db.query(models.UserNotification).filter(
+            models.UserNotification.tenant_id == tenant_id,
+            models.UserNotification.user_id == user_id,
+            models.UserNotification.dismissed_at.is_(None),
+            models.UserNotification.dedupe_key.startswith(
+                clean_supersede_prefix,
+                autoescape=True,
+            ),
+        )
+        if clean_dedupe_key:
+            previous_query = previous_query.filter(
+                models.UserNotification.dedupe_key != clean_dedupe_key
+            )
+        previous_query.filter(models.UserNotification.read_at.is_(None)).update(
+            {models.UserNotification.read_at: now},
+            synchronize_session=False,
+        )
+        previous_query.update(
+            {models.UserNotification.dismissed_at: now},
+            synchronize_session=False,
+        )
+    if existing:
+        if commit:
+            db.commit()
+            db.refresh(existing)
+        return existing, False
 
     notification = models.UserNotification(
         tenant_id=tenant_id,
@@ -263,6 +300,7 @@ def distribute_notification(
     action_label: str | None = None,
     action_href: str | None = None,
     dedupe_key: str | None = None,
+    supersede_dedupe_prefix: str | None = None,
     payload: dict[str, Any] | None = None,
     expires_at: datetime | None = None,
 ) -> NotificationDistributionResult:
@@ -301,6 +339,7 @@ def distribute_notification(
                 action_label=action_label,
                 action_href=action_href,
                 dedupe_key=dedupe_key,
+                supersede_dedupe_prefix=supersede_dedupe_prefix,
                 payload=payload,
                 expires_at=expires_at,
                 commit=False,

@@ -121,6 +121,11 @@ def test_operational_notifications_are_targeted_summarized_and_deduplicated(clie
         repeated_content = dispatch_web_content_renewal_notifications(
             db, tenant_id=tenant.id, reference_time=reference
         )
+        next_day_separated = dispatch_separated_order_notifications(
+            db,
+            tenant_id=tenant.id,
+            reference_time=reference + timedelta(days=1),
+        )
 
         assert separated is not None and separated.created_count == 2
         assert set(separated.recipient_ids) == {admin.id, seller.id}
@@ -128,6 +133,7 @@ def test_operational_notifications_are_targeted_summarized_and_deduplicated(clie
         assert set(content.recipient_ids) == {admin.id, web_manager.id}
         assert repeated_separated is not None and repeated_separated.created_count == 0
         assert repeated_content is not None and repeated_content.created_count == 0
+        assert next_day_separated is not None and next_day_separated.created_count == 2
 
         notifications = (
             db.query(models.UserNotification)
@@ -146,6 +152,15 @@ def test_operational_notifications_are_targeted_summarized_and_deduplicated(clie
         assert content_notice.payload["renew_count"] == 2
         assert content_notice.payload["change_soon_count"] == 1
         assert {item["slot"] for item in content_notice.payload["content"] if item["kind"] == "slider"} == {1, 2}
+        visible_separated = [
+            item
+            for item in notifications
+            if item.category == "separated_follow_up" and item.dismissed_at is None
+        ]
+        assert len(visible_separated) == 2
+        assert {
+            item.dedupe_key for item in visible_separated
+        } == {"operations:separated:2026-07-23"}
 
         db.query(models.UserNotification).filter(
             models.UserNotification.tenant_id == tenant.id

@@ -494,6 +494,7 @@ def dispatch_web_opportunity_notifications(
         action_label="Revisar productos",
         action_href="/dashboard/comercio-web",
         dedupe_key=f"kora:web-opportunities:v2:{dedupe_suffix}",
+        supersede_dedupe_prefix="kora:web-opportunities:v2:",
         payload={
             "radar_version": 2,
             "generated_at": analysis.generated_at.isoformat(),

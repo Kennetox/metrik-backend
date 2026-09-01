@@ -98,6 +98,89 @@ def test_personal_notification_lifecycle_and_deduplication(client: TestClient):
     assert all(item["id"] != notification_id for item in refreshed.json()["items"])
 
 
+def test_notification_thread_keeps_only_latest_cycle_visible(client: TestClient):
+    _auth_headers(client)
+    with TestingSessionLocal() as db:
+        user = crud.get_pos_user_by_email(db, "master@kensar.com")
+        assert user is not None and user.tenant_id is not None
+        prefix = "test:recurring-thread:"
+        try:
+            first, first_created = create_user_notification(
+                db,
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                title="Pendiente recurrente",
+                message="La tarea sigue pendiente.",
+                dedupe_key=f"{prefix}cycle-1",
+                supersede_dedupe_prefix=prefix,
+            )
+            latest, latest_created = create_user_notification(
+                db,
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                title="Pendiente recurrente",
+                message="La tarea sigue pendiente.",
+                dedupe_key=f"{prefix}cycle-2",
+                supersede_dedupe_prefix=prefix,
+            )
+            repeated, repeated_created = create_user_notification(
+                db,
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                title="Pendiente recurrente",
+                message="La tarea sigue pendiente.",
+                dedupe_key=f"{prefix}cycle-2",
+                supersede_dedupe_prefix=prefix,
+            )
+
+            db.refresh(first)
+            assert first_created is True
+            assert first.read_at is not None
+            assert first.dismissed_at is not None
+            assert latest_created is True
+            assert latest.dismissed_at is None
+            assert repeated_created is False
+            assert repeated.id == latest.id
+
+            first.dismissed_at = None
+            first.read_at = None
+            db.commit()
+            repeated_after_legacy_duplicate, legacy_duplicate_created = (
+                create_user_notification(
+                    db,
+                    tenant_id=user.tenant_id,
+                    user_id=user.id,
+                    title="Pendiente recurrente",
+                    message="La tarea sigue pendiente.",
+                    dedupe_key=f"{prefix}cycle-2",
+                    supersede_dedupe_prefix=prefix,
+                )
+            )
+            db.refresh(first)
+            assert legacy_duplicate_created is False
+            assert repeated_after_legacy_duplicate.id == latest.id
+            assert first.dismissed_at is not None
+
+            visible = (
+                db.query(models.UserNotification)
+                .filter(
+                    models.UserNotification.tenant_id == user.tenant_id,
+                    models.UserNotification.user_id == user.id,
+                    models.UserNotification.dedupe_key.startswith(prefix),
+                    models.UserNotification.dismissed_at.is_(None),
+                )
+                .all()
+            )
+            assert [notification.id for notification in visible] == [latest.id]
+        finally:
+            db.query(models.UserNotification).filter(
+                models.UserNotification.tenant_id == user.tenant_id,
+                models.UserNotification.user_id == user.id,
+                models.UserNotification.dedupe_key.startswith(prefix),
+            ).delete(synchronize_session=False)
+            db.commit()
+
+
 def test_dismiss_all_notifications_empties_personal_inbox(client: TestClient):
     headers = _auth_headers(client)
     with TestingSessionLocal() as db:

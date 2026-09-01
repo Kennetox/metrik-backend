@@ -112,6 +112,7 @@ def dispatch_separated_order_notifications(
         action_label="Revisar separados",
         action_href="/dashboard",
         dedupe_key=f"operations:separated:{local_now.date().isoformat()}",
+        supersede_dedupe_prefix="operations:separated:",
         payload={
             "generated_at": now.isoformat(),
             "overdue_count": len(overdue),
@@ -202,6 +203,7 @@ def dispatch_web_content_renewal_notifications(
         action_label="Revisar contenido",
         action_href="/dashboard/comercio-web",
         dedupe_key=f"operations:web-content:{iso_year}-W{iso_week:02d}",
+        supersede_dedupe_prefix="operations:web-content:",
         payload={
             "generated_at": now.isoformat(),
             "renew_count": renew_count,
