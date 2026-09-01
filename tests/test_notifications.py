@@ -1,10 +1,14 @@
+from copy import deepcopy
+
 from fastapi.testclient import TestClient
 
 import crud, models
+from security import hash_password
 from services.user_notifications import (
     create_user_notification,
     distribute_notification,
     resolve_notification_recipients,
+    user_can_receive_notification,
 )
 from conftest import TestingSessionLocal
 
@@ -199,6 +203,105 @@ def test_recipient_resolution_enforces_permission_status_and_module_assignment(
             db.commit()
             for user in (supervisor, seller, inactive):
                 db.delete(user)
+            db.commit()
+
+
+def test_notifications_require_parent_module_role_access(client: TestClient):
+    _auth_headers(client)
+    with TestingSessionLocal() as db:
+        admin = crud.get_pos_user_by_email(db, "master@kensar.com")
+        assert admin is not None and admin.tenant_id is not None
+        tenant = crud.get_tenant(db, admin.tenant_id)
+        assert tenant is not None
+        settings = crud.get_pos_settings(db, tenant_id=admin.tenant_id)
+        original_modules = tenant.enabled_modules
+        original_access = tenant.module_user_access
+        original_permissions = deepcopy(settings.role_permissions)
+        supervisor = _create_test_user(
+            db,
+            tenant_id=admin.tenant_id,
+            email="notifications-module-role@example.com",
+            role="Supervisor",
+        )
+        hidden_notification_id = None
+        try:
+            tenant.enabled_modules = list(
+                dict.fromkeys([*crud.get_tenant_enabled_modules(tenant), "commerce_web"])
+            )
+            tenant.module_user_access = {
+                **(original_access or {}),
+                "commerce_web": [admin.id, supervisor.id],
+            }
+            permissions_matrix = crud.get_role_permissions(db, tenant_id=admin.tenant_id)
+            commerce_module = next(
+                module for module in permissions_matrix if module["id"] == "commerce_web"
+            )
+            commerce_module["roles"]["Supervisor"] = False
+            manage_action = next(
+                action
+                for action in commerce_module["actions"]
+                if action["id"] == "commerce_web.manage"
+            )
+            manage_action["roles"]["Supervisor"] = True
+            settings.role_permissions = permissions_matrix
+            db.commit()
+
+            recipients = resolve_notification_recipients(
+                db,
+                tenant_id=admin.tenant_id,
+                module_id="commerce_web",
+                required_permission="commerce_web.manage",
+                user_ids=[admin.id, supervisor.id],
+            )
+            assert {user.id for user in recipients} == {admin.id}
+            assert user_can_receive_notification(
+                tenant=tenant,
+                user=supervisor,
+                permission_matrix=permissions_matrix,
+                module_id="commerce_web",
+                required_permission="commerce_web.manage",
+            ) is False
+
+            supervisor.password_hash = hash_password("module-role-test-password")
+            hidden_notification, _ = create_user_notification(
+                db,
+                tenant_id=admin.tenant_id,
+                user_id=supervisor.id,
+                title="Contenido web pendiente",
+                message="Este aviso anterior ya no debe ser visible.",
+                module_id="commerce_web",
+                required_permission="commerce_web.manage",
+                dedupe_key="test:hidden-parent-module-role",
+            )
+            hidden_notification_id = hidden_notification.id
+            login = client.post(
+                "/auth/login",
+                json={
+                    "email": supervisor.email,
+                    "password": "module-role-test-password",
+                },
+            )
+            assert login.status_code == 200
+            inbox = client.get(
+                "/notifications",
+                headers={"Authorization": f"Bearer {login.json()['token']}"},
+            )
+            assert inbox.status_code == 200
+            assert all(
+                item["id"] != hidden_notification_id for item in inbox.json()["items"]
+            )
+        finally:
+            if hidden_notification_id is not None:
+                db.query(models.UserNotification).filter(
+                    models.UserNotification.id == hidden_notification_id
+                ).delete(synchronize_session=False)
+            tenant.enabled_modules = original_modules
+            tenant.module_user_access = original_access
+            settings.role_permissions = original_permissions
+            db.query(models.PosSession).filter(
+                models.PosSession.user_id == supervisor.id
+            ).delete(synchronize_session=False)
+            db.delete(supervisor)
             db.commit()
 
 

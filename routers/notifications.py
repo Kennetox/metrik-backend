@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 import crud, models, schemas
 from database import get_db
 from dependencies import get_current_active_user
-from services import permissions
+from services.user_notifications import user_can_receive_notification
 
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -30,19 +30,13 @@ def _is_visible_to_user(
     tenant: models.Tenant | None,
     permission_matrix,
 ) -> bool:
-    if notification.module_id and not crud.can_user_access_tenant_module(
-        tenant,
-        notification.module_id,
+    return user_can_receive_notification(
+        tenant=tenant,
         user=user,
-    ):
-        return False
-    if notification.required_permission and not permissions.role_has_permission(
-        permission_matrix,
-        notification.required_permission,
-        user.role,
-    ):
-        return False
-    return True
+        permission_matrix=permission_matrix,
+        module_id=notification.module_id,
+        required_permission=notification.required_permission,
+    )
 
 
 @router.get("", response_model=schemas.UserNotificationListRead)

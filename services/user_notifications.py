@@ -32,6 +32,39 @@ class NotificationDistributionResult:
         return len(self.duplicate_notification_ids)
 
 
+def user_can_receive_notification(
+    *,
+    tenant: models.Tenant | None,
+    user: models.PosUser,
+    permission_matrix,
+    module_id: str | None = None,
+    required_permission: str | None = None,
+) -> bool:
+    """Checks the same effective module and role access used by the dashboard.
+
+    A child action can remain enabled in a customized permission matrix even
+    when its parent module is disabled for the role. Notifications must honor
+    the parent module switch as well as the optional action permission.
+    """
+
+    if module_id:
+        if not crud.can_user_access_tenant_module(tenant, module_id, user=user):
+            return False
+        if not permissions.role_has_permission(
+            permission_matrix,
+            module_id,
+            user.role,
+        ):
+            return False
+    if required_permission and not permissions.role_has_permission(
+        permission_matrix,
+        required_permission,
+        user.role,
+    ):
+        return False
+    return True
+
+
 def _validate_notification_content(
     *,
     title: str,
@@ -103,8 +136,9 @@ def resolve_notification_recipients(
         query = query.filter(~models.PosUser.id.in_(excluded_ids))
 
     permission_matrix = None
-    if required_permission:
+    if module_id or required_permission:
         permission_matrix = crud.get_role_permissions(db, tenant_id=tenant_id)
+    if required_permission:
         known_permission_ids = {
             item_id
             for module in permission_matrix
@@ -118,16 +152,12 @@ def resolve_notification_recipients(
             raise ValueError("Permiso de notificación no válido")
     recipients: list[models.PosUser] = []
     for user in query.order_by(models.PosUser.id.asc()).all():
-        if module_id and not crud.can_user_access_tenant_module(
-            tenant,
-            module_id,
+        if not user_can_receive_notification(
+            tenant=tenant,
             user=user,
-        ):
-            continue
-        if required_permission and not permissions.role_has_permission(
-            permission_matrix,
-            required_permission,
-            user.role,
+            permission_matrix=permission_matrix,
+            module_id=module_id,
+            required_permission=required_permission,
         ):
             continue
         recipients.append(user)
