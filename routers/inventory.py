@@ -748,7 +748,7 @@ def _build_recount_summary(
     )
 
 
-def _build_recount_read(
+def build_inventory_recount_read(
     db: Session,
     recount: models.InventoryRecount,
     tenant_id: int | None,
@@ -889,7 +889,7 @@ def list_inventory_recounts(
         .limit(limit)
         .all()
     )
-    items = [_build_recount_read(db, recount, tenant_id) for recount in rows]
+    items = [build_inventory_recount_read(db, recount, tenant_id) for recount in rows]
     return schemas.InventoryRecountPage(items=items, total=total, skip=skip, limit=limit)
 
 
@@ -999,7 +999,7 @@ def create_inventory_recount(
 
     db.commit()
     db.refresh(recount)
-    return _build_recount_read(db, recount, tenant_id)
+    return build_inventory_recount_read(db, recount, tenant_id)
 
 
 @router.get("/recounts/{recount_id}", response_model=schemas.InventoryRecountDetail)
@@ -1069,7 +1069,7 @@ def get_inventory_recount_detail(
         )
 
     return schemas.InventoryRecountDetail(
-        recount=_build_recount_read(db, recount, tenant_id),
+        recount=build_inventory_recount_read(db, recount, tenant_id),
         lines=lines,
     )
 
@@ -1217,6 +1217,28 @@ def upsert_inventory_recount_line(
         .first()
     )
     if not line:
+        guided_plan = (
+            db.query(models.KoraStockPlan.id)
+            .filter(
+                models.KoraStockPlan.tenant_id == tenant_id,
+                models.KoraStockPlan.converted_recount_id == recount.id,
+            )
+            .first()
+        )
+        if guided_plan is not None:
+            belongs_to_plan = (
+                db.query(models.KoraStockPlanItem.id)
+                .filter(
+                    models.KoraStockPlanItem.plan_id == guided_plan.id,
+                    models.KoraStockPlanItem.product_id == payload.product_id,
+                )
+                .first()
+            )
+            if belongs_to_plan is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Este producto no pertenece al plan de saneamiento de Kora.",
+                )
         product = (
             db.query(models.Product)
             .filter(models.Product.id == payload.product_id)
@@ -1347,12 +1369,35 @@ def close_inventory_recount(
     recount = _get_recount_or_404(db, recount_id, tenant_id)
     if recount.status in ("applied", "cancelled"):
         raise HTTPException(status_code=400, detail="No se puede cerrar este recuento.")
+    guided_plan = (
+        db.query(models.KoraStockPlan.id)
+        .filter(
+            models.KoraStockPlan.tenant_id == tenant_id,
+            models.KoraStockPlan.converted_recount_id == recount.id,
+        )
+        .first()
+    )
+    if guided_plan is not None:
+        pending_lines = (
+            db.query(func.count(models.InventoryRecountLine.id))
+            .filter(
+                models.InventoryRecountLine.recount_id == recount.id,
+                models.InventoryRecountLine.counted_qty.is_(None),
+            )
+            .scalar()
+            or 0
+        )
+        if pending_lines:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Completa los {pending_lines} productos pendientes del plan de Kora antes de cerrar.",
+            )
     recount.status = "closed"
     recount.closed_by_user_id = current_user.id
     recount.closed_at = datetime.utcnow()
     db.commit()
     db.refresh(recount)
-    return _build_recount_read(db, recount, tenant_id)
+    return build_inventory_recount_read(db, recount, tenant_id)
 
 
 @router.post("/recounts/{recount_id}/cancel", response_model=schemas.InventoryRecountRead)
@@ -1385,7 +1430,7 @@ def cancel_inventory_recount(
         db.delete(draft)
     db.commit()
     db.refresh(recount)
-    return _build_recount_read(db, recount, tenant_id)
+    return build_inventory_recount_read(db, recount, tenant_id)
 
 
 @router.post("/recounts/{recount_id}/apply", response_model=schemas.InventoryRecountRead)
@@ -1455,7 +1500,7 @@ def apply_inventory_recount(
         db.delete(draft)
     db.commit()
     db.refresh(recount)
-    return _build_recount_read(db, recount, tenant_id)
+    return build_inventory_recount_read(db, recount, tenant_id)
 
 
 def _apply_product_filters(

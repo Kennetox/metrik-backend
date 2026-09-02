@@ -1275,6 +1275,97 @@ class InventoryRecountPage(BaseModel):
     limit: int
 
 
+class KoraStockPlanItemRead(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    group_name: Optional[str] = None
+    system_qty: float
+    unit_cost: float
+    unit_price: float
+    cost_impact: float
+    sale_impact: float
+    units_sold_lookback: float
+    web_published: bool
+    priority_rank: int
+    priority_score: float
+    reasons: List[str] = Field(default_factory=list)
+    last_sale_at: Optional[datetime] = None
+    last_movement_at: Optional[datetime] = None
+    last_recount_at: Optional[datetime] = None
+
+
+class KoraStockPlanOperationalContextRead(BaseModel):
+    scheduled_people: Optional[int] = None
+    scheduled_names: List[str] = Field(default_factory=list)
+    reserved_for_sales: int = 1
+    reserved_for_receiving: int = 0
+    available_people: Optional[int] = None
+    open_receiving_count: int = 0
+    open_receiving_codes: List[str] = Field(default_factory=list)
+    sales_count_30m: int = 0
+    sales_total_30m: float = 0
+    workload_state: Literal["quiet", "normal", "busy", "unknown"] = "unknown"
+    automatic_plan_allowed: bool = False
+    automatic_reason: str = ""
+    presence_basis: Literal["published_schedule"] = "published_schedule"
+
+
+class KoraStockPlanRead(BaseModel):
+    id: int
+    code: str
+    status: Literal["ready", "converted", "completed", "expired", "cancelled"]
+    trigger: Literal["manual", "automatic"]
+    title: str
+    group_name: Optional[str] = None
+    requested_count: int
+    lookback_days: int
+    negative_sku_count: int
+    selected_count: int
+    total_negative_units: float
+    total_cost_impact: float
+    total_sale_impact: float
+    workload_state: Literal["quiet", "normal", "busy", "unknown"]
+    converted_recount_id: Optional[int] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    converted_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    context: KoraStockPlanOperationalContextRead
+    items: List[KoraStockPlanItemRead] = Field(default_factory=list)
+
+
+class KoraStockPlanRetrieveRequest(BaseModel):
+    requested_count: int = Field(default=15, ge=5, le=30)
+    lookback_days: int = Field(default=30, ge=7, le=90)
+    group_name: Optional[str] = Field(default=None, max_length=255)
+
+
+class KoraStockPlanConvertRequest(BaseModel):
+    stock_device_id: str = Field(min_length=1, max_length=255)
+    count_mode: InventoryRecountMode = "blind"
+
+
+class KoraStockPlanConversionRead(BaseModel):
+    plan: KoraStockPlanRead
+    recount: InventoryRecountRead
+
+
+class KoraStockPlanResponse(BaseModel):
+    generated_at: datetime
+    source: Literal["stock-sanitization-v1"] = "stock-sanitization-v1"
+    state: Literal["ready", "existing", "not_eligible", "no_candidates", "none"]
+    message: str
+    plan: Optional[KoraStockPlanRead] = None
+
+
+class KoraStockPlanListRead(BaseModel):
+    items: List[KoraStockPlanRead]
+    total: int
+
+
 class InventoryRecountDetail(BaseModel):
     recount: InventoryRecountRead
     lines: List[InventoryRecountLineRead]

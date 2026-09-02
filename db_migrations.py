@@ -1324,6 +1324,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_stock_devices_postgres(connection)
                 _ensure_table_demo_signup_audits_postgres(connection)
                 _ensure_table_user_notifications_postgres(connection)
+                _ensure_kora_stock_plan_schema(connection, backend="postgresql")
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -2085,6 +2086,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_tenants(connection)
                 _ensure_table_demo_signup_audits(connection)
                 _ensure_table_user_notifications(connection)
+                _ensure_kora_stock_plan_schema(connection, backend="sqlite")
                 _seed_default_tenant_sqlite(connection)
                 _ensure_column(
                     connection,
@@ -4121,6 +4123,176 @@ def _ensure_table_user_notifications(connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS ix_user_notifications_inbox
             ON user_notifications (tenant_id, user_id, dismissed_at, created_at)
+            """
+        )
+    )
+
+
+def _ensure_kora_stock_plan_schema(connection, backend: str) -> None:
+    """Creates the persisted hand-off between Kora and Metrik Stock."""
+
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS kora_stock_plans (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    code VARCHAR(32) UNIQUE,
+                    status VARCHAR(24) NOT NULL DEFAULT 'ready',
+                    trigger VARCHAR(24) NOT NULL DEFAULT 'manual',
+                    title VARCHAR(180) NOT NULL,
+                    group_name VARCHAR(255),
+                    requested_count INTEGER NOT NULL DEFAULT 15,
+                    lookback_days INTEGER NOT NULL DEFAULT 30,
+                    negative_sku_count INTEGER NOT NULL DEFAULT 0,
+                    selected_count INTEGER NOT NULL DEFAULT 0,
+                    total_negative_units DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    total_cost_impact DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    total_sale_impact DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    scheduled_people INTEGER,
+                    reserved_for_sales INTEGER NOT NULL DEFAULT 1,
+                    reserved_for_receiving INTEGER NOT NULL DEFAULT 0,
+                    available_people INTEGER,
+                    open_receiving_count INTEGER NOT NULL DEFAULT 0,
+                    sales_count_30m INTEGER NOT NULL DEFAULT 0,
+                    sales_total_30m DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    workload_state VARCHAR(24) NOT NULL DEFAULT 'unknown',
+                    context_snapshot JSONB,
+                    created_by_user_id INTEGER REFERENCES pos_users(id),
+                    converted_recount_id INTEGER REFERENCES inventory_recounts(id),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    converted_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    cancelled_at TIMESTAMP
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS kora_stock_plan_items (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    plan_id INTEGER NOT NULL REFERENCES kora_stock_plans(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL REFERENCES products(id),
+                    product_name_snapshot VARCHAR(255) NOT NULL,
+                    sku_snapshot VARCHAR(255),
+                    barcode_snapshot VARCHAR(255),
+                    group_name_snapshot VARCHAR(255),
+                    system_qty_snapshot DOUBLE PRECISION NOT NULL,
+                    unit_cost_snapshot DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    unit_price_snapshot DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    cost_impact_snapshot DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    sale_impact_snapshot DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    units_sold_lookback DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    web_published_snapshot BOOLEAN NOT NULL DEFAULT FALSE,
+                    priority_rank INTEGER NOT NULL,
+                    priority_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    reasons JSONB,
+                    last_sale_at TIMESTAMP,
+                    last_movement_at TIMESTAMP,
+                    last_recount_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_kora_stock_plan_product UNIQUE (plan_id, product_id)
+                )
+                """
+            )
+        )
+    else:
+        if not _table_exists(connection, "kora_stock_plans"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE kora_stock_plans (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        code TEXT UNIQUE,
+                        status TEXT NOT NULL DEFAULT 'ready',
+                        trigger TEXT NOT NULL DEFAULT 'manual',
+                        title TEXT NOT NULL,
+                        group_name TEXT,
+                        requested_count INTEGER NOT NULL DEFAULT 15,
+                        lookback_days INTEGER NOT NULL DEFAULT 30,
+                        negative_sku_count INTEGER NOT NULL DEFAULT 0,
+                        selected_count INTEGER NOT NULL DEFAULT 0,
+                        total_negative_units FLOAT NOT NULL DEFAULT 0,
+                        total_cost_impact FLOAT NOT NULL DEFAULT 0,
+                        total_sale_impact FLOAT NOT NULL DEFAULT 0,
+                        scheduled_people INTEGER,
+                        reserved_for_sales INTEGER NOT NULL DEFAULT 1,
+                        reserved_for_receiving INTEGER NOT NULL DEFAULT 0,
+                        available_people INTEGER,
+                        open_receiving_count INTEGER NOT NULL DEFAULT 0,
+                        sales_count_30m INTEGER NOT NULL DEFAULT 0,
+                        sales_total_30m FLOAT NOT NULL DEFAULT 0,
+                        workload_state TEXT NOT NULL DEFAULT 'unknown',
+                        context_snapshot JSON,
+                        created_by_user_id INTEGER,
+                        converted_recount_id INTEGER,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        expires_at DATETIME,
+                        converted_at DATETIME,
+                        completed_at DATETIME,
+                        cancelled_at DATETIME,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES pos_users(id),
+                        FOREIGN KEY(converted_recount_id) REFERENCES inventory_recounts(id)
+                    )
+                    """
+                )
+            )
+        if not _table_exists(connection, "kora_stock_plan_items"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE kora_stock_plan_items (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        plan_id INTEGER NOT NULL,
+                        product_id INTEGER NOT NULL,
+                        product_name_snapshot TEXT NOT NULL,
+                        sku_snapshot TEXT,
+                        barcode_snapshot TEXT,
+                        group_name_snapshot TEXT,
+                        system_qty_snapshot FLOAT NOT NULL,
+                        unit_cost_snapshot FLOAT NOT NULL DEFAULT 0,
+                        unit_price_snapshot FLOAT NOT NULL DEFAULT 0,
+                        cost_impact_snapshot FLOAT NOT NULL DEFAULT 0,
+                        sale_impact_snapshot FLOAT NOT NULL DEFAULT 0,
+                        units_sold_lookback FLOAT NOT NULL DEFAULT 0,
+                        web_published_snapshot INTEGER NOT NULL DEFAULT 0,
+                        priority_rank INTEGER NOT NULL,
+                        priority_score FLOAT NOT NULL DEFAULT 0,
+                        reasons JSON,
+                        last_sale_at DATETIME,
+                        last_movement_at DATETIME,
+                        last_recount_at DATETIME,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        FOREIGN KEY(plan_id) REFERENCES kora_stock_plans(id) ON DELETE CASCADE,
+                        FOREIGN KEY(product_id) REFERENCES products(id),
+                        CONSTRAINT uq_kora_stock_plan_product UNIQUE (plan_id, product_id)
+                    )
+                    """
+                )
+            )
+
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_kora_stock_plans_tenant_status_created
+            ON kora_stock_plans (tenant_id, status, created_at DESC)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_kora_stock_plan_items_tenant_product
+            ON kora_stock_plan_items (tenant_id, product_id)
             """
         )
     )

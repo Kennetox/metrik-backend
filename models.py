@@ -1582,6 +1582,100 @@ class UserNotification(Base):
     user = relationship("PosUser")
 
 
+class KoraStockPlan(Base):
+    """A deterministic stock-cleanup recommendation prepared by Kora.
+
+    The plan deliberately lives outside the recount workflow.  Metrik can
+    propose and retrieve it without consuming one of the open recount slots;
+    Metrik Stock will later convert it into a device-bound recount.
+    """
+
+    __tablename__ = "kora_stock_plans"
+    __table_args__ = (
+        Index(
+            "ix_kora_stock_plans_tenant_status_created",
+            "tenant_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    code = Column(String(32), unique=True, nullable=True, index=True)
+    status = Column(String(24), nullable=False, default="ready")
+    trigger = Column(String(24), nullable=False, default="manual")
+    title = Column(String(180), nullable=False)
+    group_name = Column(String(255), nullable=True)
+    requested_count = Column(Integer, nullable=False, default=15)
+    lookback_days = Column(Integer, nullable=False, default=30)
+    negative_sku_count = Column(Integer, nullable=False, default=0)
+    selected_count = Column(Integer, nullable=False, default=0)
+    total_negative_units = Column(Float, nullable=False, default=0)
+    total_cost_impact = Column(Float, nullable=False, default=0)
+    total_sale_impact = Column(Float, nullable=False, default=0)
+    scheduled_people = Column(Integer, nullable=True)
+    reserved_for_sales = Column(Integer, nullable=False, default=1)
+    reserved_for_receiving = Column(Integer, nullable=False, default=0)
+    available_people = Column(Integer, nullable=True)
+    open_receiving_count = Column(Integer, nullable=False, default=0)
+    sales_count_30m = Column(Integer, nullable=False, default=0)
+    sales_total_30m = Column(Float, nullable=False, default=0)
+    workload_state = Column(String(24), nullable=False, default="unknown")
+    context_snapshot = Column(JSON, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    converted_recount_id = Column(Integer, ForeignKey("inventory_recounts.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+
+    tenant = relationship("Tenant")
+    created_by = relationship("PosUser", foreign_keys=[created_by_user_id])
+    converted_recount = relationship("InventoryRecount", foreign_keys=[converted_recount_id])
+    items = relationship(
+        "KoraStockPlanItem",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by="KoraStockPlanItem.priority_rank",
+    )
+
+
+class KoraStockPlanItem(Base):
+    __tablename__ = "kora_stock_plan_items"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "product_id", name="uq_kora_stock_plan_product"),
+        Index("ix_kora_stock_plan_items_tenant_product", "tenant_id", "product_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    plan_id = Column(Integer, ForeignKey("kora_stock_plans.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    product_name_snapshot = Column(String(255), nullable=False)
+    sku_snapshot = Column(String, nullable=True)
+    barcode_snapshot = Column(String, nullable=True)
+    group_name_snapshot = Column(String(255), nullable=True)
+    system_qty_snapshot = Column(Float, nullable=False)
+    unit_cost_snapshot = Column(Float, nullable=False, default=0)
+    unit_price_snapshot = Column(Float, nullable=False, default=0)
+    cost_impact_snapshot = Column(Float, nullable=False, default=0)
+    sale_impact_snapshot = Column(Float, nullable=False, default=0)
+    units_sold_lookback = Column(Float, nullable=False, default=0)
+    web_published_snapshot = Column(Boolean, nullable=False, default=False)
+    priority_rank = Column(Integer, nullable=False)
+    priority_score = Column(Float, nullable=False, default=0)
+    reasons = Column(JSON, nullable=True)
+    last_sale_at = Column(DateTime, nullable=True)
+    last_movement_at = Column(DateTime, nullable=True)
+    last_recount_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    plan = relationship("KoraStockPlan", back_populates="items")
+    product = relationship("Product")
+
+
 class PosSession(Base):
     __tablename__ = "pos_sessions"
 

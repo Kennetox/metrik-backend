@@ -1021,7 +1021,10 @@ def _ask_openai(query: str, context: KoraAskContext | None, user: models.PosUser
     api_key = (os.getenv("KORA_OPENAI_API_KEY") or "").strip()
     if not api_key:
         return None
-    if not _env_bool("KORA_AI_ENABLED", True):
+    # Kora operativa is deterministic by default.  A paid AI provider must be
+    # enabled explicitly; having a stale API key in the environment is not
+    # enough to activate billing or external calls.
+    if not _env_bool("KORA_AI_ENABLED", False):
         return None
 
     model = (os.getenv("KORA_OPENAI_MODEL") or "gpt-4o-mini").strip()

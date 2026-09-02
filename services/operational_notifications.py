@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 import models
 from database import SessionLocal
-from services import tenant_modules
+from services import kora_stock_sanitization, tenant_modules
 from services.user_notifications import NotificationDistributionResult, distribute_notification
 
 
@@ -158,6 +159,8 @@ def dispatch_web_content_renewal_notifications(
         .order_by(models.WebCatalogHomeSlider.slot.asc())
         .all()
     )
+
+
     videos = (
         db.query(models.WebCatalogHomeVideo)
         .filter(
@@ -214,6 +217,86 @@ def dispatch_web_content_renewal_notifications(
     )
 
 
+def dispatch_stock_sanitization_notifications(
+    db: Session,
+    *,
+    tenant_id: int,
+    reference_time: datetime | None = None,
+) -> NotificationDistributionResult | None:
+    """Offers one ready stock-cleanup plan when the operation has capacity."""
+
+    context = kora_stock_sanitization.read_operational_context(
+        db,
+        tenant_id=tenant_id,
+        reference_time=reference_time,
+    )
+    if not context.automatic_plan_allowed:
+        return None
+    requested_count = 8 if (context.available_people or 0) == 1 else 12
+    if (context.available_people or 0) >= 3:
+        requested_count = 15
+    result = kora_stock_sanitization.retrieve_or_create_plan(
+        db,
+        tenant_id=tenant_id,
+        requested_count=requested_count,
+        trigger="automatic",
+        reference_time=reference_time,
+    )
+    plan = result.plan
+    if plan is None:
+        return None
+    plan_payload = json.loads(
+        json.dumps(
+            kora_stock_sanitization.serialize_plan(plan),
+            default=lambda value: value.isoformat() if isinstance(value, datetime) else str(value),
+        )
+    )
+    receiving_text = (
+        f" Hay {context.open_receiving_count} recepción activa y reservé dos personas para ella."
+        if context.open_receiving_count
+        else " No hay recepciones abiertas."
+    )
+    scheduled_text = (
+        f"Según el horario, hay {context.scheduled_people} personas en turno"
+        if context.scheduled_people is not None
+        else "No pude confirmar el turno publicado"
+    )
+    available_text = (
+        f" y quedan {context.available_people} con capacidad estimada"
+        if context.available_people is not None
+        else ""
+    )
+    message = (
+        f"{scheduled_text}{available_text}; hubo {context.sales_count_30m} venta"
+        f"{'s' if context.sales_count_30m != 1 else ''} en los últimos 30 minutos."
+        f"{receiving_text} Preparé {plan.selected_count} productos para revisar en Metrik Stock."
+    )
+    return distribute_notification(
+        db,
+        tenant_id=tenant_id,
+        source="kora",
+        category="stock_sanitization",
+        severity="info",
+        module_id="movements",
+        required_permission="movements.view",
+        title="Oportunidad para sanear el inventario",
+        message=message,
+        action_label="Ver lista propuesta",
+        action_href=f"/dashboard/movements?kora_plan={plan.id}",
+        dedupe_key=f"kora:stock-sanitization:{plan.id}",
+        supersede_dedupe_prefix="kora:stock-sanitization:",
+        payload={
+            "generated_at": context.generated_at.isoformat(),
+            "plan_id": int(plan.id),
+            "plan_code": plan.code,
+            "selected_count": int(plan.selected_count),
+            "negative_sku_count": int(plan.negative_sku_count),
+            "plan": plan_payload,
+        },
+        expires_at=plan.expires_at,
+    )
+
+
 def run_operational_notification_dispatch(
     reference_time: datetime | None = None,
 ) -> dict[str, int | str]:
@@ -242,6 +325,11 @@ def run_operational_notification_dispatch(
                     )
                     if content:
                         result["notifications_created"] = int(result["notifications_created"]) + content.created_count
+                stock_plan = dispatch_stock_sanitization_notifications(
+                    db, tenant_id=int(tenant.id), reference_time=reference_time
+                )
+                if stock_plan:
+                    result["notifications_created"] = int(result["notifications_created"]) + stock_plan.created_count
             except Exception:
                 db.rollback()
                 result["failed"] = int(result["failed"]) + 1

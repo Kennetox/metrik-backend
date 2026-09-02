@@ -48,6 +48,7 @@ from routers import (
     platform as platform_router,
     investment as investment_router,
     kora as kora_router,
+    kora_stock_plans as kora_stock_plans_router,
     legacy_imports as legacy_imports_router,
     documents as documents_router,
     notifications as notifications_router,
@@ -463,6 +464,14 @@ def _operational_notification_scheduler_enabled() -> bool:
     return True
 
 
+def _operational_notification_interval_seconds() -> int:
+    raw = (os.getenv("OPERATIONAL_NOTIFICATION_INTERVAL_SECONDS") or "1800").strip()
+    try:
+        return max(300, int(raw))
+    except (TypeError, ValueError):
+        return 1800
+
+
 async def _kora_web_opportunity_scheduler_loop():
     await asyncio.sleep(20)
     while True:
@@ -484,7 +493,7 @@ async def _operational_notification_scheduler_loop():
                 scheduler_logger.info("Operational notification scheduler: %s", result)
         except Exception:
             scheduler_logger.exception("Operational notification scheduler failed")
-        await asyncio.sleep(6 * 60 * 60)
+        await asyncio.sleep(_operational_notification_interval_seconds())
 
 
 @app.on_event("startup")
@@ -622,6 +631,7 @@ app.include_router(platform_router.router)
 app.include_router(investment_router.router)
 app.include_router(kora_router.router)
 app.include_router(kora_router.web_router)
+app.include_router(kora_stock_plans_router.router)
 app.include_router(legacy_imports_router.router)
 app.include_router(documents_router.router)
 app.include_router(notifications_router.router)
