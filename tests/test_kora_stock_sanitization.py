@@ -310,12 +310,30 @@ def test_stock_plan_api_retrieves_the_same_persisted_plan(client):
     assert current.status_code == 200
     assert current.json()["plan"]["id"] == created_payload["plan"]["id"]
 
+    converted = client.post(
+        f"/kora/stock-sanitization-plans/{created_payload['plan']['id']}/convert",
+        headers=headers,
+        json={"source": "web", "count_mode": "blind"},
+    )
+    assert converted.status_code == 200, converted.text
+    converted_payload = converted.json()
+    assert converted_payload["recount"]["source"] == "web"
+    assert converted_payload["recount"]["stock_device_id"] is None
+    assert converted_payload["recount"]["summary"]["total_lines"] == 5
+
     with TestingSessionLocal() as db:
         plan_id = created_payload["plan"]["id"]
+        recount_id = converted_payload["recount"]["id"]
+        db.query(models.InventoryRecountLine).filter(
+            models.InventoryRecountLine.recount_id == recount_id
+        ).delete(synchronize_session=False)
         db.query(models.KoraStockPlanItem).filter(
             models.KoraStockPlanItem.plan_id == plan_id
         ).delete(synchronize_session=False)
         db.query(models.KoraStockPlan).filter(models.KoraStockPlan.id == plan_id).delete(
+            synchronize_session=False
+        )
+        db.query(models.InventoryRecount).filter(models.InventoryRecount.id == recount_id).delete(
             synchronize_session=False
         )
         db.query(models.InventoryMovement).filter(

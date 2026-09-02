@@ -1345,7 +1345,8 @@ class KoraStockPlanRetrieveRequest(BaseModel):
 
 
 class KoraStockPlanConvertRequest(BaseModel):
-    stock_device_id: str = Field(min_length=1, max_length=255)
+    source: InventoryRecountSource = "app"
+    stock_device_id: Optional[str] = Field(default=None, max_length=255)
     count_mode: InventoryRecountMode = "blind"
 
 

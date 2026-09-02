@@ -140,24 +140,28 @@ def convert_stock_sanitization_plan(
     if not plan.items:
         raise HTTPException(status_code=409, detail="El plan no contiene productos para contar.")
 
-    device_id = payload.stock_device_id.strip()
-    stock_device = crud.get_stock_device(db, device_id, tenant_id=tenant_id)
-    if stock_device is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "DEVICE_NOT_ALLOWED",
-                "message": "El dispositivo de inventario no existe para esta empresa.",
-            },
-        )
-    if not stock_device.is_active:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "DEVICE_BLOCKED",
-                "message": "El dispositivo de inventario está inactivo.",
-            },
-        )
+    stock_device = None
+    if payload.source == "app":
+        device_id = (payload.stock_device_id or "").strip()
+        if not device_id:
+            raise HTTPException(status_code=422, detail="La app debe indicar su dispositivo de inventario.")
+        stock_device = crud.get_stock_device(db, device_id, tenant_id=tenant_id)
+        if stock_device is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DEVICE_NOT_ALLOWED",
+                    "message": "El dispositivo de inventario no existe para esta empresa.",
+                },
+            )
+        if not stock_device.is_active:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DEVICE_BLOCKED",
+                    "message": "El dispositivo de inventario está inactivo.",
+                },
+            )
 
     open_count = (
         db.query(func.count(models.InventoryRecount.id))
@@ -191,9 +195,9 @@ def convert_stock_sanitization_plan(
     recount = models.InventoryRecount(
         tenant_id=tenant_id,
         status="counting",
-        source="app",
-        stock_device_id=stock_device.id,
-        stock_device_name=stock_device.name,
+        source=payload.source,
+        stock_device_id=stock_device.id if stock_device else None,
+        stock_device_name=stock_device.name if stock_device else None,
         scope_type="free",
         count_mode=payload.count_mode,
         title=f"Kora · {plan.code}",
@@ -220,7 +224,8 @@ def convert_stock_sanitization_plan(
     plan.status = "converted"
     plan.converted_recount_id = recount.id
     plan.converted_at = now
-    stock_device.last_seen_at = now
+    if stock_device:
+        stock_device.last_seen_at = now
     db.commit()
     db.refresh(recount)
     db.refresh(plan)
