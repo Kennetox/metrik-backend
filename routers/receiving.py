@@ -271,7 +271,25 @@ def search_receiving_products(
         include_inactive=include_inactive,
         tenant_id=tenant_id,
     )
-    return [schemas.ReceivingProductLookup.model_validate(product) for product in products]
+    product_ids = [product.id for product in products]
+    last_movement_by_product: dict[int, datetime] = {}
+    if product_ids:
+        last_movement_by_product = dict(
+            db.query(
+                models.InventoryMovement.product_id,
+                func.max(models.InventoryMovement.created_at),
+            )
+            .filter(models.InventoryMovement.tenant_id == tenant_id)
+            .filter(models.InventoryMovement.product_id.in_(product_ids))
+            .group_by(models.InventoryMovement.product_id)
+            .all()
+        )
+    return [
+        schemas.ReceivingProductLookup.model_validate(product).model_copy(
+            update={"last_movement_at": last_movement_by_product.get(product.id)},
+        )
+        for product in products
+    ]
 
 
 @router.get("/products/resolve-by-barcode", response_model=schemas.ReceivingProductLookup | None)

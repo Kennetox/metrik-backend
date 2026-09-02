@@ -1044,6 +1044,29 @@ def get_inventory_recount_detail(
     else:
         line_query = line_query.order_by(models.InventoryRecountLine.product_name_snapshot.asc())
     line_rows = line_query.offset(skip).limit(limit).all()
+    product_ids = [line.product_id for line in line_rows]
+    price_by_product: dict[int, float] = {}
+    last_movement_by_product: dict[int, datetime] = {}
+    if product_ids:
+        price_by_product = {
+            product_id: float(price or 0.0)
+            for product_id, price in (
+                db.query(models.Product.id, models.Product.price)
+                .filter(models.Product.tenant_id == tenant_id if tenant_id is not None else true())
+                .filter(models.Product.id.in_(product_ids))
+                .all()
+            )
+        }
+        last_movement_by_product = dict(
+            db.query(
+                models.InventoryMovement.product_id,
+                func.max(models.InventoryMovement.created_at),
+            )
+            .filter(models.InventoryMovement.tenant_id == tenant_id if tenant_id is not None else true())
+            .filter(models.InventoryMovement.product_id.in_(product_ids))
+            .group_by(models.InventoryMovement.product_id)
+            .all()
+        )
     lines: List[schemas.InventoryRecountLineRead] = []
     for line in line_rows:
         diff_qty = (
@@ -1059,6 +1082,8 @@ def get_inventory_recount_detail(
                 sku=line.sku_snapshot,
                 barcode=line.barcode_snapshot,
                 group_name=line.group_name_snapshot,
+                price=price_by_product.get(line.product_id),
+                last_movement_at=last_movement_by_product.get(line.product_id),
                 system_qty=float(line.system_qty or 0.0),
                 counted_qty=float(line.counted_qty) if line.counted_qty is not None else None,
                 diff_qty=diff_qty,

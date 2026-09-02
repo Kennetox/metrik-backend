@@ -1224,6 +1224,8 @@ class InventoryRecountLineRead(BaseModel):
     sku: Optional[str] = None
     barcode: Optional[str] = None
     group_name: Optional[str] = None
+    price: Optional[float] = None
+    last_movement_at: Optional[datetime] = None
     system_qty: float
     counted_qty: Optional[float] = None
     diff_qty: Optional[float] = None
@@ -1463,6 +1465,7 @@ class ReceivingProductLookup(BaseModel):
     price: float
     cost: float
     label_format: Optional[str] = None
+    last_movement_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
