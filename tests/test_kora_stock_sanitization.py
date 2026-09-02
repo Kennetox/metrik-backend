@@ -65,12 +65,19 @@ def _negative_products(db, tenant_id: int, *, count: int = 8, group: str = "Cabl
     return products
 
 
-def _published_shift(db, tenant_id: int, *, names: list[str], reference: datetime = REFERENCE):
+def _published_shift(
+    db,
+    tenant_id: int,
+    *,
+    names: list[str],
+    reference: datetime = REFERENCE,
+    status: str = "published",
+):
     week = models.ScheduleWeek(
         tenant_id=tenant_id,
         week_start=reference.date() - timedelta(days=1),
-        status="published",
-        published_at=reference - timedelta(days=1),
+        status=status,
+        published_at=reference - timedelta(days=1) if status == "published" else None,
     )
     db.add(week)
     db.flush()
@@ -200,6 +207,39 @@ def test_automatic_notification_accounts_for_schedule_reception_and_sales(client
         )
         assert notification.payload["plan"]["selected_count"] == 12
         assert notification.payload["plan"]["context"]["open_receiving_count"] == 1
+
+
+def test_draft_schedule_is_valid_for_operational_capacity(client):
+    with TestingSessionLocal() as db:
+        draft_reference = REFERENCE + timedelta(days=14)
+        tenant = _tenant(db, "kora-stock-draft-schedule")
+        _admin(db, tenant.id, "draft-schedule")
+        _negative_products(db, tenant.id, count=8)
+        _published_shift(
+            db,
+            tenant.id,
+            names=["Erika", "Luz Aida", "Adriana", "Santiago"],
+            reference=draft_reference,
+            status="draft",
+        )
+        db.commit()
+
+        context = read_operational_context(db, tenant_id=tenant.id, reference_time=draft_reference)
+        notice = dispatch_stock_sanitization_notifications(
+            db,
+            tenant_id=tenant.id,
+            reference_time=draft_reference,
+        )
+
+        assert context.schedule_status == "draft"
+        assert context.scheduled_people == 4
+        assert context.available_people == 3
+        assert context.automatic_plan_allowed is True
+        assert notice is not None and notice.created_count == 1
+        notification = db.query(models.UserNotification).filter(
+            models.UserNotification.id == notice.created_notification_ids[0]
+        ).one()
+        assert notification.payload["plan"]["context"]["schedule_status"] == "draft"
 
 
 def test_automatic_plan_waits_when_recent_sales_are_busy(client):

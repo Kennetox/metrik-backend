@@ -1300,6 +1300,7 @@ class KoraStockPlanItemRead(BaseModel):
 class KoraStockPlanOperationalContextRead(BaseModel):
     scheduled_people: Optional[int] = None
     scheduled_names: List[str] = Field(default_factory=list)
+    schedule_status: Optional[Literal["published", "draft"]] = None
     reserved_for_sales: int = 1
     reserved_for_receiving: int = 0
     available_people: Optional[int] = None
@@ -1310,7 +1311,7 @@ class KoraStockPlanOperationalContextRead(BaseModel):
     workload_state: Literal["quiet", "normal", "busy", "unknown"] = "unknown"
     automatic_plan_allowed: bool = False
     automatic_reason: str = ""
-    presence_basis: Literal["published_schedule"] = "published_schedule"
+    presence_basis: Literal["published_schedule", "configured_schedule"] = "configured_schedule"
 
 
 class KoraStockPlanRead(BaseModel):

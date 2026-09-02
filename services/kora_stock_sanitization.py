@@ -33,6 +33,7 @@ class OperationalContext:
     local_date: date
     scheduled_people: int | None
     scheduled_names: tuple[str, ...]
+    schedule_status: Literal["published", "draft"] | None
     reserved_for_sales: int
     reserved_for_receiving: int
     available_people: int | None
@@ -112,14 +113,23 @@ def read_operational_context(
 ) -> OperationalContext:
     now = _utc_naive(reference_time)
     local_now = _local_now(reference_time)
-    shifts = (
+    week_start = local_now.date() - timedelta(days=local_now.weekday())
+    schedule_week = (
+        db.query(models.ScheduleWeek)
+        .filter(
+            models.ScheduleWeek.tenant_id == tenant_id,
+            models.ScheduleWeek.week_start == week_start,
+            models.ScheduleWeek.status.in_(["published", "draft"]),
+        )
+        .first()
+    )
+    shifts = [] if schedule_week is None else (
         db.query(models.ScheduleShift)
-        .join(models.ScheduleWeek, models.ScheduleWeek.id == models.ScheduleShift.week_id)
         .join(models.HREmployee, models.HREmployee.id == models.ScheduleShift.employee_id)
         .filter(models.ScheduleShift.tenant_id == tenant_id)
+        .filter(models.ScheduleShift.week_id == schedule_week.id)
         .filter(models.ScheduleShift.shift_date == local_now.date())
         .filter(models.ScheduleShift.is_time_off.is_(False))
-        .filter(models.ScheduleWeek.status == "published")
         .filter(models.HREmployee.status == "Activo")
         .all()
     )
@@ -137,7 +147,8 @@ def read_operational_context(
             }
         )
     )
-    scheduled_people = len(scheduled_names) if shifts else None
+    scheduled_people = len(scheduled_names) if schedule_week is not None else None
+    schedule_status = schedule_week.status if schedule_week is not None else None
 
     open_lots = (
         db.query(models.ReceivingLot)
@@ -180,7 +191,7 @@ def read_operational_context(
 
     if scheduled_people is None:
         automatic_allowed = False
-        automatic_reason = "No hay un horario publicado que permita estimar la capacidad del turno."
+        automatic_reason = "No hay un horario configurado que permita estimar la capacidad del turno."
     elif available_people <= 0:
         automatic_allowed = False
         automatic_reason = "El turno no tiene capacidad libre después de reservar ventas y recepción."
@@ -196,6 +207,7 @@ def read_operational_context(
         local_date=local_now.date(),
         scheduled_people=scheduled_people,
         scheduled_names=scheduled_names,
+        schedule_status=schedule_status,
         reserved_for_sales=reserved_for_sales,
         reserved_for_receiving=reserved_for_receiving,
         available_people=available_people,
@@ -457,6 +469,7 @@ def _context_snapshot(context: OperationalContext) -> dict[str, object]:
         "local_date": context.local_date.isoformat(),
         "scheduled_people": context.scheduled_people,
         "scheduled_names": list(context.scheduled_names),
+        "schedule_status": context.schedule_status,
         "reserved_for_sales": context.reserved_for_sales,
         "reserved_for_receiving": context.reserved_for_receiving,
         "available_people": context.available_people,
@@ -467,7 +480,7 @@ def _context_snapshot(context: OperationalContext) -> dict[str, object]:
         "workload_state": context.workload_state,
         "automatic_plan_allowed": context.automatic_plan_allowed,
         "automatic_reason": context.automatic_reason,
-        "presence_basis": "published_schedule",
+        "presence_basis": "configured_schedule",
     }
 
 
@@ -609,6 +622,7 @@ def serialize_plan(plan: models.KoraStockPlan) -> dict[str, object]:
     context = {
         "scheduled_people": plan.scheduled_people,
         "scheduled_names": list(snapshot.get("scheduled_names") or []),
+        "schedule_status": snapshot.get("schedule_status"),
         "reserved_for_sales": int(plan.reserved_for_sales or 0),
         "reserved_for_receiving": int(plan.reserved_for_receiving or 0),
         "available_people": plan.available_people,
@@ -619,7 +633,7 @@ def serialize_plan(plan: models.KoraStockPlan) -> dict[str, object]:
         "workload_state": plan.workload_state or "unknown",
         "automatic_plan_allowed": bool(snapshot.get("automatic_plan_allowed", False)),
         "automatic_reason": str(snapshot.get("automatic_reason") or ""),
-        "presence_basis": "published_schedule",
+        "presence_basis": str(snapshot.get("presence_basis") or "configured_schedule"),
     }
     return {
         "id": int(plan.id),
