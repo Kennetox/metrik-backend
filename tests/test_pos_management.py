@@ -684,6 +684,28 @@ def test_closure_does_not_subtract_original_change_after_payment_adjustment(
     assert preview["difference"] == 0.0
     assert sum(row["net"] for row in preview["methods_breakdown"]) == 32000.0
 
+    closure_response = client.post(
+        "/pos/closures",
+        json={
+            "pos_name": isolated_pos_name,
+            "counted_cash": 0.0,
+            "notes": "Cierre ajuste de pago",
+        },
+        headers=headers,
+    )
+    assert closure_response.status_code == 201
+    closure_data = closure_response.json()
+    for field in (
+        "total_amount",
+        "net_amount",
+        "total_cash",
+        "total_nequi",
+        "total_refunds",
+        "counted_cash",
+        "difference",
+        "methods_breakdown",
+    ):
+        assert closure_data[field] == preview[field]
 
 def test_closure_separated_clarification_totals(client: TestClient):
     headers = _auth_headers(client)
