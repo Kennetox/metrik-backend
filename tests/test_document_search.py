@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import event
 
 import models
-from services.document_search import search_documents
+from services.document_search import _summarize_item_rows, search_documents
 from tests.conftest import TestingSessionLocal, engine
 
 
@@ -46,6 +46,17 @@ def _clear_fixture_rows(db):
         synchronize_session=False
     )
     db.commit()
+
+
+def test_product_preview_is_compact_and_groups_repeated_lines():
+    assert _summarize_item_rows(
+        [
+            ("Campana mediana", 1),
+            ("Campana mediana", 1),
+            ("Baqueta", 1),
+            ("Correa", 1),
+        ]
+    ) == "Campana mediana ×2 · Baqueta ×1 · +1 más"
 
 
 def test_search_documents_merges_sources_and_filters_abonos():
@@ -116,11 +127,13 @@ def test_search_documents_merges_sources_and_filters_abonos():
 
         all_items, _ = _search(db, term="encontrable")
         assert [item["id"] for item in all_items] == [f"sale-{sale.id}"]
+        assert all_items[0]["content_summary"] == "Producto encontrable ×1"
 
         payments, has_more = _search(db, document_type="abono")
         assert has_more is False
         assert [item["payment_stage"] for item in payments] == ["posterior", "initial"]
         assert payments[0]["payment_method"] == "transfer"
+        assert payments[0]["content_summary"] == "Venta: Producto encontrable ×1"
 
         separated_sales, _ = _search(
             db, document_type="venta", payment_method="separated"
@@ -174,9 +187,9 @@ def test_search_documents_is_paginated_and_query_count_is_bounded():
         assert set(item["id"] for item in first).isdisjoint(
             item["id"] for item in second
         )
-        # Two source queries (Metrik + historical) per page; the amount does
-        # not grow with the number of matching documents.
-        assert statements <= 4
+        # Two source queries plus one batched product-preview query per page;
+        # the amount does not grow with the number of matching documents.
+        assert statements <= 6
     finally:
         event.remove(engine, "before_cursor_execute", count_selects)
         _clear_fixture_rows(db)

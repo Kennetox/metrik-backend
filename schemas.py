@@ -3632,6 +3632,7 @@ class DocumentSearchItem(BaseModel):
     document_number: str
     reference: str
     detail: str
+    content_summary: Optional[str] = None
     total: float = 0.0
     payment_method: Optional[str] = None
     payment_stage: Optional[Literal["initial", "posterior"]] = None

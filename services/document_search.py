@@ -55,6 +55,7 @@ def _base_item(
     payment_status: str | None = None,
     closure_id: int | None = None,
     source_system: str = "metrik",
+    content_summary: str | None = None,
 ) -> dict[str, Any]:
     return {
         "id": key,
@@ -76,7 +77,179 @@ def _base_item(
         "payment_status": payment_status,
         "closure_id": closure_id,
         "source_system": source_system,
+        "content_summary": content_summary,
     }
+
+
+def _format_item_quantity(value: Any) -> str:
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        numeric = 0
+    return str(int(numeric)) if numeric.is_integer() else f"{numeric:g}"
+
+
+def _summarize_item_rows(
+    items: Iterable[tuple[str, Any]],
+    *,
+    prefix: str | None = None,
+    limit: int = 2,
+) -> str:
+    grouped: dict[str, float] = {}
+    for raw_name, raw_quantity in items:
+        name = (raw_name or "Producto").strip() or "Producto"
+        try:
+            quantity = float(raw_quantity or 0)
+        except (TypeError, ValueError):
+            quantity = 0
+        grouped[name] = grouped.get(name, 0) + quantity
+    entries = [
+        f"{name} ×{_format_item_quantity(quantity)}"
+        for name, quantity in list(grouped.items())[:limit]
+    ]
+    remaining = max(0, len(grouped) - limit)
+    if remaining:
+        entries.append(f"+{remaining} más")
+    summary = " · ".join(entries)
+    return f"{prefix}: {summary}" if prefix and summary else summary
+
+
+def _group_preview_rows(rows: Iterable[Any]) -> dict[int, list[tuple[str, Any]]]:
+    grouped: dict[int, list[tuple[str, Any]]] = {}
+    for parent_id, name, quantity in rows:
+        grouped.setdefault(int(parent_id), []).append((name, quantity))
+    return grouped
+
+
+def _attach_content_summaries(
+    db: Session,
+    page: list[dict[str, Any]],
+    tenant_id: int | None,
+) -> None:
+    """Attach compact item previews using batched queries per document kind."""
+    if not page:
+        return
+
+    sale_ids = {
+        int(row["sale_id"] or row["record_id"])
+        for row in page
+        if row["type"] in {"venta", "abono"}
+        and not str(row["id"]).startswith("legacy-sale-")
+        and (row.get("sale_id") or row.get("record_id"))
+    }
+    sale_items: dict[int, list[tuple[str, Any]]] = {}
+    if sale_ids:
+        sale_items = _group_preview_rows(
+            db.query(
+                models.SaleItem.sale_id,
+                models.SaleItem.product_name,
+                models.SaleItem.quantity,
+            )
+            .filter(models.SaleItem.sale_id.in_(sale_ids))
+            .filter(_tenant_clause(models.SaleItem.tenant_id, tenant_id))
+            .order_by(models.SaleItem.sale_id, models.SaleItem.id)
+            .all()
+        )
+
+    preview_specs = [
+        ("legacy-sale-", models.LegacySaleItem, models.LegacySaleItem.legacy_sale_id, models.LegacySaleItem.product_name, models.LegacySaleItem.quantity, None),
+        ("web-order-", models.WebOrderItem, models.WebOrderItem.web_order_id, models.WebOrderItem.product_name_snapshot, models.WebOrderItem.quantity, None),
+        ("return-", models.SaleReturnItem, models.SaleReturnItem.return_id, models.SaleReturnItem.product_name, models.SaleReturnItem.quantity, "Devuelve"),
+        ("receiving-", models.ReceivingLotItem, models.ReceivingLotItem.lot_id, models.ReceivingLotItem.product_name_snapshot, models.ReceivingLotItem.qty_received, "Recibe"),
+        ("manual-movement-", models.ManualMovementDocumentLine, models.ManualMovementDocumentLine.document_id, models.ManualMovementDocumentLine.product_name_snapshot, models.ManualMovementDocumentLine.qty, None),
+        (
+            "recount-",
+            models.InventoryRecountLine,
+            models.InventoryRecountLine.recount_id,
+            models.InventoryRecountLine.product_name_snapshot,
+            func.coalesce(
+                models.InventoryRecountLine.counted_qty,
+                models.InventoryRecountLine.system_qty,
+            ),
+            "Conteo",
+        ),
+    ]
+    previews_by_prefix: dict[str, tuple[dict[int, list[tuple[str, Any]]], str | None]] = {}
+    for prefix, model, parent_column, name_column, quantity_column, label in preview_specs:
+        parent_ids = {
+            int(row["record_id"])
+            for row in page
+            if str(row["id"]).startswith(prefix)
+        }
+        if not parent_ids:
+            continue
+        preview_rows = (
+            db.query(parent_column, name_column, quantity_column)
+            .filter(parent_column.in_(parent_ids))
+            .filter(_tenant_clause(model.tenant_id, tenant_id))
+            .order_by(parent_column, model.id)
+            .all()
+        )
+        previews_by_prefix[prefix] = (_group_preview_rows(preview_rows), label)
+
+    change_ids = {
+        int(row["record_id"])
+        for row in page
+        if row["type"] == "cambio"
+    }
+    change_out: dict[int, list[tuple[str, Any]]] = {}
+    change_in: dict[int, list[tuple[str, Any]]] = {}
+    if change_ids:
+        change_out = _group_preview_rows(
+            db.query(
+                models.SaleChangeReturnItem.change_id,
+                models.SaleChangeReturnItem.product_name,
+                models.SaleChangeReturnItem.quantity,
+            )
+            .filter(models.SaleChangeReturnItem.change_id.in_(change_ids))
+            .filter(_tenant_clause(models.SaleChangeReturnItem.tenant_id, tenant_id))
+            .order_by(models.SaleChangeReturnItem.change_id, models.SaleChangeReturnItem.id)
+            .all()
+        )
+        change_in = _group_preview_rows(
+            db.query(
+                models.SaleChangeNewItem.change_id,
+                models.SaleChangeNewItem.product_name,
+                models.SaleChangeNewItem.quantity,
+            )
+            .filter(models.SaleChangeNewItem.change_id.in_(change_ids))
+            .filter(_tenant_clause(models.SaleChangeNewItem.tenant_id, tenant_id))
+            .order_by(models.SaleChangeNewItem.change_id, models.SaleChangeNewItem.id)
+            .all()
+        )
+
+    for row in page:
+        row_id = str(row["id"])
+        if row["type"] in {"venta", "abono"} and not row_id.startswith("legacy-sale-"):
+            sale_id = int(row.get("sale_id") or row["record_id"])
+            label = "Venta" if row["type"] == "abono" else None
+            row["content_summary"] = _summarize_item_rows(
+                sale_items.get(sale_id, []), prefix=label
+            )
+            continue
+        if row["type"] == "cambio":
+            outgoing = _summarize_item_rows(
+                change_out.get(int(row["record_id"]), []), prefix="Sale", limit=1
+            )
+            incoming = _summarize_item_rows(
+                change_in.get(int(row["record_id"]), []), prefix="Entra", limit=1
+            )
+            row["content_summary"] = " → ".join(
+                part for part in (outgoing, incoming) if part
+            )
+            continue
+        matched = False
+        for prefix, (grouped, label) in previews_by_prefix.items():
+            if row_id.startswith(prefix):
+                row["content_summary"] = _summarize_item_rows(
+                    grouped.get(int(row["record_id"]), []), prefix=label
+                )
+                matched = True
+                break
+        if not matched and row["type"] == "cierre":
+            row["content_summary"] = row["detail"]
+        if not row.get("content_summary"):
+            row["content_summary"] = "Sin productos detallados"
 
 
 def search_documents(
@@ -477,4 +650,5 @@ def search_documents(
 
     rows.sort(key=lambda row: (row["occurred_at"], row["id"]), reverse=True)
     page = rows[skip : skip + limit]
+    _attach_content_summaries(db, page, tenant_id)
     return page, len(rows) > skip + limit
