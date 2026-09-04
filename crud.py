@@ -15480,9 +15480,14 @@ def _build_pos_closure_snapshot(
                 station_bucket[f"total_{key}"] += amount_float
             _add_method_amount(method, amount_float, refund=False)
 
-        # El cambio de la venta (vuelto) siempre sale de caja en efectivo.
-        # Se descuenta del total de efectivo para no inflar cifras en cierre.
-        sale_change_amount = max(float(sale.change_amount or 0.0), 0.0)
+        # Los pagos de un ajuste ya representan la distribucion final neta de la
+        # venta. El cambio original solo se descuenta cuando usamos los pagos
+        # originales; de lo contrario se descontaria dos veces.
+        sale_change_amount = (
+            0.0
+            if adjusted_payments
+            else max(float(sale.change_amount or 0.0), 0.0)
+        )
         if sale_change_amount > 0:
             payment_totals["cash"] -= sale_change_amount
             station_bucket["total_cash"] -= sale_change_amount

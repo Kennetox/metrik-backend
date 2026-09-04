@@ -590,6 +590,101 @@ def test_closure_accumulates_surcharge(client: TestClient):
     assert data["total_surcharge"] == 25.0
 
 
+def test_closure_does_not_subtract_original_change_after_payment_adjustment(
+    client: TestClient,
+):
+    headers = _auth_headers(client)
+    isolated_pos_name = "POS AJUSTE PAGO NETO"
+    db = TestingSessionLocal()
+    try:
+        product = models.Product(
+            tenant_id=crud.get_default_tenant_id(db),
+            name="Producto ajuste de pago cierre",
+            price=32000.0,
+            cost=16000.0,
+            barcode=None,
+            unit="UND",
+            stock_min=0,
+            preferred_qty=0,
+            reorder_point=0,
+            low_stock_alert=False,
+            allow_price_change=False,
+            active=True,
+            service=False,
+            includes_tax=False,
+        )
+        db.add(product)
+        db.commit()
+        db.refresh(product)
+
+        sale = crud.create_sale(
+            db,
+            schemas.SaleCreate(
+                payment_method="cash",
+                total=32000.0,
+                paid_amount=50000.0,
+                change_amount=18000.0,
+                cart_discount_value=0.0,
+                cart_discount_percent=0.0,
+                customer_name="Test ajuste",
+                notes=None,
+                pos_name=isolated_pos_name,
+                vendor_name="Tester",
+                items=[
+                    schemas.SaleItemCreate(
+                        product_id=product.id,
+                        quantity=1,
+                        unit_price=32000.0,
+                        product_sku=product.sku,
+                        product_name=product.name,
+                        product_barcode=product.barcode,
+                        discount=0.0,
+                    )
+                ],
+                payments=[
+                    schemas.SalePaymentCreate(method="cash", amount=50000.0)
+                ],
+            ),
+        )
+        sale_id = sale.id
+    finally:
+        db.close()
+
+    adjustment_response = client.post(
+        f"/pos/documents/sale/{sale_id}/adjust",
+        json={
+            "adjustment_type": "payment",
+            "reason": "El pago neto se realizo por Nequi",
+            "total_delta": 0.0,
+            "payment_delta": -18000.0,
+            "payload": {
+                "payments": [{"method": "nequi", "amount": 32000.0}],
+            },
+        },
+        headers=headers,
+    )
+    assert adjustment_response.status_code == 201
+
+    preview_response = client.post(
+        "/pos/closures/preview",
+        json={
+            "pos_name": isolated_pos_name,
+            "counted_cash": 0.0,
+            "notes": "Vista previa ajuste de pago",
+        },
+        headers=headers,
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["sales_count"] == 1
+    assert preview["total_amount"] == 32000.0
+    assert preview["net_amount"] == 32000.0
+    assert preview["total_cash"] == 0.0
+    assert preview["total_nequi"] == 32000.0
+    assert preview["difference"] == 0.0
+    assert sum(row["net"] for row in preview["methods_breakdown"]) == 32000.0
+
+
 def test_closure_separated_clarification_totals(client: TestClient):
     headers = _auth_headers(client)
     db = TestingSessionLocal()
