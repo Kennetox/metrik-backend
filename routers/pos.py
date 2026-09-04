@@ -636,6 +636,29 @@ def _sum_payments(payments: list[tuple[str, float]]) -> float:
     return sum(amount for _, amount in payments)
 
 
+def _validate_payment_adjustment_with_change(
+    *,
+    adjusted_total: float,
+    effective_sale_total: float,
+    recorded_change: float,
+    is_separated: bool,
+) -> None:
+    """Prevent tendered cash/change from being reassigned as collected revenue."""
+    if (
+        not is_separated
+        and recorded_change > 0.01
+        and adjusted_total - effective_sale_total > 0.01
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "La distribución de pagos no puede incluir el cambio entregado. "
+                f"Debes distribuir máximo {effective_sale_total:.0f}, que es el valor "
+                "aplicado a la venta."
+            ),
+        )
+
+
 def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
     email = station.station_email if station else None
     return schemas.PosStationRead(
@@ -1436,6 +1459,8 @@ def create_document_adjustment(
                 numeric = float(amount or 0.0)
             except (TypeError, ValueError):
                 continue
+            if numeric <= 0:
+                continue
             payments_list.append((method, numeric))
 
     if adjustment_type == "note":
@@ -1504,6 +1529,12 @@ def create_document_adjustment(
             original_total = float(sale.paid_amount or sale.total or 0.0)
         expected_total = original_total + payment_delta
         adjusted_total = _sum_payments(payments_list)
+        _validate_payment_adjustment_with_change(
+            adjusted_total=adjusted_total,
+            effective_sale_total=current_effective_total,
+            recorded_change=float(sale.change_amount or 0.0),
+            is_separated=bool(sale.is_separated),
+        )
         if abs(adjusted_total - expected_total) > 0.01:
             raise HTTPException(
                 status_code=400,
