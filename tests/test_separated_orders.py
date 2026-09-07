@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import models
 import crud
+from services import ticket_renderer
 from tests.conftest import TestingSessionLocal
 
 
@@ -160,6 +161,27 @@ def test_create_and_pay_separated_order(client: TestClient):
     assert sale_data["cart_discount_percent"] == 0.0
     assert sale_data["balance"] == data["balance"]
     assert sale_data["surcharge_amount"] == 0.0
+
+    db = TestingSessionLocal()
+    stored_sale = crud.get_sale(db, sale_id)
+    assert stored_sale is not None
+    modern_ticket = ticket_renderer.render_sale_ticket_html(
+        stored_sale,
+        mode=ticket_renderer.TICKET_MODE,
+        payment_method_labels={"cash": "Efectivo", "transfer": "Transferencia"},
+    )
+    thermal_ticket = ticket_renderer.render_sale_ticket_html(
+        stored_sale,
+        mode=ticket_renderer.THERMAL_TICKET_MODE,
+        payment_method_labels={"cash": "Efectivo", "transfer": "Transferencia"},
+    )
+    db.close()
+    for ticket_html in (modern_ticket, thermal_ticket):
+        assert "VENTA POR SEPARADO" in ticket_html
+        assert "Abono inicial 1 · Efectivo" in ticket_html
+        assert "Abono inicial 2 · Transferencia" in ticket_html
+        assert "Saldo pendiente" in ticket_html
+        assert "Fecha límite" in ticket_html
 
     list_resp = client.get(f"/separated-orders?barcode={barcode}", headers=headers)
     assert list_resp.status_code == 200

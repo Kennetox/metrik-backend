@@ -10,6 +10,7 @@ import schemas
 import crud
 from tests.conftest import TestingSessionLocal
 from services import email as email_service
+from services import ticket_renderer
 
 
 def _auth_headers(client: TestClient):
@@ -709,6 +710,13 @@ def test_closure_does_not_subtract_original_change_after_payment_adjustment(
 
 def test_closure_separated_clarification_totals(client: TestClient):
     headers = _auth_headers(client)
+    customer_resp = client.post(
+        "/pos/customers",
+        json={"name": "Cliente Separado Cierre", "phone": "3007654321"},
+        headers=headers,
+    )
+    assert customer_resp.status_code == 201
+    customer_id = customer_resp.json()["id"]
     db = TestingSessionLocal()
     product = models.Product(
         tenant_id=crud.get_default_tenant_id(db),
@@ -739,7 +747,7 @@ def test_closure_separated_clarification_totals(client: TestClient):
         "change_amount": 0.0,
         "cart_discount_value": 0.0,
         "cart_discount_percent": 0.0,
-        "customer_name": "Cliente Separado Cierre",
+        "customer_id": customer_id,
         "notes": "Caso de prueba cierre separado",
         "pos_name": "POS 1",
         "vendor_name": "Tester",
@@ -754,7 +762,7 @@ def test_closure_separated_clarification_totals(client: TestClient):
                 "discount": 0.0,
             }
         ],
-        "payments": [{"method": "cash", "amount": 10000.0}],
+        "payments": [{"method": "cash", "amount": 25000.0}],
         "due_date": datetime.utcnow().isoformat(),
     }
     separated_resp = client.post("/separated-orders", json=separated_payload, headers=headers)
@@ -775,9 +783,8 @@ def test_closure_separated_clarification_totals(client: TestClient):
     assert closure_data["separated_summary"]["pending_total"] == 37000.0
     assert closure_data["separated_summary"]["day_collected_total"] == 25000.0
     assert closure_data["separated_summary"]["day_with_pending_total"] == 62000.0
-    assert closure_data["user_breakdown"]
-    assert closure_data["user_breakdown"][0]["name"] == "Tester"
-    assert closure_data["user_breakdown"][0]["total"] == 25000.0
+    # Los separados se detallan en separated_summary y no inflan ventas por vendedor.
+    assert closure_data["user_breakdown"] == []
 
     db = TestingSessionLocal()
     closure_row = (
@@ -786,6 +793,11 @@ def test_closure_separated_clarification_totals(client: TestClient):
         .first()
     )
     assert closure_row is not None
+    closure_html = ticket_renderer.render_closure_html(closure_row)
+    assert "Ventas por separado" in closure_html
+    assert "Abonos cobrados" in closure_html
+    assert "Total reservado" in closure_html
+    assert "Saldo pendiente" in closure_html
     closure_row.separated_summary = {
         "tickets": 1,
         "payments_total": 25000.0,

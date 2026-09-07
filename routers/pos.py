@@ -1919,11 +1919,6 @@ def create_print_job(
         raise HTTPException(status_code=400, detail="Estación tablet inválida o inactiva")
     if (source_station.station_type or "desktop") != "tablet":
         raise HTTPException(status_code=400, detail="Solo una estación tablet puede solicitar este trabajo")
-    if sale.station_id != source_station.id:
-        raise HTTPException(
-            status_code=400,
-            detail="La venta no pertenece a esta estación tablet",
-        )
     if not source_station.parent_station_id:
         raise HTTPException(status_code=400, detail="La tablet no tiene una caja principal vinculada")
 
@@ -1938,6 +1933,11 @@ def create_print_job(
         or (target_station.station_type or "desktop") != "desktop"
     ):
         raise HTTPException(status_code=400, detail="La caja principal no está disponible")
+    if sale.station_id not in {source_station.id, target_station.id}:
+        raise HTTPException(
+            status_code=400,
+            detail="La venta no pertenece a la tablet ni a su caja principal",
+        )
 
     try:
         return crud.create_pos_print_job(

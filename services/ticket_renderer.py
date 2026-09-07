@@ -700,17 +700,36 @@ def _build_payment_rows_with_labels(
     sale: models.Sale,
     payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
-    if not sale.payments:
+    order = getattr(sale, "separated_order", None)
+    if not sale.payments and not (order and order.payments):
         return '<div class="row"><span>Sin pagos registrados</span><span>$ 0</span></div>'
     rows = []
-    for payment in sale.payments:
-        label = _resolve_payment_label(payment.method, payment_method_labels)
+    initial_payments = list(sale.payments or [])
+    for index, payment in enumerate(initial_payments):
+        method_label = _resolve_payment_label(payment.method, payment_method_labels)
+        label = method_label
+        if order:
+            initial_label = "Abono inicial" if len(initial_payments) == 1 else f"Abono inicial {index + 1}"
+            label = f"{initial_label} · {method_label}"
         rows.append(
             "<div class=\"row\">"
             f"<span>{_escape_html(label)}</span>"
             f"<span>{_format_money(payment.amount)}</span>"
             "</div>"
         )
+    if order:
+        next_number = len(initial_payments) + 1
+        for payment in order.payments or []:
+            if float(payment.amount or 0.0) <= 0 or (payment.status or "").lower() == "voided":
+                continue
+            method_label = _resolve_payment_label(payment.method, payment_method_labels)
+            rows.append(
+                '<div class="row">'
+                f'<span>{_escape_html(f"Abono {next_number} · {method_label}")}</span>'
+                f'<span>{_format_money(payment.amount)}</span>'
+                "</div>"
+            )
+            next_number += 1
     return "\n".join(rows)
 
 
@@ -722,18 +741,43 @@ def _build_thermal_payment_rows_with_labels(
     sale: models.Sale,
     payment_method_labels: Optional[dict[str, str]] = None,
 ) -> str:
-    if not sale.payments:
+    order = getattr(sale, "separated_order", None)
+    if not sale.payments and not (order and order.payments):
         return '<div class="line"><span>Sin pagos registrados</span><span>$ 0</span></div>'
     rows = []
-    for payment in sale.payments:
-        label = _resolve_payment_label(payment.method, payment_method_labels)
+    initial_payments = list(sale.payments or [])
+    for index, payment in enumerate(initial_payments):
+        method_label = _resolve_payment_label(payment.method, payment_method_labels)
+        label = method_label
+        if order:
+            initial_label = "Abono inicial" if len(initial_payments) == 1 else f"Abono inicial {index + 1}"
+            label = f"{initial_label} · {method_label}"
         rows.append(
             "<div class=\"line\">"
             f"<span>{_escape_html(label)}</span>"
             f"<span>{_format_money(payment.amount)}</span>"
             "</div>"
         )
+    if order:
+        next_number = len(initial_payments) + 1
+        for payment in order.payments or []:
+            if float(payment.amount or 0.0) <= 0 or (payment.status or "").lower() == "voided":
+                continue
+            method_label = _resolve_payment_label(payment.method, payment_method_labels)
+            rows.append(
+                '<div class="line">'
+                f'<span>{_escape_html(f"Abono {next_number} · {method_label}")}</span>'
+                f'<span>{_format_money(payment.amount)}</span>'
+                "</div>"
+            )
+            next_number += 1
     return "\n".join(rows)
+
+
+def _format_separated_due_date(value: Optional[datetime]) -> str:
+    if not value:
+        return "Sin fecha límite"
+    return value.strftime("%d/%m/%Y")
 
 
 def _build_invoice_payment_rows(
@@ -1146,6 +1190,7 @@ def _render_modern_ticket_html(
     barcode_svg = _generate_code128_svg(document_number, height=90.0, module_width=2.0, include_text=True, font_size=14.0, quiet_zone_modules=10)
     total_amount = _effective_total(sale)
     adjustment_badge, adjustment_note = _adjustment_meta(sale)
+    separated_order = getattr(sale, "separated_order", None)
 
     parts: List[str] = [
         "<!DOCTYPE html>",
@@ -1192,6 +1237,13 @@ def _render_modern_ticket_html(
         f'<span class="tag">Documento: {_escape_html(document_number)}</span>'
     )
     parts.append("</div>")
+    if separated_order:
+        parts.append(
+            '<div style="display:table;margin:14px auto 0;padding:7px 16px;'
+            'border:2px solid #0f172a;border-radius:999px;color:#0f172a;'
+            'font-size:12px;font-weight:800;letter-spacing:0.08em;">'
+            'VENTA POR SEPARADO</div>'
+        )
     if adjustment_badge:
         parts.append(
             '<div style="margin-top:14px;padding:12px 14px;border-radius:16px;'
@@ -1262,6 +1314,13 @@ def _render_modern_ticket_html(
     parts.append(payment_rows)
     if change_row:
         parts.append(change_row)
+    if separated_order:
+        parts.append(
+            f'<div class="row"><span>Fecha límite</span><span>{_escape_html(_format_separated_due_date(separated_order.due_date))}</span></div>'
+        )
+        parts.append(
+            f'<div class="row total"><span>Saldo pendiente</span><span>{_format_money(max(float(separated_order.balance or 0.0), 0.0))}</span></div>'
+        )
     parts.append("</div></div></section>")
 
     if notes_block:
@@ -1296,6 +1355,7 @@ def _render_thermal_ticket_html(
         cart_discount_label = "Descuento carrito"
     total_amount = _effective_total(sale)
     adjustment_badge, adjustment_note = _adjustment_meta(sale)
+    separated_order = getattr(sale, "separated_order", None)
     footer_html = _footer_lines(company["footer"])
     change_amount = float(sale.change_amount or 0.0)
     change_row = ""
@@ -1447,6 +1507,14 @@ def _render_thermal_ticket_html(
                 "</div>",
             ]
         )
+    if separated_order:
+        html_parts.extend(
+            [
+                '<div style="display:table;margin:6px auto 10px;padding:5px 12px;'
+                'border:2px solid #0f172a;border-radius:999px;font-size:13px;'
+                'font-weight:800;letter-spacing:0.08em;">VENTA POR SEPARADO</div>',
+            ]
+        )
     html_parts.extend(
         [
             "<div class=\"section\">",
@@ -1489,6 +1557,14 @@ def _render_thermal_ticket_html(
             '<div class="line-title">Pagos recibidos</div>',
             payment_rows,
             change_row,
+            (
+                '<div class="line"><span>Fecha límite</span>'
+                f'<span>{_escape_html(_format_separated_due_date(separated_order.due_date))}</span></div>'
+                '<div class="line"><span><strong>Saldo pendiente</strong></span>'
+                f'<span><strong>{_format_money(max(float(separated_order.balance or 0.0), 0.0))}</strong></span></div>'
+                if separated_order
+                else ""
+            ),
             "</div>",
             "<div class=\"totals\">",
             "<span>TOTAL</span>",
@@ -1868,6 +1944,17 @@ def render_closure_html(
             f"<tbody>{lines}</tbody>"
             "</table>"
         )
+    separated_block = ""
+    if separated_summary:
+        separated_block = (
+            '<p style="margin:12px 0 8px;"><strong>Ventas por separado</strong></p>'
+            '<table style="width:100%; border-collapse:collapse; font-size:12px; margin:0 0 12px;">'
+            f'<tr><td>Tickets registrados</td><td style="text-align:right;">{int(separated_summary.get("tickets") or 0)}</td></tr>'
+            f'<tr><td>Abonos cobrados</td><td style="text-align:right;">{_format_currency(float(separated_summary.get("payments_total") or 0.0))}</td></tr>'
+            f'<tr><td>Total reservado</td><td style="text-align:right;">{_format_currency(float(separated_summary.get("reserved_total") or 0.0))}</td></tr>'
+            f'<tr><td>Saldo pendiente</td><td style="text-align:right;">{_format_currency(float(separated_summary.get("pending_total") or 0.0))}</td></tr>'
+            "</table>"
+        )
 
     return f"""
     <div style="font-family: Arial, sans-serif; color:#111827;">
@@ -1882,6 +1969,7 @@ def render_closure_html(
       <p style="margin:0 0 12px;"><strong>Reporte:</strong> {closure_label}</p>
       <pre style="font-family: Arial, sans-serif; margin:0 0 16px; white-space:pre-wrap;">{totals_lines}</pre>
       {station_breakdown_block}
+      {separated_block}
       <p style="margin:0;"><strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}</p>
       <p style="margin:8px 0 0; color:#6b7280;">Adjunto: Reporte Z en PDF.</p>
     </div>
@@ -1938,6 +2026,20 @@ def render_closure_pdf(
         for label, value in payment_rows
         if float(value or 0) != 0
     )
+    separated_lines = ""
+    if separated_summary:
+        separated_lines = "".join(
+            "<tr>"
+            f'<td style="padding:4px 0;">{html_escape(label)}</td>'
+            f'<td style="padding:4px 0; text-align:right;">{value}</td>'
+            "</tr>"
+            for label, value in [
+                ("Tickets registrados", str(int(separated_summary.get("tickets") or 0))),
+                ("Abonos cobrados", _format_currency(float(separated_summary.get("payments_total") or 0.0))),
+                ("Total reservado", _format_currency(float(separated_summary.get("reserved_total") or 0.0))),
+                ("Saldo pendiente", _format_currency(float(separated_summary.get("pending_total") or 0.0))),
+            ]
+        )
 
     totals_lines = "\n".join(
         "<tr>"
@@ -2009,6 +2111,7 @@ def render_closure_pdf(
               </table>
               {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Desglose por estación</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'><thead><tr><th align='left' style='padding:4px 0;'>Estación</th><th align='center' style='padding:4px 0;'>Ventas</th><th align='right' style='padding:4px 0;'>Bruto</th><th align='right' style='padding:4px 0;'>Neto</th></tr></thead><tbody>" + station_breakdown_lines + "</tbody></table>" if station_breakdown_lines and has_auxiliary_station else ""}
               {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Tipos de pago</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'>" + payment_lines + "</table>" if payment_lines else ""}
+              {"<div style='height:8px;'></div><div style='font-weight:600; margin:8px 0;'>Ventas por separado</div><table width='100%' cellspacing='0' cellpadding='0' style='font-size:12px;'>" + separated_lines + "</table>" if separated_lines else ""}
               <div style="height:12px;"></div>
               <div style="border-top:1px solid #cbd5f5; padding-top:10px; font-size:12px;">
                 <strong>Notas:</strong> {html_escape(closure.notes or 'Sin notas')}

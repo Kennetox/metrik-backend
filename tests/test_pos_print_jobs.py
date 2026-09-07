@@ -206,3 +206,17 @@ def test_tablet_print_job_is_explicit_idempotent_and_consumed_once(client: TestC
         },
     )
     assert duplicate_result.status_code == 409
+
+    desktop_sale_id = _create_sale_for_station(desktop["id"])
+    desktop_sale_reprint = client.post(
+        "/pos/print-jobs",
+        headers=headers,
+        json={
+            "sale_id": desktop_sale_id,
+            "station_id": tablet["id"],
+            "request_id": f"tablet-reprint-{uuid4().hex}",
+            "document_type": "ticket",
+        },
+    )
+    assert desktop_sale_reprint.status_code == 201, desktop_sale_reprint.text
+    assert desktop_sale_reprint.json()["target_station_id"] == desktop["id"]
