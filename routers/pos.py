@@ -4,6 +4,7 @@ import functools
 import io
 import inspect
 import logging
+import secrets
 from typing import Any, List, Optional, Literal
 import base64
 import os
@@ -18,6 +19,7 @@ from fastapi import (
     UploadFile,
     File,
     Form,
+    Header,
     Query,
     Response,
 )
@@ -69,6 +71,25 @@ FREE_SALE_REASON_REQUIRED = (
 CHECKOUT_CONTEXT_NOTE_MARKER = "CHECKOUT_CONTEXT_JSON:"
 _POS_QUERY_CACHE: dict[str, tuple[datetime, object]] = {}
 _pos_logger = logging.getLogger("kensar.pos")
+
+
+def _require_print_agent_station(
+    db: Session,
+    *,
+    station_id: str,
+    device_id: str,
+) -> models.PosStation:
+    station = crud.get_pos_station_any(db, station_id)
+    expected_device_id = str(getattr(station, "bound_device_id", "") or "")
+    if (
+        not station
+        or not station.is_active
+        or (station.station_type or "desktop") != "desktop"
+        or not expected_device_id
+        or not secrets.compare_digest(expected_device_id, device_id)
+    ):
+        raise HTTPException(status_code=401, detail="Agente de impresión no autorizado")
+    return station
 
 
 def _pos_cache_key(name: str, **params: object) -> str:
@@ -1876,6 +1897,196 @@ def view_sale_document(
         payment_method_labels=payment_labels,
     )
     return Response(content=document_html, media_type="text/html; charset=utf-8")
+
+
+@router.post(
+    "/print-jobs",
+    response_model=schemas.PosPrintJobRead,
+    status_code=201,
+)
+def create_print_job(
+    payload: schemas.PosPrintJobCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    sale = crud.get_sale(db, payload.sale_id, tenant_id=tenant_id)
+    if not sale:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    source_station = crud.get_pos_station(db, payload.station_id, tenant_id=tenant_id)
+    if not source_station or not source_station.is_active:
+        raise HTTPException(status_code=400, detail="Estación tablet inválida o inactiva")
+    if (source_station.station_type or "desktop") != "tablet":
+        raise HTTPException(status_code=400, detail="Solo una estación tablet puede solicitar este trabajo")
+    if sale.station_id != source_station.id:
+        raise HTTPException(
+            status_code=400,
+            detail="La venta no pertenece a esta estación tablet",
+        )
+    if not source_station.parent_station_id:
+        raise HTTPException(status_code=400, detail="La tablet no tiene una caja principal vinculada")
+
+    target_station = crud.get_pos_station(
+        db,
+        source_station.parent_station_id,
+        tenant_id=tenant_id,
+    )
+    if (
+        not target_station
+        or not target_station.is_active
+        or (target_station.station_type or "desktop") != "desktop"
+    ):
+        raise HTTPException(status_code=400, detail="La caja principal no está disponible")
+
+    try:
+        return crud.create_pos_print_job(
+            db,
+            sale=sale,
+            source_station=source_station,
+            target_station=target_station,
+            request_id=payload.request_id,
+            current_user=current_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/print-jobs/{job_id}", response_model=schemas.PosPrintJobRead)
+def get_print_job_status(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    job = crud.get_pos_print_job(db, job_id, tenant_id=tenant_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Trabajo de impresión no encontrado")
+    if job.status == "queued" and job.expires_at <= datetime.utcnow():
+        job.status = "expired"
+        db.commit()
+        db.refresh(job)
+    return job
+
+
+@router.get("/print-agent/jobs/next", response_model=Optional[schemas.PosPrintJobClaim])
+def claim_next_print_job(
+    station_id: str = Query(..., min_length=1, max_length=128),
+    device_id: str = Header(..., alias="X-Metrik-Device-Id", min_length=16, max_length=255),
+    db: Session = Depends(get_db),
+):
+    station = _require_print_agent_station(
+        db,
+        station_id=station_id,
+        device_id=device_id,
+    )
+    tenant_id = station.tenant_id
+
+    job = crud.claim_next_pos_print_job(
+        db,
+        target_station_id=station.id,
+        tenant_id=tenant_id,
+    )
+    if not job:
+        return None
+
+    sale = crud.get_sale(db, job.sale_id, tenant_id=tenant_id)
+    if not sale:
+        crud.finish_pos_print_job(
+            db,
+            job=job,
+            lease_token=job.lease_token or "",
+            accepted=False,
+            error="La venta asociada ya no está disponible.",
+        )
+        raise HTTPException(status_code=409, detail="La venta asociada ya no está disponible")
+
+    try:
+        settings = crud.get_pos_settings(db, tenant_id=tenant_id)
+        payment_labels = _payment_method_labels_by_slug(db, tenant_id)
+        sale_view = _sale_render_proxy(db, sale, tenant_id=tenant_id)
+        document_html = ticket_renderer.render_sale_ticket_html(
+            sale_view,
+            settings=settings,
+            mode=ticket_renderer.THERMAL_TICKET_MODE,
+            payment_method_labels=payment_labels,
+        )
+    except Exception as exc:
+        crud.finish_pos_print_job(
+            db,
+            job=job,
+            lease_token=job.lease_token or "",
+            accepted=False,
+            error="No se pudo preparar el ticket.",
+        )
+        _pos_logger.exception("No se pudo renderizar el trabajo de impresión %s", job.id)
+        raise HTTPException(status_code=500, detail="No se pudo preparar el ticket") from exc
+
+    return schemas.PosPrintJobClaim(
+        **schemas.PosPrintJobRead.model_validate(job).model_dump(),
+        lease_token=job.lease_token or "",
+        document_html=document_html,
+    )
+
+
+@router.post("/print-jobs/{job_id}/result", response_model=schemas.PosPrintJobRead)
+def finish_print_job(
+    job_id: int,
+    payload: schemas.PosPrintJobResult,
+    device_id: str = Header(..., alias="X-Metrik-Device-Id", min_length=16, max_length=255),
+    db: Session = Depends(get_db),
+):
+    station = _require_print_agent_station(
+        db,
+        station_id=payload.station_id,
+        device_id=device_id,
+    )
+    tenant_id = station.tenant_id
+    job = crud.get_pos_print_job(db, job_id, tenant_id=tenant_id)
+    if not job or job.target_station_id != station.id:
+        raise HTTPException(status_code=404, detail="Trabajo de impresión no encontrado")
+    try:
+        return crud.finish_pos_print_job(
+            db,
+            job=job,
+            lease_token=payload.lease_token,
+            accepted=payload.status == "accepted",
+            error=payload.error,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get(
+    "/print-agent/config",
+    response_model=schemas.PosStationPrinterConfigRead,
+)
+def get_print_agent_config(
+    station_id: str = Query(..., min_length=1, max_length=128),
+    device_id: str = Header(..., alias="X-Metrik-Device-Id", min_length=16, max_length=255),
+    db: Session = Depends(get_db),
+):
+    station = _require_print_agent_station(
+        db,
+        station_id=station_id,
+        device_id=device_id,
+    )
+    return _station_printer_config(station)
+
+
+@router.post("/print-agent/qz/sign", response_model=schemas.QzSignResponse)
+def sign_print_agent_qz_request(
+    payload: schemas.QzSignRequest,
+    station_id: str = Query(..., min_length=1, max_length=128),
+    device_id: str = Header(..., alias="X-Metrik-Device-Id", min_length=16, max_length=255),
+    db: Session = Depends(get_db),
+):
+    _require_print_agent_station(
+        db,
+        station_id=station_id,
+        device_id=device_id,
+    )
+    return schemas.QzSignResponse(signature=_sign_qz_payload(payload.data))
 
 
 @router.get("/returns", response_model=List[schemas.SaleReturnRead])

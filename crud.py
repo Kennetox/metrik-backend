@@ -12591,6 +12591,171 @@ def update_pos_station_printer_config(
     return station
 
 
+def get_pos_print_job(
+    db: Session,
+    job_id: int,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosPrintJob]:
+    query = db.query(models.PosPrintJob).filter(models.PosPrintJob.id == job_id)
+    if tenant_id is not None:
+        query = query.filter(models.PosPrintJob.tenant_id == tenant_id)
+    return query.first()
+
+
+def get_pos_print_job_by_request(
+    db: Session,
+    source_station_id: str,
+    request_id: str,
+    tenant_id: Optional[int] = None,
+) -> Optional[models.PosPrintJob]:
+    query = db.query(models.PosPrintJob).filter(
+        models.PosPrintJob.source_station_id == source_station_id,
+        models.PosPrintJob.request_id == request_id,
+    )
+    if tenant_id is not None:
+        query = query.filter(models.PosPrintJob.tenant_id == tenant_id)
+    return query.first()
+
+
+def create_pos_print_job(
+    db: Session,
+    *,
+    sale: models.Sale,
+    source_station: models.PosStation,
+    target_station: models.PosStation,
+    request_id: str,
+    current_user: models.PosUser,
+    ttl_minutes: int = 10,
+) -> models.PosPrintJob:
+    existing = get_pos_print_job_by_request(
+        db,
+        source_station.id,
+        request_id,
+        tenant_id=source_station.tenant_id,
+    )
+    if existing:
+        if existing.sale_id != sale.id:
+            raise ValueError("El identificador de impresión ya fue usado para otra venta")
+        return existing
+
+    now = datetime.utcnow()
+    job = models.PosPrintJob(
+        tenant_id=source_station.tenant_id,
+        sale_id=sale.id,
+        source_station_id=source_station.id,
+        target_station_id=target_station.id,
+        request_id=request_id,
+        document_type="ticket",
+        status="queued",
+        attempt_count=0,
+        expires_at=now + timedelta(minutes=max(1, min(ttl_minutes, 30))),
+        created_by_user_id=current_user.id,
+    )
+    db.add(job)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = get_pos_print_job_by_request(
+            db,
+            source_station.id,
+            request_id,
+            tenant_id=source_station.tenant_id,
+        )
+        if existing and existing.sale_id == sale.id:
+            return existing
+        raise
+    db.refresh(job)
+    return job
+
+
+def claim_next_pos_print_job(
+    db: Session,
+    *,
+    target_station_id: str,
+    tenant_id: Optional[int],
+    lease_seconds: int = 45,
+) -> Optional[models.PosPrintJob]:
+    now = datetime.utcnow()
+    scope = [models.PosPrintJob.target_station_id == target_station_id]
+    if tenant_id is not None:
+        scope.append(models.PosPrintJob.tenant_id == tenant_id)
+
+    db.query(models.PosPrintJob).filter(
+        *scope,
+        models.PosPrintJob.status == "queued",
+        models.PosPrintJob.expires_at <= now,
+    ).update(
+        {
+            models.PosPrintJob.status: "expired",
+            models.PosPrintJob.updated_at: now,
+        },
+        synchronize_session=False,
+    )
+    # An expired lease is deliberately not retried: QZ may already have accepted
+    # the ticket before the agent disappeared, and an automatic retry could duplicate it.
+    db.query(models.PosPrintJob).filter(
+        *scope,
+        models.PosPrintJob.status == "processing",
+        models.PosPrintJob.lease_expires_at <= now,
+    ).update(
+        {
+            models.PosPrintJob.status: "failed",
+            models.PosPrintJob.last_error: "El agente no confirmó el resultado del trabajo.",
+            models.PosPrintJob.updated_at: now,
+        },
+        synchronize_session=False,
+    )
+    db.flush()
+
+    job = (
+        db.query(models.PosPrintJob)
+        .filter(
+            *scope,
+            models.PosPrintJob.status == "queued",
+            models.PosPrintJob.expires_at > now,
+        )
+        .order_by(models.PosPrintJob.created_at.asc(), models.PosPrintJob.id.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if not job:
+        db.commit()
+        return None
+
+    job.status = "processing"
+    job.attempt_count = int(job.attempt_count or 0) + 1
+    job.lease_token = secrets.token_urlsafe(24)
+    job.lease_expires_at = now + timedelta(seconds=max(15, min(lease_seconds, 120)))
+    job.submitted_at = now
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def finish_pos_print_job(
+    db: Session,
+    *,
+    job: models.PosPrintJob,
+    lease_token: str,
+    accepted: bool,
+    error: Optional[str] = None,
+) -> models.PosPrintJob:
+    if job.status != "processing" or not secrets.compare_digest(
+        str(job.lease_token or ""), str(lease_token or "")
+    ):
+        raise ValueError("El trabajo ya no está reservado por este agente")
+    now = datetime.utcnow()
+    job.status = "accepted" if accepted else "failed"
+    job.completed_at = now
+    job.last_error = None if accepted else (error or "QZ Tray rechazó el trabajo")[:500]
+    job.lease_token = None
+    job.lease_expires_at = None
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 def deactivate_pos_station(db: Session, station: models.PosStation):
     station.is_active = False
     db.commit()

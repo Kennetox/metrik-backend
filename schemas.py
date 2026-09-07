@@ -2322,6 +2322,49 @@ class PosStationPrinterConfigRead(PosStationPrinterConfigBase):
         from_attributes = True
 
 
+class PosPrintJobCreate(BaseModel):
+    sale_id: int = Field(gt=0)
+    station_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(
+        min_length=8,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    document_type: Literal["ticket"] = "ticket"
+
+
+class PosPrintJobResult(BaseModel):
+    station_id: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=16, max_length=64)
+    status: Literal["accepted", "failed"]
+    error: Optional[str] = Field(default=None, max_length=500)
+
+
+class PosPrintJobRead(BaseModel):
+    id: int
+    sale_id: int
+    source_station_id: str
+    target_station_id: str
+    request_id: str
+    document_type: Literal["ticket"] = "ticket"
+    status: Literal["queued", "processing", "accepted", "failed", "expired"]
+    attempt_count: int = 0
+    last_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    submitted_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    expires_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PosPrintJobClaim(PosPrintJobRead):
+    lease_token: str
+    document_html: str
+
+
 class PosStationRead(BaseModel):
     id: str
     label: str

@@ -1325,6 +1325,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_demo_signup_audits_postgres(connection)
                 _ensure_table_user_notifications_postgres(connection)
                 _ensure_kora_stock_plan_schema(connection, backend="postgresql")
+                _ensure_pos_print_job_schema(connection, backend="postgresql")
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -2087,6 +2088,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_demo_signup_audits(connection)
                 _ensure_table_user_notifications(connection)
                 _ensure_kora_stock_plan_schema(connection, backend="sqlite")
+                _ensure_pos_print_job_schema(connection, backend="sqlite")
                 _seed_default_tenant_sqlite(connection)
                 _ensure_column(
                     connection,
@@ -4084,6 +4086,47 @@ def _ensure_table_pos_station_notices(connection) -> None:
                 """
             )
         )
+
+
+def _ensure_pos_print_job_schema(connection, backend: str) -> None:
+    id_type = "SERIAL" if backend == "postgresql" else "INTEGER"
+    timestamp_type = "TIMESTAMP" if backend == "postgresql" else "DATETIME"
+    connection.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS pos_print_jobs (
+            id {id_type} PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id),
+            sale_id INTEGER NOT NULL REFERENCES sales(id),
+            source_station_id VARCHAR(255) NOT NULL REFERENCES pos_stations(id),
+            target_station_id VARCHAR(255) NOT NULL REFERENCES pos_stations(id),
+            request_id VARCHAR(96) NOT NULL,
+            document_type VARCHAR(16) NOT NULL DEFAULT 'ticket',
+            status VARCHAR(24) NOT NULL DEFAULT 'queued',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            lease_token VARCHAR(64),
+            lease_expires_at {timestamp_type},
+            submitted_at {timestamp_type},
+            completed_at {timestamp_type},
+            expires_at {timestamp_type} NOT NULL,
+            last_error TEXT,
+            created_by_user_id INTEGER REFERENCES pos_users(id),
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT pos_print_jobs_tenant_source_request_key
+                UNIQUE (tenant_id, source_station_id, request_id),
+            CONSTRAINT ck_pos_print_jobs_document_type
+                CHECK (document_type = 'ticket'),
+            CONSTRAINT ck_pos_print_jobs_status
+                CHECK (status IN ('queued', 'processing', 'accepted', 'failed', 'expired'))
+        )
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pos_print_jobs_target_status_created
+        ON pos_print_jobs (target_station_id, status, created_at)
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pos_print_jobs_sale_id
+        ON pos_print_jobs (sale_id)
+    """))
 
 
 def _ensure_table_user_notifications(connection) -> None:

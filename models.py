@@ -1904,6 +1904,48 @@ class PosStation(Base):
     )
 
 
+class PosPrintJob(Base):
+    __tablename__ = "pos_print_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "source_station_id",
+            "request_id",
+            name="pos_print_jobs_tenant_source_request_key",
+        ),
+        Index(
+            "ix_pos_print_jobs_target_status_created",
+            "target_station_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
+    source_station_id = Column(String, ForeignKey("pos_stations.id"), nullable=False, index=True)
+    target_station_id = Column(String, ForeignKey("pos_stations.id"), nullable=False, index=True)
+    request_id = Column(String(96), nullable=False)
+    document_type = Column(String(16), nullable=False, default="ticket")
+    status = Column(String(24), nullable=False, default="queued", index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String(64), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    last_error = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
 class StockDevice(Base):
     __tablename__ = "stock_devices"
     __table_args__ = (
