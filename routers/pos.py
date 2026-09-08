@@ -2098,6 +2098,7 @@ def list_returns(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    closure_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("pos.returns")),
 ):
@@ -2108,6 +2109,7 @@ def list_returns(
         limit=limit,
         date_from=date_from,
         date_to=date_to,
+        closure_id=closure_id,
         tenant_id=tenant_id,
     )
     return returns
@@ -2120,6 +2122,7 @@ def list_changes(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    closure_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(
         require_any_permission("pos.returns", "sales_history.view", "reports.view")
@@ -2132,6 +2135,7 @@ def list_changes(
         limit=limit,
         date_from=date_from,
         date_to=date_to,
+        closure_id=closure_id,
         tenant_id=tenant_id,
     )
     return changes

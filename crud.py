@@ -9428,12 +9428,15 @@ def list_returns(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    closure_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
 ):
     query = db.query(models.SaleReturn).options(joinedload(models.SaleReturn.sale))
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.SaleReturn.tenant_id == effective_tenant_id)
+    if closure_id is not None:
+        query = query.filter(models.SaleReturn.closure_id == closure_id)
     if date_from is not None:
         query = query.filter(models.SaleReturn.created_at >= date_from)
     if date_to is not None:
@@ -9452,12 +9455,15 @@ def list_changes(
     limit: int = 100,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    closure_id: Optional[int] = None,
     tenant_id: Optional[int] = None,
 ):
     query = db.query(models.SaleChange)
     effective_tenant_id = tenant_id if tenant_id is not None else get_default_tenant_id(db)
     if effective_tenant_id is not None:
         query = query.filter(models.SaleChange.tenant_id == effective_tenant_id)
+    if closure_id is not None:
+        query = query.filter(models.SaleChange.closure_id == closure_id)
     if date_from is not None:
         query = query.filter(models.SaleChange.created_at >= date_from)
     if date_to is not None:
