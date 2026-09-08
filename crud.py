@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 import hashlib
@@ -8273,6 +8274,55 @@ def create_sale(
 # ===================== SEPARATED ORDERS =====================
 
 
+def _add_calendar_months(value: datetime, months: int) -> datetime:
+    month_index = value.month - 1 + months
+    target_year = value.year + month_index // 12
+    target_month = month_index % 12 + 1
+    target_day = min(value.day, monthrange(target_year, target_month)[1])
+    return value.replace(year=target_year, month=target_month, day=target_day)
+
+
+def _as_bogota_datetime(value: datetime) -> datetime:
+    source = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return source.astimezone(ZoneInfo("America/Bogota"))
+
+
+def _as_naive_utc(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def resolve_separated_order_due_date(
+    requested_due_date: Optional[datetime],
+    *,
+    reference: Optional[datetime] = None,
+) -> datetime:
+    """Apply the annual Christmas layaway deadline in Bogota time."""
+
+    reference_bogota = _as_bogota_datetime(reference or datetime.utcnow())
+    campaign_start = date(reference_bogota.year, 9, 1)
+    regular_policy_start = date(reference_bogota.year, 10, 24)
+
+    if campaign_start <= reference_bogota.date() < regular_policy_start:
+        christmas_deadline = datetime(
+            reference_bogota.year,
+            12,
+            24,
+            23,
+            59,
+            59,
+            999999,
+            tzinfo=ZoneInfo("America/Bogota"),
+        )
+        return _as_naive_utc(christmas_deadline)
+
+    if requested_due_date is not None:
+        if requested_due_date.tzinfo is None:
+            return requested_due_date
+        return requested_due_date.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return _as_naive_utc(_add_calendar_months(reference_bogota, 2))
+
+
 def create_separated_order(
     db: Session,
     sale: models.Sale,
@@ -8318,7 +8368,10 @@ def create_separated_order(
         total_amount=total_amount,
         initial_payment=initial_payment,
         balance=balance,
-        due_date=separated_in.due_date,
+        due_date=resolve_separated_order_due_date(
+            separated_in.due_date,
+            reference=sale.created_at,
+        ),
         status=status,
         sale_document_number=sale.document_number or "",
         sale_number=sale.sale_number,

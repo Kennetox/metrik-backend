@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -94,7 +94,16 @@ def _create_test_separated(
     }
     response = client.post("/separated-orders", json=payload, headers=headers)
     assert response.status_code == 201, response.text
-    return response.json()
+    data = response.json()
+    if due_days < 0:
+        db = TestingSessionLocal()
+        stored_order = db.query(models.SeparatedOrder).filter(
+            models.SeparatedOrder.id == data["id"]
+        ).one()
+        stored_order.due_date = datetime.utcnow() + timedelta(days=due_days)
+        db.commit()
+        db.close()
+    return data
 
 
 def test_create_and_pay_separated_order(client: TestClient):
@@ -144,6 +153,7 @@ def test_create_and_pay_separated_order(client: TestClient):
     assert data["initial_payments"][0]["amount"] == 150000.0
     assert data["initial_payments"][1]["method"] == "transfer"
     assert data["initial_payments"][1]["amount"] == 250000.0
+
     assert data["surcharge_amount"] == 0.0
     assert data["surcharge_label"] is None
     order_id = data["id"]
@@ -215,6 +225,34 @@ def test_create_and_pay_separated_order(client: TestClient):
     )
     assert complete_resp.status_code == 200
     assert complete_resp.json()["completed_at"] is not None
+
+
+def test_separated_due_date_uses_annual_christmas_campaign():
+    during_campaign = crud.resolve_separated_order_due_date(
+        datetime(2026, 11, 8, 12, tzinfo=timezone.utc),
+        reference=datetime(2026, 9, 8, 15, tzinfo=timezone.utc),
+    )
+    assert during_campaign == datetime(2026, 12, 25, 4, 59, 59, 999999)
+
+    last_campaign_day = crud.resolve_separated_order_due_date(
+        None,
+        reference=datetime(2027, 10, 23, 15, tzinfo=timezone.utc),
+    )
+    assert last_campaign_day == datetime(2027, 12, 25, 4, 59, 59, 999999)
+
+
+def test_separated_due_date_returns_to_two_month_policy_after_campaign():
+    after_campaign = crud.resolve_separated_order_due_date(
+        None,
+        reference=datetime(2026, 10, 24, 15, 30, tzinfo=timezone.utc),
+    )
+    assert after_campaign == datetime(2026, 12, 24, 15, 30)
+
+    year_rollover = crud.resolve_separated_order_due_date(
+        None,
+        reference=datetime(2026, 12, 31, 15, 30, tzinfo=timezone.utc),
+    )
+    assert year_rollover == datetime(2027, 2, 28, 15, 30)
 
 
 def test_voiding_sale_cancels_linked_separated_order(client: TestClient):
