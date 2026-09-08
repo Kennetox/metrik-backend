@@ -766,6 +766,105 @@ def _ensure_system_status_schema(connection, backend: str) -> None:
     )
 
 
+def _ensure_pos_cash_expense_schema(connection, backend: str) -> None:
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS pos_cash_expenses (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER REFERENCES tenants(id),
+                    station_id VARCHAR REFERENCES pos_stations(id),
+                    pos_name VARCHAR,
+                    closure_id INTEGER REFERENCES pos_closures(id),
+                    category VARCHAR(48) NOT NULL,
+                    description TEXT,
+                    amount FLOAT NOT NULL DEFAULT 0,
+                    status VARCHAR(16) NOT NULL DEFAULT 'open',
+                    created_by_user_id INTEGER NOT NULL REFERENCES pos_users(id),
+                    created_by_user_name VARCHAR NOT NULL,
+                    voided_by_user_id INTEGER REFERENCES pos_users(id),
+                    voided_by_user_name VARCHAR,
+                    void_reason TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TIMESTAMP,
+                    voided_at TIMESTAMP
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS pos_cash_expenses_tenant_status_idx "
+                "ON pos_cash_expenses (tenant_id, status)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS pos_cash_expenses_closure_idx "
+                "ON pos_cash_expenses (closure_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS pos_cash_expenses_station_created_idx "
+                "ON pos_cash_expenses (station_id, created_at)"
+            )
+        )
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS pos_cash_expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER,
+                station_id TEXT,
+                pos_name TEXT,
+                closure_id INTEGER,
+                category TEXT NOT NULL,
+                description TEXT,
+                amount FLOAT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by_user_id INTEGER NOT NULL,
+                created_by_user_name TEXT NOT NULL,
+                voided_by_user_id INTEGER,
+                voided_by_user_name TEXT,
+                void_reason TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                closed_at DATETIME,
+                voided_at DATETIME,
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                FOREIGN KEY(station_id) REFERENCES pos_stations(id),
+                FOREIGN KEY(closure_id) REFERENCES pos_closures(id),
+                FOREIGN KEY(created_by_user_id) REFERENCES pos_users(id),
+                FOREIGN KEY(voided_by_user_id) REFERENCES pos_users(id)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS pos_cash_expenses_tenant_status_idx "
+            "ON pos_cash_expenses (tenant_id, status)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS pos_cash_expenses_closure_idx "
+            "ON pos_cash_expenses (closure_id)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS pos_cash_expenses_station_created_idx "
+            "ON pos_cash_expenses (station_id, created_at)"
+        )
+    )
+
+
 def _ensure_separated_resolution_schema(connection, backend: str) -> None:
     table = "separated_orders"
     if backend == "postgresql":
@@ -1327,6 +1426,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_kora_stock_plan_schema(connection, backend="postgresql")
                 _ensure_operational_signal_schema(connection, backend="postgresql")
                 _ensure_pos_print_job_schema(connection, backend="postgresql")
+                _ensure_pos_cash_expense_schema(connection, backend="postgresql")
                 _ensure_column_postgres(
                     connection,
                     "sales",
@@ -2103,6 +2203,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_kora_stock_plan_schema(connection, backend="sqlite")
                 _ensure_operational_signal_schema(connection, backend="sqlite")
                 _ensure_pos_print_job_schema(connection, backend="sqlite")
+                _ensure_pos_cash_expense_schema(connection, backend="sqlite")
                 _seed_default_tenant_sqlite(connection)
                 _ensure_column(
                     connection,
@@ -3266,6 +3367,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_web_catalog_home_video_schema(connection, backend="sqlite")
                 _ensure_web_catalog_combo_schema(connection, backend="sqlite")
                 _ensure_inventory_recount_drafts_schema(connection, backend="sqlite")
+                _ensure_pos_cash_expense_schema(connection, backend="sqlite")
 
 
 def _ensure_table_password_resets(connection) -> None:

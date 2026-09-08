@@ -2201,6 +2201,40 @@ class PosClosure(Base):
         back_populates="closure",
     )
     returns = relationship("SaleReturn", back_populates="closure")
+    cash_expenses = relationship("PosCashExpense", back_populates="closure")
+
+
+class PosCashExpense(Base):
+    __tablename__ = "pos_cash_expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    station_id = Column(String, ForeignKey("pos_stations.id"), nullable=True, index=True)
+    pos_name = Column(String, nullable=True)
+    closure_id = Column(Integer, ForeignKey("pos_closures.id"), nullable=True, index=True)
+    category = Column(String(48), nullable=False)
+    description = Column(Text, nullable=True)
+    amount = Column(Float, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="open", index=True)
+    created_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False)
+    created_by_user_name = Column(String, nullable=False)
+    voided_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    voided_by_user_name = Column(String, nullable=True)
+    void_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+    closed_at = Column(DateTime, nullable=True)
+    voided_at = Column(DateTime, nullable=True)
+
+    closure = relationship("PosClosure", back_populates="cash_expenses")
+    station = relationship("PosStation")
+    created_by_user = relationship("PosUser", foreign_keys=[created_by_user_id])
+    voided_by_user = relationship("PosUser", foreign_keys=[voided_by_user_id])
 
 
 class SeparatedOrder(Base):

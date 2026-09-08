@@ -2481,6 +2481,64 @@ class PosClosureStationScopeRead(BaseModel):
     stations: List[PosClosureStationScopeItem] = Field(default_factory=list)
 
 
+CashExpenseCategory = Literal["nomina", "almuerzo", "flete", "compra", "otro"]
+CashExpenseStatus = Literal["open", "closed", "voided"]
+
+
+class PosCashExpenseCreate(BaseModel):
+    category: CashExpenseCategory
+    amount: float = Field(gt=0)
+    description: Optional[str] = None
+    station_id: Optional[str] = None
+    pos_name: Optional[str] = None
+
+
+class PosCashExpenseUpdate(BaseModel):
+    category: Optional[CashExpenseCategory] = None
+    amount: Optional[float] = Field(default=None, gt=0)
+    description: Optional[str] = None
+    station_id: Optional[str] = None
+    pos_name: Optional[str] = None
+
+
+class PosCashExpenseVoid(BaseModel):
+    reason: Optional[str] = None
+
+
+class PosCashExpenseAttachRequest(BaseModel):
+    station_id: Optional[str] = None
+    pos_name: Optional[str] = None
+
+
+class PosCashExpenseRead(BaseModel):
+    id: int
+    tenant_id: Optional[int] = None
+    station_id: Optional[str] = None
+    pos_name: Optional[str] = None
+    closure_id: Optional[int] = None
+    category: CashExpenseCategory
+    description: Optional[str] = None
+    amount: float
+    status: CashExpenseStatus
+    created_by_user_id: int
+    created_by_user_name: str
+    voided_by_user_id: Optional[int] = None
+    voided_by_user_name: Optional[str] = None
+    void_reason: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    closed_at: Optional[datetime] = None
+    voided_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PosCashExpenseSummary(BaseModel):
+    expenses: List[PosCashExpenseRead] = Field(default_factory=list)
+    total: float = 0.0
+
+
 class PosCustomerBase(BaseModel):
     name: str
     phone: Optional[str] = None

@@ -15287,6 +15287,207 @@ def get_closure_station_scope(
     ]
 
 
+def _normalize_cash_expense_description(value: Optional[str]) -> Optional[str]:
+    cleaned = (value or "").strip()
+    return cleaned or None
+
+
+def _resolve_cash_expense_station(
+    db: Session,
+    station_id: Optional[str],
+    *,
+    tenant_id: Optional[int],
+) -> Optional[str]:
+    if not station_id:
+        return None
+    return _resolve_station_id(db, station_id, tenant_id=tenant_id)
+
+
+def create_pos_cash_expense(
+    db: Session,
+    payload: schemas.PosCashExpenseCreate,
+    user: models.PosUser,
+) -> models.PosCashExpense:
+    tenant_id = resolve_user_tenant_id(db, user)
+    station_id = _resolve_cash_expense_station(
+        db,
+        payload.station_id,
+        tenant_id=tenant_id,
+    )
+    expense = models.PosCashExpense(
+        tenant_id=tenant_id,
+        station_id=station_id,
+        pos_name=(payload.pos_name or "").strip() or None,
+        category=payload.category,
+        description=_normalize_cash_expense_description(payload.description),
+        amount=float(payload.amount or 0.0),
+        status="open",
+        created_by_user_id=user.id,
+        created_by_user_name=user.name,
+    )
+    db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def get_pos_cash_expense(
+    db: Session,
+    expense_id: int,
+    *,
+    tenant_id: Optional[int],
+) -> Optional[models.PosCashExpense]:
+    query = db.query(models.PosCashExpense).filter(models.PosCashExpense.id == expense_id)
+    if tenant_id is not None:
+        query = query.filter(models.PosCashExpense.tenant_id == tenant_id)
+    return query.first()
+
+
+def list_pos_cash_expenses(
+    db: Session,
+    *,
+    user: models.PosUser,
+    status: Optional[str] = "open",
+    station_id: Optional[str] = None,
+    pos_name: Optional[str] = None,
+    closure_id: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> list[models.PosCashExpense]:
+    tenant_id = resolve_user_tenant_id(db, user)
+    resolved_station_id = _resolve_cash_expense_station(
+        db,
+        station_id,
+        tenant_id=tenant_id,
+    )
+    query = db.query(models.PosCashExpense)
+    if tenant_id is not None:
+        query = query.filter(models.PosCashExpense.tenant_id == tenant_id)
+    if status:
+        query = query.filter(models.PosCashExpense.status == status)
+    if closure_id is not None:
+        query = query.filter(models.PosCashExpense.closure_id == closure_id)
+    if resolved_station_id:
+        scoped_station_ids, _ = _resolve_closure_station_scope(
+            db,
+            resolved_station_id,
+            tenant_id=tenant_id,
+        )
+        query = query.filter(
+            models.PosCashExpense.station_id.in_(
+                scoped_station_ids or [resolved_station_id]
+            )
+        )
+    elif pos_name:
+        query = _filter_pos_name(query, models.PosCashExpense.pos_name, pos_name)
+    if date_from is not None:
+        query = query.filter(models.PosCashExpense.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(models.PosCashExpense.created_at <= date_to)
+    return query.order_by(
+        models.PosCashExpense.created_at.desc(),
+        models.PosCashExpense.id.desc(),
+    ).all()
+
+
+def update_pos_cash_expense(
+    db: Session,
+    expense: models.PosCashExpense,
+    payload: schemas.PosCashExpenseUpdate,
+    *,
+    tenant_id: Optional[int],
+) -> models.PosCashExpense:
+    if expense.status != "open":
+        raise ValueError("Solo se pueden editar gastos abiertos")
+    update_data = payload.model_dump(exclude_unset=True)
+    if "station_id" in update_data:
+        expense.station_id = _resolve_cash_expense_station(
+            db,
+            update_data.get("station_id"),
+            tenant_id=tenant_id,
+        )
+    if "pos_name" in update_data:
+        expense.pos_name = (update_data.get("pos_name") or "").strip() or None
+    if "category" in update_data and update_data["category"]:
+        expense.category = update_data["category"]
+    if "amount" in update_data and update_data["amount"] is not None:
+        expense.amount = float(update_data["amount"] or 0.0)
+    if "description" in update_data:
+        expense.description = _normalize_cash_expense_description(
+            update_data.get("description")
+        )
+    expense.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def void_pos_cash_expense(
+    db: Session,
+    expense: models.PosCashExpense,
+    payload: schemas.PosCashExpenseVoid,
+    user: models.PosUser,
+) -> models.PosCashExpense:
+    if expense.status != "open":
+        raise ValueError("Solo se pueden anular gastos abiertos")
+    expense.status = "voided"
+    expense.voided_at = datetime.utcnow()
+    expense.voided_by_user_id = user.id
+    expense.voided_by_user_name = user.name
+    expense.void_reason = _normalize_cash_expense_description(payload.reason)
+    expense.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def attach_open_cash_expenses_to_closure(
+    db: Session,
+    closure: models.PosClosure,
+    payload: schemas.PosCashExpenseAttachRequest,
+    user: models.PosUser,
+) -> list[models.PosCashExpense]:
+    tenant_id = resolve_user_tenant_id(db, user)
+    if tenant_id is not None and closure.tenant_id != tenant_id:
+        raise ValueError("Cierre inválido para esta empresa")
+    station_id = _resolve_cash_expense_station(
+        db,
+        payload.station_id or closure.station_id,
+        tenant_id=tenant_id,
+    )
+    pos_name = (payload.pos_name or closure.pos_name or "").strip() or None
+    scoped_station_ids, _ = _resolve_closure_station_scope(
+        db,
+        station_id,
+        tenant_id=tenant_id,
+    )
+    query = db.query(models.PosCashExpense).filter(
+        models.PosCashExpense.status == "open",
+        models.PosCashExpense.closure_id.is_(None),
+        models.PosCashExpense.created_at <= closure.closed_at,
+    )
+    if tenant_id is not None:
+        query = query.filter(models.PosCashExpense.tenant_id == tenant_id)
+    if scoped_station_ids:
+        query = query.filter(models.PosCashExpense.station_id.in_(scoped_station_ids))
+    elif pos_name:
+        query = _filter_pos_name(query, models.PosCashExpense.pos_name, pos_name)
+    expenses = query.order_by(
+        models.PosCashExpense.created_at.asc(),
+        models.PosCashExpense.id.asc(),
+    ).all()
+    now = datetime.utcnow()
+    for expense in expenses:
+        expense.status = "closed"
+        expense.closure_id = closure.id
+        expense.closed_at = now
+        expense.updated_at = now
+    db.commit()
+    for expense in expenses:
+        db.refresh(expense)
+    return expenses
+
+
 def create_pos_closure(
     db: Session,
     closure_in: schemas.PosClosureCreate,

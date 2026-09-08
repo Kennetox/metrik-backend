@@ -2875,6 +2875,132 @@ def update_station_printer_config(
     return _station_printer_config(station)
 
 
+def _cash_expense_summary(
+    expenses: List[models.PosCashExpense],
+) -> schemas.PosCashExpenseSummary:
+    return schemas.PosCashExpenseSummary(
+        expenses=[
+            schemas.PosCashExpenseRead.model_validate(expense)
+            for expense in expenses
+        ],
+        total=round(sum(float(expense.amount or 0.0) for expense in expenses), 2),
+    )
+
+
+@router.get(
+    "/cash-expenses",
+    response_model=schemas.PosCashExpenseSummary,
+)
+def list_pos_cash_expenses(
+    status: Optional[schemas.CashExpenseStatus] = Query(default="open"),
+    station_id: Optional[str] = None,
+    pos_name: Optional[str] = None,
+    closure_id: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    expenses = crud.list_pos_cash_expenses(
+        db,
+        user=current_user,
+        status=status,
+        station_id=station_id,
+        pos_name=pos_name,
+        closure_id=closure_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return _cash_expense_summary(expenses)
+
+
+@router.post(
+    "/cash-expenses",
+    response_model=schemas.PosCashExpenseRead,
+    status_code=201,
+)
+def create_pos_cash_expense(
+    payload: schemas.PosCashExpenseCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    try:
+        return crud.create_pos_cash_expense(db, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch(
+    "/cash-expenses/{expense_id}",
+    response_model=schemas.PosCashExpenseRead,
+)
+def update_pos_cash_expense(
+    expense_id: int,
+    payload: schemas.PosCashExpenseUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    expense = crud.get_pos_cash_expense(db, expense_id, tenant_id=tenant_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
+    try:
+        return crud.update_pos_cash_expense(
+            db,
+            expense,
+            payload,
+            tenant_id=tenant_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/cash-expenses/{expense_id}/void",
+    response_model=schemas.PosCashExpenseRead,
+)
+def void_pos_cash_expense(
+    expense_id: int,
+    payload: schemas.PosCashExpenseVoid,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    expense = crud.get_pos_cash_expense(db, expense_id, tenant_id=tenant_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
+    try:
+        return crud.void_pos_cash_expense(db, expense, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/closures/{closure_id}/cash-expenses/attach",
+    response_model=schemas.PosCashExpenseSummary,
+)
+def attach_cash_expenses_to_closure(
+    closure_id: int,
+    payload: schemas.PosCashExpenseAttachRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.closures")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    closure = crud.get_pos_closure(db, closure_id, tenant_id=tenant_id)
+    if not closure:
+        raise HTTPException(status_code=404, detail="Cierre no encontrado")
+    try:
+        expenses = crud.attach_open_cash_expenses_to_closure(
+            db,
+            closure,
+            payload,
+            current_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _cash_expense_summary(expenses)
+
+
 @router.delete("/stations/{station_id}", status_code=204)
 def deactivate_pos_station(
     station_id: str,

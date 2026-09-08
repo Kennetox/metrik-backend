@@ -592,6 +592,104 @@ def test_closure_marks_sales_and_prevents_duplicates(client: TestClient):
     assert resp_again.status_code == 409
 
 
+def test_cash_expenses_are_managed_separately_and_attached_after_closure(
+    client: TestClient,
+):
+    headers = _auth_headers(client)
+    pos_name = "POS GASTOS TEST"
+    _create_sale_record(pos_name=pos_name)
+
+    created = client.post(
+        "/pos/cash-expenses",
+        json={
+            "category": "flete",
+            "amount": 30000,
+            "description": "Flete proveedor",
+            "pos_name": pos_name,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    expense_id = created.json()["id"]
+
+    edited = client.patch(
+        f"/pos/cash-expenses/{expense_id}",
+        json={
+            "category": "almuerzo",
+            "amount": 35000,
+            "description": "Almuerzos equipo",
+            "pos_name": pos_name,
+        },
+        headers=headers,
+    )
+    assert edited.status_code == 200
+    assert edited.json()["amount"] == 35000
+
+    void_candidate = client.post(
+        "/pos/cash-expenses",
+        json={
+            "category": "otro",
+            "amount": 5000,
+            "description": "Registro duplicado",
+            "pos_name": pos_name,
+        },
+        headers=headers,
+    )
+    assert void_candidate.status_code == 201
+    voided = client.post(
+        f"/pos/cash-expenses/{void_candidate.json()['id']}/void",
+        json={"reason": "Duplicado"},
+        headers=headers,
+    )
+    assert voided.status_code == 200
+    assert voided.json()["status"] == "voided"
+
+    open_expenses = client.get(
+        f"/pos/cash-expenses?status=open&pos_name={pos_name}",
+        headers=headers,
+    )
+    assert open_expenses.status_code == 200
+    assert open_expenses.json()["total"] == 35000
+    assert [expense["id"] for expense in open_expenses.json()["expenses"]] == [
+        expense_id
+    ]
+
+    closure = client.post(
+        "/pos/closures",
+        json={
+            "pos_name": pos_name,
+            "counted_cash": 100.0,
+            "notes": "Cierre con gastos separados",
+        },
+        headers=headers,
+    )
+    assert closure.status_code == 201
+    closure_data = closure.json()
+    assert closure_data["total_cash"] == 100.0
+    assert closure_data["net_amount"] == 100.0
+
+    attached = client.post(
+        f"/pos/closures/{closure_data['id']}/cash-expenses/attach",
+        json={"pos_name": pos_name},
+        headers=headers,
+    )
+    assert attached.status_code == 200
+    attached_data = attached.json()
+    assert attached_data["total"] == 35000
+    assert len(attached_data["expenses"]) == 1
+    assert attached_data["expenses"][0]["id"] == expense_id
+    assert attached_data["expenses"][0]["status"] == "closed"
+    assert attached_data["expenses"][0]["closure_id"] == closure_data["id"]
+
+    remaining = client.get(
+        f"/pos/cash-expenses?status=open&pos_name={pos_name}",
+        headers=headers,
+    )
+    assert remaining.status_code == 200
+    assert remaining.json()["total"] == 0
+    assert remaining.json()["expenses"] == []
+
+
 def test_sale_with_surcharge_fields(client: TestClient):
     headers = _auth_headers(client)
     sale_id = _create_sale_record(surcharge_amount=15.5, surcharge_label="Addi")
