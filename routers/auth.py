@@ -803,6 +803,50 @@ def mobile_stock_bind(
     )
 
 
+@router.post(
+    "/pos-station-bind",
+    response_model=schemas.AuthPosStationBindResponse,
+)
+def pos_station_bind(
+    payload: schemas.AuthPosStationBindRequest,
+    db: Session = Depends(get_db),
+):
+    station = crud.get_pos_station_by_setup_code(db, payload.setup_code.strip())
+    if not station or not station.is_active:
+        raise HTTPException(status_code=401, detail="Código de vinculación inválido o vencido")
+
+    _ensure_tablet_station_ready(db, station)
+    tenant_id = station.tenant_id
+    if tenant_id is None:
+        raise HTTPException(status_code=400, detail="Estación sin empresa asignada")
+    tenant = crud.get_tenant(db, int(tenant_id))
+    access_issue = crud.get_tenant_access_issue(tenant)
+    if access_issue:
+        raise HTTPException(status_code=401, detail=access_issue)
+
+    if payload.device_id:
+        station.bound_device_id = payload.device_id.strip() or None
+    if payload.device_label:
+        station.bound_device_label = payload.device_label.strip() or None
+    station.bound_at = datetime.utcnow()
+    station.bound_by_user_id = None
+    station.bound_by_user_name = None
+    crud.consume_pos_station_setup_code(db, station)
+
+    return schemas.AuthPosStationBindResponse(
+        station_id=station.id,
+        station_label=station.label,
+        station_email=station.station_email,
+        tenant_name=tenant.name if tenant else None,
+        parent_station_id=station.parent_station_id,
+        parent_station_label=(
+            station.parent_station.label
+            if getattr(station, "parent_station", None)
+            else None
+        ),
+    )
+
+
 @router.post("/mobile-stock-login", response_model=schemas.AuthLoginResponse)
 def mobile_stock_login(
     payload: schemas.AuthMobileStockLoginRequest,

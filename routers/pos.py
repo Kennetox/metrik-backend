@@ -697,6 +697,8 @@ def _station_to_read(station: models.PosStation) -> schemas.PosStationRead:
         last_login_at=station.last_login_at,
         bound_device_id=station.bound_device_id,
         bound_device_label=station.bound_device_label,
+        has_pending_setup_code=station.has_pending_setup_code,
+        setup_code_expires_at=station.setup_code_expires_at,
         bound_at=station.bound_at,
         bound_by_user_id=station.bound_by_user_id,
         bound_by_user_name=station.bound_by_user_name,
@@ -2703,6 +2705,33 @@ def update_pos_station(
         tenant_id=tenant_id,
     )
     return _station_to_response(station, pin_plain)
+
+
+@router.post(
+    "/stations/{station_id}/setup-code",
+    response_model=schemas.PosStationSetupCodeResponse,
+    status_code=201,
+)
+def create_pos_station_setup_code(
+    station_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("stations.manage")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    station = crud.get_pos_station(db, station_id, tenant_id=tenant_id)
+    if not station:
+        raise HTTPException(status_code=404, detail="Estación no encontrada")
+    if not station.is_active:
+        raise HTTPException(status_code=400, detail="La estación está inactiva")
+    try:
+        station, code, expires_at = crud.issue_pos_station_setup_code(db, station)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.PosStationSetupCodeResponse(
+        station=_station_to_read(station),
+        setup_code=code,
+        expires_at=expires_at,
+    )
 
 
 @router.get(

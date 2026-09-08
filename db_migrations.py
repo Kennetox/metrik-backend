@@ -1325,6 +1325,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_demo_signup_audits_postgres(connection)
                 _ensure_table_user_notifications_postgres(connection)
                 _ensure_kora_stock_plan_schema(connection, backend="postgresql")
+                _ensure_operational_signal_schema(connection, backend="postgresql")
                 _ensure_pos_print_job_schema(connection, backend="postgresql")
                 _ensure_column_postgres(
                     connection,
@@ -1777,6 +1778,18 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(
                     connection,
                     "pos_stations",
+                    "setup_code_hash",
+                    "TEXT",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
+                    "setup_code_expires_at",
+                    "TIMESTAMP",
+                )
+                _ensure_column_postgres(
+                    connection,
+                    "pos_stations",
                     "bound_at",
                     "TIMESTAMP",
                 )
@@ -2088,6 +2101,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_table_demo_signup_audits(connection)
                 _ensure_table_user_notifications(connection)
                 _ensure_kora_stock_plan_schema(connection, backend="sqlite")
+                _ensure_operational_signal_schema(connection, backend="sqlite")
                 _ensure_pos_print_job_schema(connection, backend="sqlite")
                 _seed_default_tenant_sqlite(connection)
                 _ensure_column(
@@ -4024,6 +4038,8 @@ def _ensure_table_pos_stations(connection) -> None:
                     last_failed_at DATETIME,
                     bound_device_id TEXT,
                     bound_device_label TEXT,
+                    setup_code_hash TEXT,
+                    setup_code_expires_at DATETIME,
                     bound_at DATETIME,
                     bound_by_user_id INTEGER,
                     bound_by_user_name TEXT,
@@ -4054,6 +4070,8 @@ def _ensure_table_pos_stations(connection) -> None:
         _ensure_column(connection, "pos_stations", "last_failed_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "bound_device_id", "TEXT")
         _ensure_column(connection, "pos_stations", "bound_device_label", "TEXT")
+        _ensure_column(connection, "pos_stations", "setup_code_hash", "TEXT")
+        _ensure_column(connection, "pos_stations", "setup_code_expires_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "bound_at", "DATETIME")
         _ensure_column(connection, "pos_stations", "bound_by_user_id", "INTEGER")
         _ensure_column(connection, "pos_stations", "bound_by_user_name", "TEXT")
@@ -4086,6 +4104,134 @@ def _ensure_table_pos_station_notices(connection) -> None:
                 """
             )
         )
+
+
+def _ensure_operational_signal_schema(connection, backend: str) -> None:
+    json_type = "JSONB" if backend == "postgresql" else "JSON"
+    id_type = "SERIAL" if backend == "postgresql" else "INTEGER"
+    timestamp_type = "TIMESTAMP" if backend == "postgresql" else "DATETIME"
+    boolean_type = "BOOLEAN" if backend == "postgresql" else "INTEGER"
+    connection.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS detector_runs (
+            id {id_type} PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+            detector_key VARCHAR(96) NOT NULL,
+            detector_version VARCHAR(32) NOT NULL,
+            trigger VARCHAR(24) NOT NULL DEFAULT 'scheduled',
+            scope {json_type} NOT NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'running'
+                CHECK (status IN ('running', 'succeeded', 'partial', 'failed')),
+            coverage_complete {boolean_type} NOT NULL DEFAULT FALSE,
+            started_at {timestamp_type} NOT NULL,
+            finished_at {timestamp_type},
+            subjects_evaluated INTEGER NOT NULL DEFAULT 0,
+            candidates_found INTEGER NOT NULL DEFAULT 0,
+            signals_created INTEGER NOT NULL DEFAULT 0,
+            signals_updated INTEGER NOT NULL DEFAULT 0,
+            signals_resolved INTEGER NOT NULL DEFAULT 0,
+            error_summary TEXT,
+            watermark {json_type},
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_detector_runs_tenant_detector_started
+        ON detector_runs (tenant_id, detector_key, started_at)
+    """))
+    connection.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS operational_signals (
+            id {id_type} PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+            detector_key VARCHAR(96) NOT NULL,
+            detector_version VARCHAR(32) NOT NULL,
+            signal_type VARCHAR(96) NOT NULL,
+            subject_type VARCHAR(64) NOT NULL,
+            subject_id INTEGER,
+            subject_external_key VARCHAR(160),
+            scope_key VARCHAR(96) NOT NULL DEFAULT 'tenant',
+            fingerprint VARCHAR(64) NOT NULL,
+            occurrence_number INTEGER NOT NULL DEFAULT 1,
+            condition_status VARCHAR(16) NOT NULL DEFAULT 'active'
+                CHECK (condition_status IN ('active', 'resolved')),
+            severity VARCHAR(16) NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+            priority_score INTEGER NOT NULL CHECK (priority_score BETWEEN 0 AND 100),
+            confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+            data_confidence DOUBLE PRECISION NOT NULL CHECK (data_confidence BETWEEN 0 AND 1),
+            actionability VARCHAR(16) NOT NULL CHECK (actionability IN ('low', 'medium', 'high')),
+            title VARCHAR(180) NOT NULL,
+            explanation TEXT NOT NULL,
+            evidence {json_type} NOT NULL,
+            recommended_action {json_type} NOT NULL,
+            module_id VARCHAR(48),
+            required_permission VARCHAR(96),
+            revision INTEGER NOT NULL DEFAULT 1,
+            first_detected_at {timestamp_type} NOT NULL,
+            last_detected_at {timestamp_type} NOT NULL,
+            last_material_change_at {timestamp_type} NOT NULL,
+            resolved_at {timestamp_type},
+            resolution_reason VARCHAR(96),
+            acknowledged_at {timestamp_type},
+            acknowledged_by_user_id INTEGER REFERENCES pos_users(id),
+            snoozed_until {timestamp_type},
+            snoozed_by_user_id INTEGER REFERENCES pos_users(id),
+            assigned_to_user_id INTEGER REFERENCES pos_users(id),
+            last_detector_run_id INTEGER NOT NULL REFERENCES detector_runs(id),
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_operational_signals_subject_identity CHECK (
+                (subject_id IS NOT NULL AND subject_external_key IS NULL) OR
+                (subject_id IS NULL AND subject_external_key IS NOT NULL)
+            ),
+            CONSTRAINT uq_operational_signal_occurrence UNIQUE
+                (tenant_id, fingerprint, occurrence_number)
+        )
+    """))
+    connection.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_operational_signals_active_fingerprint
+        ON operational_signals (tenant_id, fingerprint)
+        WHERE condition_status = 'active'
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_operational_signals_tenant_status_priority
+        ON operational_signals (tenant_id, condition_status, priority_score)
+    """))
+    connection.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS operational_signal_events (
+            id {id_type} PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+            signal_id INTEGER NOT NULL REFERENCES operational_signals(id),
+            detector_run_id INTEGER REFERENCES detector_runs(id),
+            actor_user_id INTEGER REFERENCES pos_users(id),
+            event_type VARCHAR(32) NOT NULL CHECK (event_type IN (
+                'created', 'material_update', 'acknowledged', 'snoozed',
+                'snooze_cleared', 'assigned', 'unassigned', 'resolved'
+            )),
+            details {json_type} NOT NULL,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_operational_signal_events_signal_created
+        ON operational_signal_events (signal_id, created_at)
+    """))
+    connection.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS operational_signal_feedback (
+            id {id_type} PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+            signal_id INTEGER NOT NULL REFERENCES operational_signals(id),
+            signal_revision INTEGER NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES pos_users(id),
+            feedback_type VARCHAR(32) NOT NULL,
+            comment TEXT,
+            detector_key_snapshot VARCHAR(96) NOT NULL,
+            detector_version_snapshot VARCHAR(32) NOT NULL,
+            created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    connection.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_operational_signal_feedback_signal_created
+        ON operational_signal_feedback (signal_id, created_at)
+    """))
 
 
 def _ensure_pos_print_job_schema(connection, backend: str) -> None:

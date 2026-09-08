@@ -260,6 +260,99 @@ def test_mobile_stock_binding_code_allows_pin_login_by_any_user_in_tenant(client
     assert login_payload["user"]["name"] == "Operario Dos"
 
 
+def test_pos_tablet_station_binding_code_preserves_parent_station(client: TestClient):
+    headers = _auth_headers(client)
+
+    user_response = client.post(
+        "/pos/users",
+        json={
+            "name": "Vendedor Tablet",
+            "email": "vendedor.tablet@example.com",
+            "role": "Vendedor",
+            "password": "tablet1234",
+            "pin_plain": "2468",
+        },
+        headers=headers,
+    )
+    assert user_response.status_code == 201
+
+    desktop_response = client.post(
+        "/pos/stations",
+        json={
+            "label": "Caja Principal Test",
+            "station_email": "principal.setup@example.com",
+            "station_password": "station123",
+            "station_type": "desktop",
+        },
+        headers=headers,
+    )
+    assert desktop_response.status_code == 201
+    desktop_id = desktop_response.json()["id"]
+
+    tablet_response = client.post(
+        "/pos/stations",
+        json={
+            "label": "Tablet Auxiliar Test",
+            "station_email": "tablet.setup@example.com",
+            "station_password": "station123",
+            "station_type": "tablet",
+            "parent_station_id": desktop_id,
+        },
+        headers=headers,
+    )
+    assert tablet_response.status_code == 201
+    tablet_payload = tablet_response.json()
+    tablet_id = tablet_payload["id"]
+    assert tablet_payload["parent_station_id"] == desktop_id
+
+    setup_response = client.post(
+        f"/pos/stations/{tablet_id}/setup-code",
+        headers=headers,
+    )
+    assert setup_response.status_code == 201
+    setup_payload = setup_response.json()
+    setup_code = setup_payload["setup_code"]
+    assert setup_payload["station"]["id"] == tablet_id
+    assert setup_payload["station"]["parent_station_id"] == desktop_id
+
+    bind_response = client.post(
+        "/auth/pos-station-bind",
+        json={
+            "setup_code": setup_code,
+            "device_id": "tablet-pos-local-01",
+            "device_label": "Android tablet POS",
+        },
+    )
+    assert bind_response.status_code == 200
+    bind_payload = bind_response.json()
+    assert bind_payload["station_id"] == tablet_id
+    assert bind_payload["parent_station_id"] == desktop_id
+
+    reused_bind = client.post(
+        "/auth/pos-station-bind",
+        json={"setup_code": setup_code, "device_id": "tablet-pos-local-01"},
+    )
+    assert reused_bind.status_code == 401
+
+    login_response = client.post(
+        "/auth/tablet-login",
+        json={
+            "station_id": tablet_id,
+            "pin": "2468",
+            "device_id": "tablet-pos-local-01",
+            "device_label": "Android tablet POS",
+        },
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["user"]["email"] == "vendedor.tablet@example.com"
+
+    refreshed_tablet = client.get("/pos/stations", headers=headers)
+    assert refreshed_tablet.status_code == 200
+    station_rows = {row["id"]: row for row in refreshed_tablet.json()}
+    assert station_rows[tablet_id]["parent_station_id"] == desktop_id
+    assert station_rows[tablet_id]["bound_device_id"] == "tablet-pos-local-01"
+
+
 def test_mobile_stock_legacy_email_flow_still_works(client: TestClient):
     headers = _auth_headers(client)
 

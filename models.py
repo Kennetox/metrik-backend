@@ -14,6 +14,8 @@ from sqlalchemy import (
     Index,
     Text,
     UniqueConstraint,
+    CheckConstraint,
+    text,
 )
 from sqlalchemy.orm import deferred, relationship
 
@@ -1582,6 +1584,149 @@ class UserNotification(Base):
     user = relationship("PosUser")
 
 
+class DetectorRun(Base):
+    __tablename__ = "detector_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'partial', 'failed')",
+            name="ck_detector_runs_status",
+        ),
+        Index("ix_detector_runs_tenant_detector_started", "tenant_id", "detector_key", "started_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    detector_key = Column(String(96), nullable=False, index=True)
+    detector_version = Column(String(32), nullable=False)
+    trigger = Column(String(24), nullable=False, default="scheduled")
+    scope = Column(JSON, nullable=False, default=dict)
+    status = Column(String(16), nullable=False, default="running", index=True)
+    coverage_complete = Column(Boolean, nullable=False, default=False)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    subjects_evaluated = Column(Integer, nullable=False, default=0)
+    candidates_found = Column(Integer, nullable=False, default=0)
+    signals_created = Column(Integer, nullable=False, default=0)
+    signals_updated = Column(Integer, nullable=False, default=0)
+    signals_resolved = Column(Integer, nullable=False, default=0)
+    error_summary = Column(Text, nullable=True)
+    watermark = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class OperationalSignal(Base):
+    __tablename__ = "operational_signals"
+    __table_args__ = (
+        CheckConstraint(
+            "(subject_id IS NOT NULL AND subject_external_key IS NULL) OR "
+            "(subject_id IS NULL AND subject_external_key IS NOT NULL)",
+            name="ck_operational_signals_subject_identity",
+        ),
+        CheckConstraint(
+            "condition_status IN ('active', 'resolved')",
+            name="ck_operational_signals_condition_status",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="ck_operational_signals_severity",
+        ),
+        CheckConstraint(
+            "actionability IN ('low', 'medium', 'high')",
+            name="ck_operational_signals_actionability",
+        ),
+        CheckConstraint("priority_score >= 0 AND priority_score <= 100", name="ck_operational_signals_priority"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_operational_signals_confidence"),
+        CheckConstraint("data_confidence >= 0 AND data_confidence <= 1", name="ck_operational_signals_data_confidence"),
+        UniqueConstraint("tenant_id", "fingerprint", "occurrence_number", name="uq_operational_signal_occurrence"),
+        Index(
+            "uq_operational_signals_active_fingerprint",
+            "tenant_id",
+            "fingerprint",
+            unique=True,
+            sqlite_where=text("condition_status = 'active'"),
+            postgresql_where=text("condition_status = 'active'"),
+        ),
+        Index("ix_operational_signals_tenant_status_priority", "tenant_id", "condition_status", "priority_score"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    detector_key = Column(String(96), nullable=False, index=True)
+    detector_version = Column(String(32), nullable=False)
+    signal_type = Column(String(96), nullable=False, index=True)
+    subject_type = Column(String(64), nullable=False)
+    subject_id = Column(Integer, nullable=True, index=True)
+    subject_external_key = Column(String(160), nullable=True, index=True)
+    scope_key = Column(String(96), nullable=False, default="tenant")
+    fingerprint = Column(String(64), nullable=False, index=True)
+    occurrence_number = Column(Integer, nullable=False, default=1)
+    condition_status = Column(String(16), nullable=False, default="active", index=True)
+    severity = Column(String(16), nullable=False)
+    priority_score = Column(Integer, nullable=False)
+    confidence = Column(Float, nullable=False)
+    data_confidence = Column(Float, nullable=False)
+    actionability = Column(String(16), nullable=False)
+    title = Column(String(180), nullable=False)
+    explanation = Column(Text, nullable=False)
+    evidence = Column(JSON, nullable=False, default=dict)
+    recommended_action = Column(JSON, nullable=False, default=dict)
+    module_id = Column(String(48), nullable=True)
+    required_permission = Column(String(96), nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+    first_detected_at = Column(DateTime, nullable=False)
+    last_detected_at = Column(DateTime, nullable=False)
+    last_material_change_at = Column(DateTime, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+    resolution_reason = Column(String(96), nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    snoozed_until = Column(DateTime, nullable=True)
+    snoozed_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    assigned_to_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    last_detector_run_id = Column(Integer, ForeignKey("detector_runs.id"), nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OperationalSignalEvent(Base):
+    __tablename__ = "operational_signal_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('created', 'material_update', 'acknowledged', 'snoozed', "
+            "'snooze_cleared', 'assigned', 'unassigned', 'resolved')",
+            name="ck_operational_signal_events_type",
+        ),
+        Index("ix_operational_signal_events_signal_created", "signal_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    signal_id = Column(Integer, ForeignKey("operational_signals.id"), nullable=False, index=True)
+    detector_run_id = Column(Integer, ForeignKey("detector_runs.id"), nullable=True, index=True)
+    actor_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
+    event_type = Column(String(32), nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class OperationalSignalFeedback(Base):
+    __tablename__ = "operational_signal_feedback"
+    __table_args__ = (
+        Index("ix_operational_signal_feedback_signal_created", "signal_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    signal_id = Column(Integer, ForeignKey("operational_signals.id"), nullable=False, index=True)
+    signal_revision = Column(Integer, nullable=False)
+    user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=False, index=True)
+    feedback_type = Column(String(32), nullable=False)
+    comment = Column(Text, nullable=True)
+    detector_key_snapshot = Column(String(96), nullable=False)
+    detector_version_snapshot = Column(String(32), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class KoraStockPlan(Base):
     """A deterministic stock-cleanup recommendation prepared by Kora.
 
@@ -1876,6 +2021,8 @@ class PosStation(Base):
     last_failed_at = Column(DateTime, nullable=True)
     bound_device_id = Column(String, nullable=True)
     bound_device_label = Column(String, nullable=True)
+    setup_code_hash = Column(String, nullable=True)
+    setup_code_expires_at = Column(DateTime, nullable=True)
     bound_at = Column(DateTime, nullable=True)
     bound_by_user_id = Column(Integer, ForeignKey("pos_users.id"), nullable=True)
     bound_by_user_name = Column(String, nullable=True)
@@ -1902,6 +2049,14 @@ class PosStation(Base):
         remote_side=[id],
         foreign_keys=[parent_station_id],
     )
+
+    @property
+    def has_pending_setup_code(self) -> bool:
+        return bool(
+            self.setup_code_hash
+            and self.setup_code_expires_at
+            and self.setup_code_expires_at > datetime.utcnow()
+        )
 
 
 class PosPrintJob(Base):

@@ -2376,6 +2376,8 @@ class PosStationRead(BaseModel):
     last_login_at: Optional[datetime] = None
     bound_device_id: Optional[str] = None
     bound_device_label: Optional[str] = None
+    has_pending_setup_code: bool = False
+    setup_code_expires_at: Optional[datetime] = None
     bound_at: Optional[datetime] = None
     bound_by_user_id: Optional[int] = None
     bound_by_user_name: Optional[str] = None
@@ -2393,6 +2395,12 @@ class PosStationRead(BaseModel):
 
 class PosStationResponse(PosStationRead):
     pin_plain: Optional[str] = None
+
+
+class PosStationSetupCodeResponse(BaseModel):
+    station: PosStationRead
+    setup_code: str
+    expires_at: datetime
 
 
 class StockDeviceCreate(BaseModel):
@@ -3940,6 +3948,21 @@ class AuthPosStationLoginResponse(BaseModel):
     station_id: str
     station_label: str
     station_email: EmailStr
+    tenant_name: Optional[str] = None
+    parent_station_id: Optional[str] = None
+    parent_station_label: Optional[str] = None
+
+
+class AuthPosStationBindRequest(BaseModel):
+    setup_code: Annotated[str, Field(min_length=6, max_length=12)]
+    device_id: Optional[str] = None
+    device_label: Optional[str] = None
+
+
+class AuthPosStationBindResponse(BaseModel):
+    station_id: str
+    station_label: str
+    station_email: Optional[EmailStr] = None
     tenant_name: Optional[str] = None
     parent_station_id: Optional[str] = None
     parent_station_label: Optional[str] = None

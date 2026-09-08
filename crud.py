@@ -12388,6 +12388,53 @@ def consume_stock_device_setup_code(
     return device
 
 
+def issue_pos_station_setup_code(
+    db: Session,
+    station: models.PosStation,
+    *,
+    ttl_seconds: int = 15 * 60,
+) -> tuple[models.PosStation, str, datetime]:
+    if (station.station_type or "desktop") != "tablet":
+        raise ValueError("Solo las estaciones tablet usan código de vinculación")
+    code = f"{secrets.randbelow(900000) + 100000:06d}"
+    expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+    station.setup_code_hash = hash_password(code)
+    station.setup_code_expires_at = expires_at
+    db.commit()
+    db.refresh(station)
+    return station, code, expires_at
+
+
+def get_pos_station_by_setup_code(
+    db: Session,
+    setup_code: str,
+) -> Optional[models.PosStation]:
+    now = datetime.utcnow()
+    stations = (
+        db.query(models.PosStation)
+        .options(selectinload(models.PosStation.parent_station))
+        .filter(models.PosStation.setup_code_hash.isnot(None))
+        .filter(models.PosStation.setup_code_expires_at.isnot(None))
+        .filter(models.PosStation.setup_code_expires_at >= now)
+        .all()
+    )
+    for station in stations:
+        if station.setup_code_hash and verify_password(setup_code, station.setup_code_hash):
+            return station
+    return None
+
+
+def consume_pos_station_setup_code(
+    db: Session,
+    station: models.PosStation,
+) -> models.PosStation:
+    station.setup_code_hash = None
+    station.setup_code_expires_at = None
+    db.commit()
+    db.refresh(station)
+    return station
+
+
 def get_stock_device_usage_summary(
     db: Session,
     device: models.StockDevice,
