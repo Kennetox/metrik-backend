@@ -53,7 +53,6 @@ from routers import (
     documents as documents_router,
     notifications as notifications_router,
     system_status as system_status_router,
-    operational_signals as operational_signals_router,
     loyalty as loyalty_router,
 )
 
@@ -638,7 +637,6 @@ app.include_router(legacy_imports_router.router)
 app.include_router(documents_router.router)
 app.include_router(notifications_router.router)
 app.include_router(system_status_router.router)
-app.include_router(operational_signals_router.router)
 app.include_router(loyalty_router.router)
 if ENABLE_SCHEDULE_MODULE:
     from routers import schedule as schedule_router
