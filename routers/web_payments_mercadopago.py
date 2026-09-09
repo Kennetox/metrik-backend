@@ -1652,19 +1652,28 @@ def _create_guest_order(
             db,
             tenant_id=tenant_id,
             code=normalized_coupon_code,
+            purchase_amount=subtotal_amount,
         )
         if not valid_coupon:
             raise HTTPException(status_code=400, detail="El código no está disponible o ya venció")
-        _, coupon_discount_value, coupon_discount_percent = crud._resolve_discount_code_snapshot_values(
-            discount_type=getattr(valid_coupon, "discount_type", None),
-            discount_value=getattr(valid_coupon, "discount_value", None),
-            discount_percent=getattr(valid_coupon, "discount_percent", None),
+        validation = crud.validate_discount_code_for_purchase(
+            db,
+            tenant_id=tenant_id,
+            code=normalized_coupon_code,
+            purchase_amount=subtotal_amount,
         )
+        if not validation.valid:
+            raise HTTPException(status_code=400, detail=validation.message)
+        coupon_discount_value = validation.effective_discount_amount or validation.discount_amount
+        coupon_discount_percent = 0.0
+        if validation.discount_type != "fixed_amount":
+            coupon_discount_value = validation.discount_value
+            coupon_discount_percent = validation.discount_value
         coupon_discount_code_id = int(valid_coupon.id)
         if coupon_discount_value > 0:
             discount_amount = crud._compute_coupon_discount_amount(
                 subtotal_amount,
-                discount_type=getattr(valid_coupon, "discount_type", None),
+                discount_type=validation.discount_type,
                 discount_value=coupon_discount_value,
                 discount_percent=coupon_discount_percent,
             )

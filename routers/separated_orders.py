@@ -174,6 +174,7 @@ def create_separated_order(
             created_by_user_id=current_user.id,
             tenant_id=tenant_id,
             commit=False,
+            issue_loyalty_reward=False,
         )
     except ValueError as exc:
         db.rollback()

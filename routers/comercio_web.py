@@ -779,6 +779,138 @@ def update_comercio_web_discount_code(
         raise HTTPException(status_code=400, detail=detail) from exc
 
 
+@router.get(
+    "/loyalty/rules",
+    response_model=list[schemas.LoyaltyRewardRuleRead],
+)
+def list_loyalty_reward_rules(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_loyalty_reward_rules(db, tenant_id=tenant_id)
+
+
+@router.post(
+    "/loyalty/rules",
+    response_model=schemas.LoyaltyRewardRuleRead,
+)
+def create_loyalty_reward_rule(
+    payload: schemas.LoyaltyRewardRuleCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_loyalty_reward_rule(db, tenant_id=tenant_id, payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put(
+    "/loyalty/rules/{rule_id}",
+    response_model=schemas.LoyaltyRewardRuleRead,
+)
+def update_loyalty_reward_rule(
+    rule_id: int,
+    payload: schemas.LoyaltyRewardRuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_loyalty_reward_rule(
+            db,
+            tenant_id=tenant_id,
+            rule_id=rule_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.get(
+    "/loyalty/redemption-rules",
+    response_model=list[schemas.LoyaltyRedemptionRuleRead],
+)
+def list_loyalty_redemption_rules(
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.list_loyalty_redemption_rules(db, tenant_id=tenant_id)
+
+
+@router.post(
+    "/loyalty/redemption-rules",
+    response_model=schemas.LoyaltyRedemptionRuleRead,
+)
+def create_loyalty_redemption_rule(
+    payload: schemas.LoyaltyRedemptionRuleCreate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.create_loyalty_redemption_rule(db, tenant_id=tenant_id, payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put(
+    "/loyalty/redemption-rules/{rule_id}",
+    response_model=schemas.LoyaltyRedemptionRuleRead,
+)
+def update_loyalty_redemption_rule(
+    rule_id: int,
+    payload: schemas.LoyaltyRedemptionRuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.manage")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    try:
+        return crud.update_loyalty_redemption_rule(
+            db,
+            tenant_id=tenant_id,
+            rule_id=rule_id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "no encontrada" in detail.lower():
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.get(
+    "/loyalty/metrics",
+    response_model=schemas.LoyaltyRewardMetricsRead,
+)
+def get_loyalty_reward_metrics(
+    date_from: Optional[datetime] = Query(default=None),
+    date_to: Optional[datetime] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
+    _: models.PosUser = Depends(require_module_access("commerce_web")),
+):
+    tenant_id = _tenant_id_for_user(db, current_user)
+    return crud.get_loyalty_reward_metrics(
+        db,
+        tenant_id=tenant_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
 @router.get("/orders/{order_id}", response_model=schemas.WebOrderRead)
 def get_comercio_web_order(
     order_id: int,

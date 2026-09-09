@@ -452,6 +452,8 @@ class ComercioWebDiscountCodeBase(BaseModel):
     discount_type: Literal["percent", "fixed_amount"] = "percent"
     discount_value: float = Field(ge=0)
     discount_percent: float = Field(default=0, ge=0, le=100)
+    minimum_purchase: Optional[float] = Field(default=None, ge=0)
+    source_type: Optional[str] = Field(default=None, max_length=32)
     is_active: bool = True
     max_uses: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
@@ -467,6 +469,8 @@ class ComercioWebDiscountCodeUpdate(BaseModel):
     discount_type: Optional[Literal["percent", "fixed_amount"]] = None
     discount_value: Optional[float] = Field(default=None, gt=0)
     discount_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    minimum_purchase: Optional[float] = Field(default=None, ge=0)
+    source_type: Optional[str] = Field(default=None, max_length=32)
     is_active: Optional[bool] = None
     max_uses: Optional[int] = Field(default=None, ge=1)
     starts_at: Optional[datetime] = None
@@ -3259,6 +3263,7 @@ class SaleBase(BaseModel):
     change_amount: float = Field(ge=0)
     cart_discount_value: float = Field(default=0.0, ge=0)
     cart_discount_percent: float = Field(default=0.0, ge=0, le=100)
+    loyalty_discount_code: Optional[str] = Field(default=None, min_length=3, max_length=64)
     surcharge_amount: float = Field(default=0.0, ge=0)
     surcharge_label: Optional[str] = None
     customer_name: Optional[str] = None
@@ -3284,6 +3289,128 @@ class SaleCreate(SaleBase):
         max_length=64,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
+
+
+class SaleLoyaltyRewardRead(BaseModel):
+    amount: float
+    minimum_purchase: float
+    expires_at: datetime
+    public_url: Optional[str] = None
+
+
+class PosDiscountCodeValidateRequest(BaseModel):
+    code: str = Field(min_length=3, max_length=64)
+    purchase_amount: float = Field(ge=0)
+
+
+class PosDiscountCodeValidateResponse(BaseModel):
+    valid: bool
+    code: Optional[str] = None
+    discount_type: Optional[Literal["percent", "fixed_amount"]] = None
+    discount_value: float = 0
+    minimum_purchase: float = 0
+    reward_max_amount: Optional[float] = None
+    effective_discount_amount: float = 0
+    purchase_total: float = 0
+    discount_amount: float = 0
+    message: str
+
+
+class PublicLoyaltyRedemptionOption(BaseModel):
+    min_purchase: float
+    max_purchase: Optional[float] = None
+    discount_amount: float
+
+
+class PublicLoyaltyRewardResponse(BaseModel):
+    status: Literal["issued", "activated", "redeemed", "expired", "cancelled", "invalid"]
+    amount: Optional[float] = None
+    minimum_purchase: Optional[float] = None
+    expires_at: Optional[datetime] = None
+    code: Optional[str] = None
+    redemption_options: List[PublicLoyaltyRedemptionOption] = Field(default_factory=list)
+
+
+class PublicLoyaltyRewardActivateResponse(PublicLoyaltyRewardResponse):
+    pass
+
+
+class LoyaltyRewardRuleBase(BaseModel):
+    min_purchase: float = Field(ge=0)
+    max_purchase: Optional[float] = Field(default=None, ge=0)
+    reward_amount: float = Field(gt=0)
+    minimum_purchase: float = Field(ge=0)
+    validity_days: int = Field(gt=0)
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class LoyaltyRewardRuleCreate(LoyaltyRewardRuleBase):
+    pass
+
+
+class LoyaltyRewardRuleUpdate(BaseModel):
+    min_purchase: Optional[float] = Field(default=None, ge=0)
+    max_purchase: Optional[float] = Field(default=None, ge=0)
+    reward_amount: Optional[float] = Field(default=None, gt=0)
+    minimum_purchase: Optional[float] = Field(default=None, ge=0)
+    validity_days: Optional[int] = Field(default=None, gt=0)
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class LoyaltyRewardRuleRead(LoyaltyRewardRuleBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LoyaltyRedemptionRuleBase(BaseModel):
+    min_purchase: float = Field(ge=0)
+    max_purchase: Optional[float] = Field(default=None, ge=0)
+    discount_amount: float = Field(gt=0)
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class LoyaltyRedemptionRuleCreate(LoyaltyRedemptionRuleBase):
+    pass
+
+
+class LoyaltyRedemptionRuleUpdate(BaseModel):
+    min_purchase: Optional[float] = Field(default=None, ge=0)
+    max_purchase: Optional[float] = Field(default=None, ge=0)
+    discount_amount: Optional[float] = Field(default=None, gt=0)
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class LoyaltyRedemptionRuleRead(LoyaltyRedemptionRuleBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LoyaltyRewardMetricsRead(BaseModel):
+    issued: int = 0
+    activated: int = 0
+    redeemed: int = 0
+    expired: int = 0
+    cancelled: int = 0
+    scan_count_total: int = 0
+    emitted_count: int = 0
+    issued_amount_total: float = 0
+    redeemed_amount_total: float = 0
+    redeemed_discount_amount_total: float = 0
+    attributed_sales_total: float = 0
+    issued_to_activated_rate: float = 0
+    activated_to_redeemed_rate: float = 0
 
 
 class PaymentMethodSummary(BaseModel):
@@ -3665,6 +3792,9 @@ class SaleRead(SaleBase):
     has_cash_payment: bool = False
     source_system: str = "metrik"
     is_imported: bool = False
+    reward: Optional[SaleLoyaltyRewardRead] = None
+    loyalty_discount_code_id: Optional[int] = None
+    loyalty_discount_amount: float = 0.0
 
     @field_validator("payments", mode="before")
     @classmethod

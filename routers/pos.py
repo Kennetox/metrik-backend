@@ -808,6 +808,9 @@ def _serialize_sale_response(sale: models.Sale) -> schemas.SaleRead:
 
     updates["source_system"] = "metrik"
     updates["is_imported"] = False
+    updates["reward"] = crud.loyalty_reward_response_payload(
+        getattr(sale, "origin_loyalty_reward", None)
+    )
     return sale_schema.model_copy(update=updates)
 
 
@@ -1213,6 +1216,27 @@ def create_sale(
 
     _POS_QUERY_CACHE.clear()
     return _serialize_sale_response(sale)
+
+
+@router.post(
+    "/discount-codes/validate",
+    response_model=schemas.PosDiscountCodeValidateResponse,
+)
+def validate_pos_discount_code(
+    payload: schemas.PosDiscountCodeValidateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.PosUser = Depends(require_permission("pos.sales")),
+):
+    tenant_id = crud.resolve_user_tenant_id(db, current_user)
+    result = crud.validate_discount_code_for_purchase(
+        db,
+        tenant_id=tenant_id,
+        code=payload.code,
+        purchase_amount=payload.purchase_amount,
+    )
+    if not result.valid:
+        raise HTTPException(status_code=400, detail=result.message)
+    return result
 
 
 @router.get("/sales", response_model=List[schemas.SaleRead])

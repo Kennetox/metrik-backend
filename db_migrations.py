@@ -63,16 +63,483 @@ def _ensure_web_discount_code_schema(connection, backend: str) -> None:
             return
         _ensure_column_postgres(connection, table, "discount_type", "VARCHAR(16) NOT NULL DEFAULT 'percent'")
         _ensure_column_postgres(connection, table, "discount_value", "FLOAT NOT NULL DEFAULT 0")
+        _ensure_column_postgres(connection, table, "minimum_purchase", "FLOAT")
+        _ensure_column_postgres(connection, table, "source_type", "VARCHAR(32)")
         _ensure_column_postgres(connection, table, "max_uses", "INTEGER")
         _ensure_column_postgres(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_web_discount_codes_source_type "
+                "ON web_discount_codes(source_type)"
+            )
+        )
         return
 
     if not _table_exists(connection, table):
         return
     _ensure_column(connection, table, "discount_type", "TEXT NOT NULL DEFAULT 'percent'")
     _ensure_column(connection, table, "discount_value", "FLOAT NOT NULL DEFAULT 0")
+    _ensure_column(connection, table, "minimum_purchase", "FLOAT")
+    _ensure_column(connection, table, "source_type", "TEXT")
     _ensure_column(connection, table, "max_uses", "INTEGER")
     _ensure_column(connection, table, "uses_count", "INTEGER NOT NULL DEFAULT 0")
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_web_discount_codes_source_type "
+            "ON web_discount_codes(source_type)"
+        )
+    )
+
+
+def _ensure_sale_loyalty_discount_schema(connection, backend: str) -> None:
+    table = "sales"
+    if backend == "postgresql":
+        if not _table_exists_postgres(connection, table):
+            return
+        _ensure_column_postgres(connection, table, "loyalty_discount_code_id", "INTEGER")
+        _ensure_column_postgres(connection, table, "loyalty_discount_code", "VARCHAR(64)")
+        _ensure_column_postgres(connection, table, "loyalty_discount_amount", "FLOAT NOT NULL DEFAULT 0")
+    else:
+        if not _table_exists(connection, table):
+            return
+        _ensure_column(connection, table, "loyalty_discount_code_id", "INTEGER")
+        _ensure_column(connection, table, "loyalty_discount_code", "TEXT")
+        _ensure_column(connection, table, "loyalty_discount_amount", "FLOAT NOT NULL DEFAULT 0")
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_sales_loyalty_discount_code_id "
+            "ON sales(loyalty_discount_code_id)"
+        )
+    )
+
+
+LOYALTY_REWARD_RULE_SEED_ROWS = (
+    (100000.0, 249999.0, 10000.0, 100000.0, 30, 10),
+    (250000.0, 499999.0, 20000.0, 200000.0, 30, 20),
+    (500000.0, 999999.0, 30000.0, 300000.0, 30, 30),
+    (1000000.0, 1499999.0, 50000.0, 500000.0, 30, 40),
+    (1500000.0, 1999999.0, 70000.0, 700000.0, 30, 50),
+    (2000000.0, None, 100000.0, 1000000.0, 30, 60),
+)
+
+
+LOYALTY_REDEMPTION_RULE_SEED_ROWS = (
+    (100000.0, 199999.0, 10000.0, 10),
+    (200000.0, 299999.0, 20000.0, 20),
+    (300000.0, 499999.0, 30000.0, 30),
+    (500000.0, 699999.0, 50000.0, 40),
+    (700000.0, 999999.0, 70000.0, 50),
+    (1000000.0, None, 100000.0, 60),
+)
+
+
+def _seed_default_loyalty_reward_rules(connection) -> None:
+    tenant_rows = connection.execute(
+        text(
+            """
+            SELECT tenants.id AS tenant_id
+            FROM tenants
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM loyalty_reward_rules existing
+                WHERE existing.tenant_id = tenants.id
+            )
+            """
+        )
+    ).mappings().all()
+    for tenant_row in tenant_rows:
+        for min_purchase, max_purchase, reward_amount, minimum_purchase, validity_days, sort_order in LOYALTY_REWARD_RULE_SEED_ROWS:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO loyalty_reward_rules (
+                        tenant_id,
+                        min_purchase,
+                        max_purchase,
+                        reward_amount,
+                        minimum_purchase,
+                        validity_days,
+                        is_active,
+                        sort_order,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :tenant_id,
+                        :min_purchase,
+                        :max_purchase,
+                        :reward_amount,
+                        :minimum_purchase,
+                        :validity_days,
+                        :is_active,
+                        :sort_order,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "tenant_id": tenant_row["tenant_id"],
+                    "min_purchase": min_purchase,
+                    "max_purchase": max_purchase,
+                    "reward_amount": reward_amount,
+                    "minimum_purchase": minimum_purchase,
+                    "validity_days": validity_days,
+                    "is_active": True,
+                    "sort_order": sort_order,
+                },
+            )
+
+
+def _seed_default_loyalty_redemption_rules(connection) -> None:
+    tenant_rows = connection.execute(
+        text(
+            """
+            SELECT tenants.id AS tenant_id
+            FROM tenants
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM loyalty_redemption_rules existing
+                WHERE existing.tenant_id = tenants.id
+            )
+            """
+        )
+    ).mappings().all()
+    for tenant_row in tenant_rows:
+        for min_purchase, max_purchase, discount_amount, sort_order in LOYALTY_REDEMPTION_RULE_SEED_ROWS:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO loyalty_redemption_rules (
+                        tenant_id,
+                        min_purchase,
+                        max_purchase,
+                        discount_amount,
+                        is_active,
+                        sort_order,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :tenant_id,
+                        :min_purchase,
+                        :max_purchase,
+                        :discount_amount,
+                        :is_active,
+                        :sort_order,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "tenant_id": tenant_row["tenant_id"],
+                    "min_purchase": min_purchase,
+                    "max_purchase": max_purchase,
+                    "discount_amount": discount_amount,
+                    "is_active": True,
+                    "sort_order": sort_order,
+                },
+            )
+
+
+def _ensure_loyalty_reward_schema(connection, backend: str) -> None:
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS loyalty_reward_rules (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    min_purchase FLOAT NOT NULL,
+                    max_purchase FLOAT,
+                    reward_amount FLOAT NOT NULL,
+                    minimum_purchase FLOAT NOT NULL,
+                    validity_days INTEGER NOT NULL DEFAULT 30,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT loyalty_reward_rules_min_purchase_nonnegative CHECK (min_purchase >= 0),
+                    CONSTRAINT loyalty_reward_rules_reward_amount_positive CHECK (reward_amount > 0),
+                    CONSTRAINT loyalty_reward_rules_redeem_min_nonnegative CHECK (minimum_purchase >= 0),
+                    CONSTRAINT loyalty_reward_rules_validity_days_positive CHECK (validity_days > 0)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS loyalty_redemption_rules (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    min_purchase FLOAT NOT NULL,
+                    max_purchase FLOAT,
+                    discount_amount FLOAT NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT loyalty_redemption_rules_min_purchase_nonnegative CHECK (min_purchase >= 0),
+                    CONSTRAINT loyalty_redemption_rules_discount_amount_positive CHECK (discount_amount > 0)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS loyalty_rewards (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    sale_id INTEGER NOT NULL REFERENCES sales(id),
+                    rule_id INTEGER REFERENCES loyalty_reward_rules(id),
+                    token_hash VARCHAR(128) NOT NULL,
+                    token_encrypted TEXT,
+                    customer_id INTEGER REFERENCES pos_customers(id),
+                    discount_code_id INTEGER REFERENCES web_discount_codes(id),
+                    reward_amount FLOAT NOT NULL,
+                    minimum_purchase FLOAT NOT NULL,
+                    issued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    first_scanned_at TIMESTAMP,
+                    last_scanned_at TIMESTAMP,
+                    scan_count INTEGER NOT NULL DEFAULT 0,
+                    activated_at TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL,
+                    redeemed_at TIMESTAMP,
+                    redeemed_sale_id INTEGER REFERENCES sales(id),
+                    redeemed_order_id INTEGER REFERENCES web_orders(id),
+                    cancelled_at TIMESTAMP,
+                    cancellation_reason TEXT,
+                    status VARCHAR(16) NOT NULL DEFAULT 'issued',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT loyalty_rewards_status_check CHECK (status IN ('issued', 'activated', 'redeemed', 'expired', 'cancelled')),
+                    CONSTRAINT loyalty_rewards_reward_amount_positive CHECK (reward_amount > 0),
+                    CONSTRAINT loyalty_rewards_minimum_purchase_nonnegative CHECK (minimum_purchase >= 0),
+                    CONSTRAINT loyalty_rewards_scan_count_nonnegative CHECK (scan_count >= 0)
+                )
+                """
+            )
+        )
+    else:
+        if not _table_exists(connection, "loyalty_reward_rules"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE loyalty_reward_rules (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        min_purchase FLOAT NOT NULL,
+                        max_purchase FLOAT,
+                        reward_amount FLOAT NOT NULL,
+                        minimum_purchase FLOAT NOT NULL,
+                        validity_days INTEGER NOT NULL DEFAULT 30,
+                        is_active INTEGER NOT NULL DEFAULT 1,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        CHECK (min_purchase >= 0),
+                        CHECK (reward_amount > 0),
+                        CHECK (minimum_purchase >= 0),
+                        CHECK (validity_days > 0)
+                    )
+                    """
+                )
+            )
+        if not _table_exists(connection, "loyalty_redemption_rules"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE loyalty_redemption_rules (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        min_purchase FLOAT NOT NULL,
+                        max_purchase FLOAT,
+                        discount_amount FLOAT NOT NULL,
+                        is_active INTEGER NOT NULL DEFAULT 1,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        CHECK (min_purchase >= 0),
+                        CHECK (discount_amount > 0)
+                    )
+                    """
+                )
+            )
+        if not _table_exists(connection, "loyalty_rewards"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE loyalty_rewards (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        sale_id INTEGER NOT NULL,
+                        rule_id INTEGER,
+                        token_hash TEXT NOT NULL,
+                        token_encrypted TEXT,
+                        customer_id INTEGER,
+                        discount_code_id INTEGER,
+                        reward_amount FLOAT NOT NULL,
+                        minimum_purchase FLOAT NOT NULL,
+                        issued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        first_scanned_at DATETIME,
+                        last_scanned_at DATETIME,
+                        scan_count INTEGER NOT NULL DEFAULT 0,
+                        activated_at DATETIME,
+                        expires_at DATETIME NOT NULL,
+                        redeemed_at DATETIME,
+                        redeemed_sale_id INTEGER,
+                        redeemed_order_id INTEGER,
+                        cancelled_at DATETIME,
+                        cancellation_reason TEXT,
+                        status TEXT NOT NULL DEFAULT 'issued',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        FOREIGN KEY(sale_id) REFERENCES sales(id),
+                        FOREIGN KEY(rule_id) REFERENCES loyalty_reward_rules(id),
+                        FOREIGN KEY(customer_id) REFERENCES pos_customers(id),
+                        FOREIGN KEY(discount_code_id) REFERENCES web_discount_codes(id),
+                        FOREIGN KEY(redeemed_sale_id) REFERENCES sales(id),
+                        FOREIGN KEY(redeemed_order_id) REFERENCES web_orders(id),
+                        CHECK (status IN ('issued', 'activated', 'redeemed', 'expired', 'cancelled')),
+                        CHECK (reward_amount > 0),
+                        CHECK (minimum_purchase >= 0),
+                        CHECK (scan_count >= 0)
+                    )
+                    """
+                )
+            )
+
+    for table, column, ddl in (
+        ("loyalty_reward_rules", "tenant_id", "INTEGER NOT NULL"),
+        ("loyalty_reward_rules", "min_purchase", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_reward_rules", "max_purchase", "FLOAT"),
+        ("loyalty_reward_rules", "reward_amount", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_reward_rules", "minimum_purchase", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_reward_rules", "validity_days", "INTEGER NOT NULL DEFAULT 30"),
+        ("loyalty_reward_rules", "is_active", "BOOLEAN NOT NULL DEFAULT TRUE" if backend == "postgresql" else "INTEGER NOT NULL DEFAULT 1"),
+        ("loyalty_reward_rules", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
+        ("loyalty_redemption_rules", "tenant_id", "INTEGER NOT NULL"),
+        ("loyalty_redemption_rules", "min_purchase", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_redemption_rules", "max_purchase", "FLOAT"),
+        ("loyalty_redemption_rules", "discount_amount", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_redemption_rules", "is_active", "BOOLEAN NOT NULL DEFAULT TRUE" if backend == "postgresql" else "INTEGER NOT NULL DEFAULT 1"),
+        ("loyalty_redemption_rules", "sort_order", "INTEGER NOT NULL DEFAULT 0"),
+        ("loyalty_rewards", "tenant_id", "INTEGER NOT NULL"),
+        ("loyalty_rewards", "sale_id", "INTEGER NOT NULL"),
+        ("loyalty_rewards", "rule_id", "INTEGER"),
+        ("loyalty_rewards", "token_hash", "VARCHAR(128) NOT NULL" if backend == "postgresql" else "TEXT NOT NULL"),
+        ("loyalty_rewards", "token_encrypted", "TEXT"),
+        ("loyalty_rewards", "customer_id", "INTEGER"),
+        ("loyalty_rewards", "discount_code_id", "INTEGER"),
+        ("loyalty_rewards", "reward_amount", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_rewards", "minimum_purchase", "FLOAT NOT NULL DEFAULT 0"),
+        ("loyalty_rewards", "first_scanned_at", "TIMESTAMP" if backend == "postgresql" else "DATETIME"),
+        ("loyalty_rewards", "last_scanned_at", "TIMESTAMP" if backend == "postgresql" else "DATETIME"),
+        ("loyalty_rewards", "scan_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("loyalty_rewards", "activated_at", "TIMESTAMP" if backend == "postgresql" else "DATETIME"),
+        ("loyalty_rewards", "expires_at", "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP" if backend == "postgresql" else "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        ("loyalty_rewards", "redeemed_at", "TIMESTAMP" if backend == "postgresql" else "DATETIME"),
+        ("loyalty_rewards", "redeemed_sale_id", "INTEGER"),
+        ("loyalty_rewards", "redeemed_order_id", "INTEGER"),
+        ("loyalty_rewards", "cancelled_at", "TIMESTAMP" if backend == "postgresql" else "DATETIME"),
+        ("loyalty_rewards", "cancellation_reason", "TEXT"),
+        ("loyalty_rewards", "status", "VARCHAR(16) NOT NULL DEFAULT 'issued'" if backend == "postgresql" else "TEXT NOT NULL DEFAULT 'issued'"),
+    ):
+        if backend == "postgresql":
+            _ensure_column_postgres(connection, table, column, ddl)
+        else:
+            _ensure_column(connection, table, column, ddl)
+
+    index_statements = [
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_reward_rules_tenant_active_min ON loyalty_reward_rules(tenant_id, is_active, min_purchase)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_redemption_rules_tenant_active_min ON loyalty_redemption_rules(tenant_id, is_active, min_purchase)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS loyalty_rewards_sale_id_key ON loyalty_rewards(sale_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS loyalty_rewards_token_hash_key ON loyalty_rewards(token_hash)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS loyalty_rewards_discount_code_id_key ON loyalty_rewards(discount_code_id) WHERE discount_code_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_tenant_status_expires ON loyalty_rewards(tenant_id, status, expires_at)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_tenant_issued ON loyalty_rewards(tenant_id, issued_at)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_rule_id ON loyalty_rewards(rule_id)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_customer_id ON loyalty_rewards(customer_id)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_redeemed_sale_id ON loyalty_rewards(redeemed_sale_id)",
+        "CREATE INDEX IF NOT EXISTS ix_loyalty_rewards_redeemed_order_id ON loyalty_rewards(redeemed_order_id)",
+    ]
+    for statement in index_statements:
+        connection.execute(text(statement))
+
+    _seed_default_loyalty_reward_rules(connection)
+    _seed_default_loyalty_redemption_rules(connection)
+
+
+def _ensure_discount_code_redemption_schema(connection, backend: str) -> None:
+    if backend == "postgresql":
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS discount_code_redemptions (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    discount_code_id INTEGER NOT NULL REFERENCES web_discount_codes(id),
+                    sale_id INTEGER REFERENCES sales(id),
+                    web_order_id INTEGER REFERENCES web_orders(id),
+                    discount_amount FLOAT NOT NULL DEFAULT 0,
+                    redeemed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    else:
+        if not _table_exists(connection, "discount_code_redemptions"):
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE discount_code_redemptions (
+                        id INTEGER PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL,
+                        discount_code_id INTEGER NOT NULL,
+                        sale_id INTEGER,
+                        web_order_id INTEGER,
+                        discount_amount FLOAT NOT NULL DEFAULT 0,
+                        redeemed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+                        FOREIGN KEY(discount_code_id) REFERENCES web_discount_codes(id),
+                        FOREIGN KEY(sale_id) REFERENCES sales(id),
+                        FOREIGN KEY(web_order_id) REFERENCES web_orders(id)
+                    )
+                    """
+                )
+            )
+
+    for table, column, ddl in (
+        ("discount_code_redemptions", "tenant_id", "INTEGER NOT NULL"),
+        ("discount_code_redemptions", "discount_code_id", "INTEGER NOT NULL"),
+        ("discount_code_redemptions", "sale_id", "INTEGER"),
+        ("discount_code_redemptions", "web_order_id", "INTEGER"),
+        ("discount_code_redemptions", "discount_amount", "FLOAT NOT NULL DEFAULT 0"),
+        ("discount_code_redemptions", "redeemed_at", "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP" if backend == "postgresql" else "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+    ):
+        if backend == "postgresql":
+            _ensure_column_postgres(connection, table, column, ddl)
+        else:
+            _ensure_column(connection, table, column, ddl)
+
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_discount_code_redemptions_tenant_redeemed "
+            "ON discount_code_redemptions(tenant_id, redeemed_at)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_discount_code_redemptions_discount_code "
+            "ON discount_code_redemptions(discount_code_id)"
+        )
+    )
 
 
 def _ensure_web_cart_coupon_schema(connection, backend: str) -> None:
@@ -2182,7 +2649,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                 )
                 _backfill_legacy_users_to_default_tenant_postgres(connection)
                 _backfill_company_name_from_tenant_postgres(connection)
+                _ensure_sale_loyalty_discount_schema(connection, backend="postgresql")
                 _ensure_web_discount_code_schema(connection, backend="postgresql")
+                _ensure_loyalty_reward_schema(connection, backend="postgresql")
+                _ensure_discount_code_redemption_schema(connection, backend="postgresql")
                 _ensure_web_cart_coupon_schema(connection, backend="postgresql")
                 _ensure_web_order_coupon_schema(connection, backend="postgresql")
                 _ensure_web_catalog_category_home_schema(connection, backend="postgresql")
@@ -3358,7 +3828,10 @@ def run_schema_upgrades(engine: Engine) -> None:
                     },
                 )
                 _backfill_legacy_users_to_default_tenant_sqlite(connection)
+                _ensure_sale_loyalty_discount_schema(connection, backend="sqlite")
                 _ensure_web_discount_code_schema(connection, backend="sqlite")
+                _ensure_loyalty_reward_schema(connection, backend="sqlite")
+                _ensure_discount_code_redemption_schema(connection, backend="sqlite")
                 _ensure_web_cart_coupon_schema(connection, backend="sqlite")
                 _ensure_web_order_coupon_schema(connection, backend="sqlite")
                 _ensure_web_catalog_category_home_schema(connection, backend="sqlite")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from calendar import monthrange
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import String, and_, case, cast, false, func, not_, or_, text, true
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
@@ -5527,6 +5529,804 @@ def reset_comercio_web_description_templates(
 def _normalize_discount_code(value: str) -> str:
     return (value or "").strip().upper()
 
+
+def _normalize_discount_source_type(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip().lower()
+    return normalized or None
+
+
+LOYALTY_REWARD_STATUS_ISSUED = "issued"
+LOYALTY_REWARD_STATUS_ACTIVATED = "activated"
+LOYALTY_REWARD_STATUS_REDEEMED = "redeemed"
+LOYALTY_REWARD_STATUS_EXPIRED = "expired"
+LOYALTY_REWARD_STATUS_CANCELLED = "cancelled"
+LOYALTY_REWARD_STATUSES = {
+    LOYALTY_REWARD_STATUS_ISSUED,
+    LOYALTY_REWARD_STATUS_ACTIVATED,
+    LOYALTY_REWARD_STATUS_REDEEMED,
+    LOYALTY_REWARD_STATUS_EXPIRED,
+    LOYALTY_REWARD_STATUS_CANCELLED,
+}
+LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE = "loyalty_reward"
+LOYALTY_REWARD_PUBLIC_BASE_URL_ENV = "LOYALTY_REWARD_PUBLIC_BASE_URL"
+LOYALTY_REWARD_TOKEN_BYTES = 32
+
+
+def _loyalty_reward_token_secret() -> bytes:
+    raw = os.getenv("LOYALTY_REWARD_TOKEN_ENCRYPTION_KEY") or os.getenv("POS_SECRET_KEY")
+    if not raw:
+        database_url = (os.getenv("DATABASE_URL") or "").strip().lower()
+        if database_url and not database_url.startswith("sqlite") and not os.getenv("PYTEST_CURRENT_TEST"):
+            raise RuntimeError("LOYALTY_REWARD_TOKEN_ENCRYPTION_KEY debe estar configurada")
+        raw = "kensar-pos-secret-change-me"
+    if raw.startswith("base64:"):
+        return base64.urlsafe_b64decode(raw.removeprefix("base64:").encode("utf-8"))
+    return hashlib.sha256(raw.encode("utf-8")).digest()
+
+
+def _loyalty_reward_fernet() -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(_loyalty_reward_token_secret()))
+
+
+def generate_loyalty_reward_token() -> str:
+    return secrets.token_urlsafe(LOYALTY_REWARD_TOKEN_BYTES)
+
+
+def hash_loyalty_reward_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def encrypt_loyalty_reward_token(token: str) -> str:
+    return _loyalty_reward_fernet().encrypt(token.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_loyalty_reward_token(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return _loyalty_reward_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        return None
+
+
+def loyalty_reward_public_base_url() -> str:
+    base_url = (
+        os.getenv(LOYALTY_REWARD_PUBLIC_BASE_URL_ENV)
+        or os.getenv("PUBLIC_APP_URL")
+        or os.getenv("APP_BASE_URL")
+        or "https://www.kensarelectronic.com"
+    )
+    return base_url.strip().rstrip("/")
+
+
+def build_loyalty_reward_public_url(token: str) -> str:
+    return f"{loyalty_reward_public_base_url()}/beneficio/{token}"
+
+
+def resolve_loyalty_reward_rule_for_purchase(
+    db: Session,
+    *,
+    tenant_id: int,
+    purchase_amount: float,
+) -> Optional[models.LoyaltyRewardRule]:
+    amount = _round_currency_to_unit(purchase_amount)
+    if tenant_id is None or amount <= 0:
+        return None
+
+    return (
+        db.query(models.LoyaltyRewardRule)
+        .filter(
+            models.LoyaltyRewardRule.tenant_id == tenant_id,
+            models.LoyaltyRewardRule.is_active.is_(True),
+            models.LoyaltyRewardRule.min_purchase <= amount,
+            or_(
+                models.LoyaltyRewardRule.max_purchase.is_(None),
+                models.LoyaltyRewardRule.max_purchase >= amount,
+            ),
+        )
+        .order_by(
+            models.LoyaltyRewardRule.min_purchase.desc(),
+            models.LoyaltyRewardRule.sort_order.asc(),
+            models.LoyaltyRewardRule.id.asc(),
+        )
+        .first()
+    )
+
+
+def build_loyalty_reward_snapshot_from_rule(
+    rule: models.LoyaltyRewardRule,
+) -> dict[str, float | int]:
+    return {
+        "rule_id": int(rule.id),
+        "reward_amount": float(rule.reward_amount or 0.0),
+        "minimum_purchase": float(rule.minimum_purchase or 0.0),
+        "validity_days": int(rule.validity_days or 30),
+    }
+
+
+def _issue_loyalty_reward_for_sale(
+    db: Session,
+    sale: models.Sale,
+    *,
+    tenant_id: int,
+) -> Optional[models.LoyaltyReward]:
+    if not sale or sale.id is None or tenant_id is None:
+        return None
+    if (sale.status or "active") == "voided":
+        return None
+
+    existing_reward = (
+        db.query(models.LoyaltyReward)
+        .filter(
+            models.LoyaltyReward.sale_id == sale.id,
+            models.LoyaltyReward.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if existing_reward:
+        return existing_reward
+
+    eligible_amount = _round_currency_to_unit(float(sale.total or 0.0))
+    rule = resolve_loyalty_reward_rule_for_purchase(
+        db,
+        tenant_id=tenant_id,
+        purchase_amount=eligible_amount,
+    )
+    if not rule:
+        return None
+
+    snapshot = build_loyalty_reward_snapshot_from_rule(rule)
+    issued_at = datetime.utcnow()
+    token = generate_loyalty_reward_token()
+    reward = models.LoyaltyReward(
+        tenant_id=tenant_id,
+        sale_id=sale.id,
+        rule_id=int(snapshot["rule_id"]),
+        token_hash=hash_loyalty_reward_token(token),
+        token_encrypted=encrypt_loyalty_reward_token(token),
+        customer_id=sale.customer_id,
+        reward_amount=float(snapshot["reward_amount"]),
+        minimum_purchase=float(snapshot["minimum_purchase"]),
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(days=int(snapshot["validity_days"])),
+        status=LOYALTY_REWARD_STATUS_ISSUED,
+    )
+    db.add(reward)
+    db.flush()
+    setattr(reward, "_public_token", token)
+    sale.origin_loyalty_reward = reward
+    return reward
+
+
+def loyalty_reward_response_payload(
+    reward: Optional[models.LoyaltyReward],
+) -> Optional[dict[str, Any]]:
+    if not reward:
+        return None
+    if reward.status in {LOYALTY_REWARD_STATUS_CANCELLED, LOYALTY_REWARD_STATUS_EXPIRED}:
+        return None
+    token = getattr(reward, "_public_token", None) or decrypt_loyalty_reward_token(
+        getattr(reward, "token_encrypted", None)
+    )
+    public_url = build_loyalty_reward_public_url(token) if token else None
+    return {
+        "amount": float(reward.reward_amount or 0.0),
+        "minimum_purchase": float(reward.minimum_purchase or 0.0),
+        "expires_at": reward.expires_at,
+        "public_url": public_url,
+    }
+
+
+def _generate_loyalty_discount_code(db: Session, tenant_id: int) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    for _ in range(20):
+        suffix = "".join(secrets.choice(alphabet) for _ in range(8))
+        code = f"KSR-{suffix}"
+        exists = (
+            db.query(models.WebDiscountCode.id)
+            .filter(
+                models.WebDiscountCode.tenant_id == tenant_id,
+                models.WebDiscountCode.code == code,
+            )
+            .first()
+        )
+        if not exists:
+            return code
+    raise RuntimeError("No se pudo generar un código loyalty único")
+
+
+def _refresh_loyalty_reward_expiration(
+    db: Session,
+    reward: Optional[models.LoyaltyReward],
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[models.LoyaltyReward]:
+    if not reward:
+        return None
+    now = now or datetime.utcnow()
+    if (
+        reward.status in {LOYALTY_REWARD_STATUS_ISSUED, LOYALTY_REWARD_STATUS_ACTIVATED}
+        and reward.expires_at
+        and reward.expires_at < now
+    ):
+        reward.status = LOYALTY_REWARD_STATUS_EXPIRED
+        db.add(reward)
+        code = reward.discount_code
+        if code and bool(code.is_active):
+            code.is_active = False
+            code.updated_at = now
+            db.add(code)
+    return reward
+
+
+def _public_loyalty_reward_payload(
+    db: Session,
+    reward: Optional[models.LoyaltyReward],
+) -> schemas.PublicLoyaltyRewardResponse:
+    if not reward:
+        return schemas.PublicLoyaltyRewardResponse(status="invalid")
+    code_value = None
+    if reward.status == LOYALTY_REWARD_STATUS_ACTIVATED and reward.discount_code:
+        code_value = reward.discount_code.code
+    return schemas.PublicLoyaltyRewardResponse(
+        status=reward.status,
+        amount=float(reward.reward_amount or 0.0),
+        minimum_purchase=float(reward.minimum_purchase or 0.0),
+        expires_at=reward.expires_at,
+        code=code_value,
+        redemption_options=build_public_loyalty_redemption_options(
+            db,
+            tenant_id=int(reward.tenant_id),
+            reward_max_amount=float(reward.reward_amount or 0.0),
+        ),
+    )
+
+
+def get_public_loyalty_reward(
+    db: Session,
+    token: str,
+    *,
+    record_scan: bool = True,
+) -> schemas.PublicLoyaltyRewardResponse:
+    token_hash = hash_loyalty_reward_token(token)
+    reward = (
+        db.query(models.LoyaltyReward)
+        .options(selectinload(models.LoyaltyReward.discount_code))
+        .filter(models.LoyaltyReward.token_hash == token_hash)
+        .first()
+    )
+    if not reward:
+        return schemas.PublicLoyaltyRewardResponse(status="invalid")
+    now = datetime.utcnow()
+    _refresh_loyalty_reward_expiration(db, reward, now=now)
+    if record_scan:
+        if reward.first_scanned_at is None:
+            reward.first_scanned_at = now
+        reward.last_scanned_at = now
+        reward.scan_count = int(reward.scan_count or 0) + 1
+    db.commit()
+    db.refresh(reward)
+    return _public_loyalty_reward_payload(db, reward)
+
+
+def activate_public_loyalty_reward(
+    db: Session,
+    token: str,
+) -> schemas.PublicLoyaltyRewardActivateResponse:
+    token_hash = hash_loyalty_reward_token(token)
+    reward = (
+        db.query(models.LoyaltyReward)
+        .options(selectinload(models.LoyaltyReward.discount_code))
+        .filter(models.LoyaltyReward.token_hash == token_hash)
+        .with_for_update()
+        .first()
+    )
+    if not reward:
+        return schemas.PublicLoyaltyRewardActivateResponse(status="invalid")
+
+    now = datetime.utcnow()
+    _refresh_loyalty_reward_expiration(db, reward, now=now)
+    if reward.status in {
+        LOYALTY_REWARD_STATUS_CANCELLED,
+        LOYALTY_REWARD_STATUS_EXPIRED,
+        LOYALTY_REWARD_STATUS_REDEEMED,
+    }:
+        db.commit()
+        db.refresh(reward)
+        return schemas.PublicLoyaltyRewardActivateResponse(
+            **_public_loyalty_reward_payload(db, reward).model_dump()
+        )
+
+    if reward.discount_code:
+        if reward.status == LOYALTY_REWARD_STATUS_ISSUED:
+            reward.status = LOYALTY_REWARD_STATUS_ACTIVATED
+            reward.activated_at = reward.activated_at or now
+            db.add(reward)
+        db.commit()
+        db.refresh(reward)
+        return schemas.PublicLoyaltyRewardActivateResponse(
+            **_public_loyalty_reward_payload(db, reward).model_dump()
+        )
+
+    try:
+        code = models.WebDiscountCode(
+            tenant_id=reward.tenant_id,
+            code=_generate_loyalty_discount_code(db, int(reward.tenant_id)),
+            discount_type="fixed_amount",
+            discount_value=float(reward.reward_amount or 0.0),
+            discount_percent=0.0,
+            minimum_purchase=float(reward.minimum_purchase or 0.0),
+            source_type=LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE,
+            is_active=True,
+            max_uses=1,
+            uses_count=0,
+            starts_at=now,
+            ends_at=reward.expires_at,
+        )
+        db.add(code)
+        db.flush()
+        reward.discount_code_id = code.id
+        reward.status = LOYALTY_REWARD_STATUS_ACTIVATED
+        reward.activated_at = reward.activated_at or now
+        db.add(reward)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        reward = (
+            db.query(models.LoyaltyReward)
+            .options(selectinload(models.LoyaltyReward.discount_code))
+            .filter(models.LoyaltyReward.token_hash == token_hash)
+            .first()
+        )
+        if reward and reward.discount_code:
+            return schemas.PublicLoyaltyRewardActivateResponse(
+                **_public_loyalty_reward_payload(db, reward).model_dump()
+            )
+        raise
+
+    db.refresh(reward)
+    return schemas.PublicLoyaltyRewardActivateResponse(
+        **_public_loyalty_reward_payload(db, reward).model_dump()
+    )
+
+
+def _validate_loyalty_rule_payload(
+    db: Session,
+    *,
+    tenant_id: int,
+    min_purchase: float,
+    max_purchase: Optional[float],
+    reward_amount: float,
+    minimum_purchase: float,
+    validity_days: int,
+    is_active: bool,
+    exclude_rule_id: Optional[int] = None,
+) -> None:
+    min_value = _round_currency_to_unit(min_purchase)
+    max_value = _round_currency_to_unit(max_purchase) if max_purchase is not None else None
+    if max_value is not None and max_value < min_value:
+        raise ValueError("El monto máximo no puede ser menor al mínimo")
+    if reward_amount <= 0 or minimum_purchase < 0 or validity_days <= 0:
+        raise ValueError("Los valores de la regla deben ser positivos")
+    if not is_active:
+        return
+    query = db.query(models.LoyaltyRewardRule).filter(
+        models.LoyaltyRewardRule.tenant_id == tenant_id,
+        models.LoyaltyRewardRule.is_active.is_(True),
+    )
+    if exclude_rule_id is not None:
+        query = query.filter(models.LoyaltyRewardRule.id != int(exclude_rule_id))
+    for rule in query.all():
+        other_min = _round_currency_to_unit(rule.min_purchase)
+        other_max = (
+            _round_currency_to_unit(rule.max_purchase)
+            if rule.max_purchase is not None
+            else None
+        )
+        left_max = float("inf") if max_value is None else max_value
+        right_max = float("inf") if other_max is None else other_max
+        if min_value <= right_max and other_min <= left_max:
+            raise ValueError("La regla se solapa con otro tramo activo")
+
+
+def list_loyalty_reward_rules(
+    db: Session,
+    *,
+    tenant_id: int,
+) -> list[models.LoyaltyRewardRule]:
+    return (
+        db.query(models.LoyaltyRewardRule)
+        .filter(models.LoyaltyRewardRule.tenant_id == tenant_id)
+        .order_by(
+            models.LoyaltyRewardRule.sort_order.asc(),
+            models.LoyaltyRewardRule.min_purchase.asc(),
+            models.LoyaltyRewardRule.id.asc(),
+        )
+        .all()
+    )
+
+
+def create_loyalty_reward_rule(
+    db: Session,
+    *,
+    tenant_id: int,
+    payload: schemas.LoyaltyRewardRuleCreate,
+) -> models.LoyaltyRewardRule:
+    _validate_loyalty_rule_payload(
+        db,
+        tenant_id=tenant_id,
+        min_purchase=payload.min_purchase,
+        max_purchase=payload.max_purchase,
+        reward_amount=payload.reward_amount,
+        minimum_purchase=payload.minimum_purchase,
+        validity_days=payload.validity_days,
+        is_active=payload.is_active,
+    )
+    row = models.LoyaltyRewardRule(
+        tenant_id=tenant_id,
+        min_purchase=_round_currency_to_unit(payload.min_purchase),
+        max_purchase=(
+            _round_currency_to_unit(payload.max_purchase)
+            if payload.max_purchase is not None
+            else None
+        ),
+        reward_amount=_round_currency_to_unit(payload.reward_amount),
+        minimum_purchase=_round_currency_to_unit(payload.minimum_purchase),
+        validity_days=int(payload.validity_days),
+        is_active=bool(payload.is_active),
+        sort_order=int(payload.sort_order or 0),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_loyalty_reward_rule(
+    db: Session,
+    *,
+    tenant_id: int,
+    rule_id: int,
+    payload: schemas.LoyaltyRewardRuleUpdate,
+) -> models.LoyaltyRewardRule:
+    row = (
+        db.query(models.LoyaltyRewardRule)
+        .filter(
+            models.LoyaltyRewardRule.id == int(rule_id),
+            models.LoyaltyRewardRule.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Regla no encontrada")
+    data = payload.model_dump(exclude_unset=True)
+    next_values = {
+        "min_purchase": data.get("min_purchase", row.min_purchase),
+        "max_purchase": data.get("max_purchase", row.max_purchase),
+        "reward_amount": data.get("reward_amount", row.reward_amount),
+        "minimum_purchase": data.get("minimum_purchase", row.minimum_purchase),
+        "validity_days": data.get("validity_days", row.validity_days),
+        "is_active": data.get("is_active", row.is_active),
+    }
+    _validate_loyalty_rule_payload(
+        db,
+        tenant_id=tenant_id,
+        exclude_rule_id=row.id,
+        **next_values,
+    )
+    for key, value in data.items():
+        if key in {"min_purchase", "max_purchase", "reward_amount", "minimum_purchase"}:
+            setattr(row, key, _round_currency_to_unit(value) if value is not None else None)
+        elif key in {"validity_days", "sort_order"} and value is not None:
+            setattr(row, key, int(value))
+        elif key == "is_active":
+            row.is_active = bool(value)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def resolve_loyalty_redemption_rule_for_purchase(
+    db: Session,
+    *,
+    tenant_id: int,
+    purchase_amount: float,
+) -> Optional[models.LoyaltyRedemptionRule]:
+    amount = _round_currency_to_unit(purchase_amount)
+    if tenant_id is None or amount <= 0:
+        return None
+    return (
+        db.query(models.LoyaltyRedemptionRule)
+        .filter(
+            models.LoyaltyRedemptionRule.tenant_id == tenant_id,
+            models.LoyaltyRedemptionRule.is_active.is_(True),
+            models.LoyaltyRedemptionRule.min_purchase <= amount,
+            or_(
+                models.LoyaltyRedemptionRule.max_purchase.is_(None),
+                models.LoyaltyRedemptionRule.max_purchase >= amount,
+            ),
+        )
+        .order_by(
+            models.LoyaltyRedemptionRule.min_purchase.desc(),
+            models.LoyaltyRedemptionRule.sort_order.asc(),
+            models.LoyaltyRedemptionRule.id.asc(),
+        )
+        .first()
+    )
+
+
+def build_public_loyalty_redemption_options(
+    db: Session,
+    *,
+    tenant_id: int,
+    reward_max_amount: float,
+) -> list[schemas.PublicLoyaltyRedemptionOption]:
+    max_amount = _round_currency_to_unit(reward_max_amount)
+    if tenant_id is None or max_amount <= 0:
+        return []
+    rows = (
+        db.query(models.LoyaltyRedemptionRule)
+        .filter(
+            models.LoyaltyRedemptionRule.tenant_id == tenant_id,
+            models.LoyaltyRedemptionRule.is_active.is_(True),
+            models.LoyaltyRedemptionRule.discount_amount <= max_amount,
+        )
+        .order_by(
+            models.LoyaltyRedemptionRule.sort_order.asc(),
+            models.LoyaltyRedemptionRule.min_purchase.asc(),
+            models.LoyaltyRedemptionRule.id.asc(),
+        )
+        .all()
+    )
+    return [
+        schemas.PublicLoyaltyRedemptionOption(
+            min_purchase=float(row.min_purchase or 0.0),
+            max_purchase=(float(row.max_purchase) if row.max_purchase is not None else None),
+            discount_amount=float(row.discount_amount or 0.0),
+        )
+        for row in rows
+    ]
+
+
+def compute_loyalty_effective_discount_amount(
+    db: Session,
+    *,
+    tenant_id: int,
+    reward: models.LoyaltyReward,
+    purchase_amount: float,
+) -> tuple[float, Optional[models.LoyaltyRedemptionRule], str]:
+    amount = _round_currency_to_unit(purchase_amount)
+    if amount <= 0:
+        return 0.0, None, "El beneficio comienza en compras desde $100.000."
+    rule = resolve_loyalty_redemption_rule_for_purchase(
+        db,
+        tenant_id=tenant_id,
+        purchase_amount=amount,
+    )
+    if not rule:
+        return 0.0, None, "El beneficio comienza en compras desde $100.000."
+    effective = min(
+        float(reward.reward_amount or 0.0),
+        float(rule.discount_amount or 0.0),
+        amount,
+    )
+    if effective <= 0:
+        return 0.0, rule, "El código no genera descuento para esta compra."
+    return _round_currency_to_unit(effective), rule, "Código aplicado."
+
+
+def _validate_loyalty_redemption_rule_payload(
+    db: Session,
+    *,
+    tenant_id: int,
+    min_purchase: float,
+    max_purchase: Optional[float],
+    discount_amount: float,
+    is_active: bool,
+    exclude_rule_id: Optional[int] = None,
+) -> None:
+    min_value = _round_currency_to_unit(min_purchase)
+    max_value = _round_currency_to_unit(max_purchase) if max_purchase is not None else None
+    if max_value is not None and max_value < min_value:
+        raise ValueError("El monto máximo no puede ser menor al mínimo")
+    if discount_amount <= 0:
+        raise ValueError("El descuento debe ser mayor a 0")
+    if not is_active:
+        return
+    query = db.query(models.LoyaltyRedemptionRule).filter(
+        models.LoyaltyRedemptionRule.tenant_id == tenant_id,
+        models.LoyaltyRedemptionRule.is_active.is_(True),
+    )
+    if exclude_rule_id is not None:
+        query = query.filter(models.LoyaltyRedemptionRule.id != int(exclude_rule_id))
+    for rule in query.all():
+        other_min = _round_currency_to_unit(rule.min_purchase)
+        other_max = (
+            _round_currency_to_unit(rule.max_purchase)
+            if rule.max_purchase is not None
+            else None
+        )
+        left_max = float("inf") if max_value is None else max_value
+        right_max = float("inf") if other_max is None else other_max
+        if min_value <= right_max and other_min <= left_max:
+            raise ValueError("La regla se solapa con otro tramo activo")
+
+
+def list_loyalty_redemption_rules(
+    db: Session,
+    *,
+    tenant_id: int,
+) -> list[models.LoyaltyRedemptionRule]:
+    return (
+        db.query(models.LoyaltyRedemptionRule)
+        .filter(models.LoyaltyRedemptionRule.tenant_id == tenant_id)
+        .order_by(
+            models.LoyaltyRedemptionRule.sort_order.asc(),
+            models.LoyaltyRedemptionRule.min_purchase.asc(),
+            models.LoyaltyRedemptionRule.id.asc(),
+        )
+        .all()
+    )
+
+
+def create_loyalty_redemption_rule(
+    db: Session,
+    *,
+    tenant_id: int,
+    payload: schemas.LoyaltyRedemptionRuleCreate,
+) -> models.LoyaltyRedemptionRule:
+    _validate_loyalty_redemption_rule_payload(
+        db,
+        tenant_id=tenant_id,
+        min_purchase=payload.min_purchase,
+        max_purchase=payload.max_purchase,
+        discount_amount=payload.discount_amount,
+        is_active=payload.is_active,
+    )
+    row = models.LoyaltyRedemptionRule(
+        tenant_id=tenant_id,
+        min_purchase=_round_currency_to_unit(payload.min_purchase),
+        max_purchase=(
+            _round_currency_to_unit(payload.max_purchase)
+            if payload.max_purchase is not None
+            else None
+        ),
+        discount_amount=_round_currency_to_unit(payload.discount_amount),
+        is_active=bool(payload.is_active),
+        sort_order=int(payload.sort_order or 0),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_loyalty_redemption_rule(
+    db: Session,
+    *,
+    tenant_id: int,
+    rule_id: int,
+    payload: schemas.LoyaltyRedemptionRuleUpdate,
+) -> models.LoyaltyRedemptionRule:
+    row = (
+        db.query(models.LoyaltyRedemptionRule)
+        .filter(
+            models.LoyaltyRedemptionRule.id == int(rule_id),
+            models.LoyaltyRedemptionRule.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row:
+        raise ValueError("Regla no encontrada")
+    data = payload.model_dump(exclude_unset=True)
+    next_values = {
+        "min_purchase": data.get("min_purchase", row.min_purchase),
+        "max_purchase": data.get("max_purchase", row.max_purchase),
+        "discount_amount": data.get("discount_amount", row.discount_amount),
+        "is_active": data.get("is_active", row.is_active),
+    }
+    _validate_loyalty_redemption_rule_payload(
+        db,
+        tenant_id=tenant_id,
+        exclude_rule_id=row.id,
+        **next_values,
+    )
+    for key, value in data.items():
+        if key in {"min_purchase", "max_purchase", "discount_amount"}:
+            setattr(row, key, _round_currency_to_unit(value) if value is not None else None)
+        elif key == "sort_order" and value is not None:
+            row.sort_order = int(value)
+        elif key == "is_active":
+            row.is_active = bool(value)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_loyalty_reward_metrics(
+    db: Session,
+    *,
+    tenant_id: int,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> schemas.LoyaltyRewardMetricsRead:
+    query = db.query(models.LoyaltyReward).filter(models.LoyaltyReward.tenant_id == tenant_id)
+    if date_from:
+        query = query.filter(models.LoyaltyReward.issued_at >= date_from)
+    if date_to:
+        query = query.filter(models.LoyaltyReward.issued_at <= date_to)
+    rewards = query.all()
+    counts = {status: 0 for status in LOYALTY_REWARD_STATUSES}
+    for reward in rewards:
+        status = reward.status if reward.status in counts else LOYALTY_REWARD_STATUS_ISSUED
+        counts[status] += 1
+    issued_amount_total = sum(float(row.reward_amount or 0.0) for row in rewards)
+    redeemed_ids = [row.id for row in rewards if row.status == LOYALTY_REWARD_STATUS_REDEEMED]
+    redeemed_amount_total = sum(
+        float(row.reward_amount or 0.0)
+        for row in rewards
+        if row.status == LOYALTY_REWARD_STATUS_REDEEMED
+    )
+    redeemed_discount_amount_total = 0.0
+    if redeemed_ids:
+        redeemed_discount_amount_total = float(
+            db.query(func.coalesce(func.sum(models.DiscountCodeRedemption.discount_amount), 0.0))
+            .join(
+                models.LoyaltyReward,
+                models.LoyaltyReward.discount_code_id == models.DiscountCodeRedemption.discount_code_id,
+            )
+            .filter(
+                models.LoyaltyReward.id.in_(redeemed_ids),
+                models.DiscountCodeRedemption.tenant_id == tenant_id,
+            )
+            .scalar()
+            or 0.0
+        )
+    attributed_sales_total = 0.0
+    if redeemed_ids:
+        redeemed_sales = (
+            db.query(func.coalesce(func.sum(models.Sale.total), 0.0))
+            .join(models.LoyaltyReward, models.LoyaltyReward.redeemed_sale_id == models.Sale.id)
+            .filter(
+                models.LoyaltyReward.id.in_(redeemed_ids),
+                models.Sale.tenant_id == tenant_id,
+            )
+            .scalar()
+        )
+        redeemed_orders = (
+            db.query(func.coalesce(func.sum(models.WebOrder.total), 0.0))
+            .join(models.LoyaltyReward, models.LoyaltyReward.redeemed_order_id == models.WebOrder.id)
+            .filter(
+                models.LoyaltyReward.id.in_(redeemed_ids),
+                models.WebOrder.tenant_id == tenant_id,
+            )
+            .scalar()
+        )
+        attributed_sales_total = float(redeemed_sales or 0.0) + float(redeemed_orders or 0.0)
+    issued_count = counts[LOYALTY_REWARD_STATUS_ISSUED]
+    activated_count = counts[LOYALTY_REWARD_STATUS_ACTIVATED]
+    redeemed_count = counts[LOYALTY_REWARD_STATUS_REDEEMED]
+    total_emitted = len(rewards)
+    activated_or_later = activated_count + redeemed_count
+    return schemas.LoyaltyRewardMetricsRead(
+        issued=issued_count,
+        activated=activated_count,
+        redeemed=redeemed_count,
+        expired=counts[LOYALTY_REWARD_STATUS_EXPIRED],
+        cancelled=counts[LOYALTY_REWARD_STATUS_CANCELLED],
+        scan_count_total=sum(int(row.scan_count or 0) for row in rewards),
+        emitted_count=total_emitted,
+        issued_amount_total=issued_amount_total,
+        redeemed_amount_total=redeemed_amount_total,
+        redeemed_discount_amount_total=redeemed_discount_amount_total,
+        attributed_sales_total=attributed_sales_total,
+        issued_to_activated_rate=(activated_or_later / total_emitted if total_emitted else 0.0),
+        activated_to_redeemed_rate=(redeemed_count / activated_or_later if activated_or_later else 0.0),
+    )
+
+
 def _normalize_discount_code_type(value: Optional[str]) -> str:
     normalized = (value or "percent").strip().lower()
     return "fixed_amount" if normalized == "fixed_amount" else "percent"
@@ -5638,6 +6438,12 @@ def create_comercio_web_discount_code(
             if discount_type == "percent"
             else 0.0
         ),
+        minimum_purchase=(
+            float(payload.minimum_purchase)
+            if payload.minimum_purchase is not None
+            else None
+        ),
+        source_type=_normalize_discount_source_type(payload.source_type),
         is_active=bool(payload.is_active),
         max_uses=int(payload.max_uses) if payload.max_uses is not None else None,
         uses_count=0,
@@ -5702,6 +6508,13 @@ def update_comercio_web_discount_code(
         row.discount_percent = next_value if next_type == "percent" else 0.0
     if "is_active" in data and data["is_active"] is not None:
         row.is_active = bool(data["is_active"])
+    if "minimum_purchase" in data:
+        minimum_purchase = data.get("minimum_purchase")
+        row.minimum_purchase = (
+            float(minimum_purchase) if minimum_purchase is not None else None
+        )
+    if "source_type" in data:
+        row.source_type = _normalize_discount_source_type(data.get("source_type"))
     if "max_uses" in data:
         max_uses = data.get("max_uses")
         if max_uses is not None and int(max_uses) < 1:
@@ -7764,9 +8577,20 @@ def _matches_existing_sale_request(
     if incoming_payment_signature != existing_payment_signature:
         return False
 
-    return abs(
-        float(existing_sale.total or 0.0) - calculate_sale_total_from_items(sale_in)
-    ) <= 0.01
+    expected_total = calculate_sale_total_from_items(sale_in)
+    incoming_loyalty_code = _normalize_discount_code(
+        getattr(sale_in, "loyalty_discount_code", None) or ""
+    )
+    existing_loyalty_code = _normalize_discount_code(
+        getattr(existing_sale, "loyalty_discount_code", None) or ""
+    )
+    if incoming_loyalty_code and incoming_loyalty_code == existing_loyalty_code:
+        expected_total = max(
+            0.0,
+            expected_total - float(getattr(existing_sale, "loyalty_discount_amount", 0.0) or 0.0),
+        )
+
+    return abs(float(existing_sale.total or 0.0) - expected_total) <= 0.01
 
 
 def create_sale(
@@ -7776,6 +8600,7 @@ def create_sale(
     tenant_id: int | None = None,
     *,
     commit: bool = True,
+    issue_loyalty_reward: bool = True,
 ) -> models.Sale:
     """
     Crea una venta con sus ítems y pagos.
@@ -7801,6 +8626,7 @@ def create_sale(
                 selectinload(models.Sale.items),
                 selectinload(models.Sale.payments),
                 selectinload(models.Sale.separated_order),
+                selectinload(models.Sale.origin_loyalty_reward),
             )
             .filter(
                 models.Sale.client_request_id == client_request_id,
@@ -7959,6 +8785,35 @@ def create_sale(
         getattr(sale_in, "cart_discount_percent", 0.0) or 0.0
     )
     sale_total = calculate_sale_total_from_items(sale_in)
+    loyalty_discount_code = _normalize_discount_code(
+        getattr(sale_in, "loyalty_discount_code", None) or ""
+    )
+    loyalty_discount_code_id: Optional[int] = None
+    loyalty_discount_amount = 0.0
+    if loyalty_discount_code:
+        validation = validate_discount_code_for_purchase(
+            db,
+            tenant_id=effective_tenant_id,
+            code=loyalty_discount_code,
+            purchase_amount=sale_total,
+        )
+        if not validation.valid:
+            raise ValueError(validation.message)
+        discount_row = _resolve_valid_discount_code(
+            db,
+            tenant_id=effective_tenant_id,
+            code=loyalty_discount_code,
+            purchase_amount=sale_total,
+        )
+        if not discount_row:
+            raise ValueError("El código no está disponible o ya fue utilizado")
+        loyalty_discount_code_id = int(discount_row.id)
+        loyalty_discount_amount = min(
+            float(validation.discount_amount or 0.0),
+            float(sale_total or 0.0),
+        )
+        sale_total = _round_currency_to_unit(max(0.0, sale_total - loyalty_discount_amount))
+        cart_discount_value = _round_currency_to_unit(cart_discount_value + loyalty_discount_amount)
     surcharge_label = _clean_field(getattr(sale_in, "surcharge_label", None))
 
     change_amount = max(0.0, total_paid - sale_total)
@@ -8102,6 +8957,9 @@ def create_sale(
         payment_method=main_method,
         cart_discount_value=cart_discount_value,
         cart_discount_percent=cart_discount_percent,
+        loyalty_discount_code_id=loyalty_discount_code_id,
+        loyalty_discount_code=loyalty_discount_code or None,
+        loyalty_discount_amount=loyalty_discount_amount,
         customer_id=customer_payload["customer_id"],
         customer_name=customer_payload["customer_name"],
         customer_phone=customer_payload["customer_phone"],
@@ -8132,6 +8990,7 @@ def create_sale(
                     selectinload(models.Sale.items),
                     selectinload(models.Sale.payments),
                     selectinload(models.Sale.separated_order),
+                    selectinload(models.Sale.origin_loyalty_reward),
                 )
                 .filter(
                     models.Sale.client_request_id == client_request_id,
@@ -8232,6 +9091,17 @@ def create_sale(
         db.add(reservation)
 
     try:
+        if loyalty_discount_code_id and loyalty_discount_amount > 0:
+            _redeem_discount_code_atomically(
+                db,
+                discount_code_id=loyalty_discount_code_id,
+                tenant_id=effective_tenant_id,
+                purchase_amount=float(sale.total or 0.0) + loyalty_discount_amount,
+                discount_amount=loyalty_discount_amount,
+                sale_id=sale.id,
+            )
+        if issue_loyalty_reward:
+            _issue_loyalty_reward_for_sale(db, sale, tenant_id=effective_tenant_id)
         if commit:
             db.commit()
             db.refresh(sale)
@@ -8267,6 +9137,9 @@ def create_sale(
             raise ValueError(
                 f"El número de ticket {sale.sale_number} ya existe en esta empresa."
             ) from exc
+        raise
+    except Exception:
+        db.rollback()
         raise
     return sale
 
@@ -10536,6 +11409,20 @@ def void_sale(
     if separated_order and separated_order.status != "cancelado":
         separated_order.status = "cancelado"
         separated_order.cancelled_at = datetime.utcnow()
+
+    reward = getattr(sale, "origin_loyalty_reward", None)
+    if reward and reward.status not in {
+        LOYALTY_REWARD_STATUS_REDEEMED,
+        LOYALTY_REWARD_STATUS_CANCELLED,
+    }:
+        reward.status = LOYALTY_REWARD_STATUS_CANCELLED
+        reward.cancelled_at = sale.voided_at
+        reward.cancellation_reason = reason or "origin_sale_voided"
+        db.add(reward)
+        if reward.discount_code:
+            reward.discount_code.is_active = False
+            reward.discount_code.updated_at = sale.voided_at
+            db.add(reward.discount_code)
 
     sale_items = list(sale.items or [])
     product_ids = [int(item.product_id) for item in sale_items if item.product_id is not None]
@@ -13811,6 +14698,7 @@ def _resolve_valid_discount_code(
     tenant_id: Optional[int],
     code: Optional[str] = None,
     discount_code_id: Optional[int] = None,
+    purchase_amount: Optional[float] = None,
 ) -> Optional[models.WebDiscountCode]:
     query = db.query(models.WebDiscountCode).filter(
         models.WebDiscountCode.tenant_id == tenant_id,
@@ -13835,12 +14723,240 @@ def _resolve_valid_discount_code(
         return None
     if row.max_uses is not None and int(row.uses_count or 0) >= int(row.max_uses):
         return None
+    source_type = (getattr(row, "source_type", None) or "").strip().lower()
+    if source_type != LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        minimum_purchase = float(getattr(row, "minimum_purchase", None) or 0.0)
+        if purchase_amount is not None and minimum_purchase > 0:
+            if _round_currency_to_unit(purchase_amount) < _round_currency_to_unit(minimum_purchase):
+                return None
+    if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        reward = getattr(row, "loyalty_reward", None)
+        if reward is None:
+            reward = (
+                db.query(models.LoyaltyReward)
+                .filter(
+                    models.LoyaltyReward.discount_code_id == row.id,
+                    models.LoyaltyReward.tenant_id == tenant_id,
+                )
+                .first()
+            )
+        _refresh_loyalty_reward_expiration(db, reward)
+        if not reward or reward.status != LOYALTY_REWARD_STATUS_ACTIVATED:
+            return None
+    return row
+
+
+def validate_discount_code_for_purchase(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    code: Optional[str] = None,
+    discount_code_id: Optional[int] = None,
+    purchase_amount: float,
+) -> schemas.PosDiscountCodeValidateResponse:
+    normalized_code = _normalize_discount_code(code or "")
+    row = _resolve_valid_discount_code(
+        db,
+        tenant_id=tenant_id,
+        code=normalized_code or None,
+        discount_code_id=discount_code_id,
+        purchase_amount=purchase_amount,
+    )
+    if not row:
+        return schemas.PosDiscountCodeValidateResponse(
+            valid=False,
+            code=normalized_code or None,
+            purchase_total=_round_currency_to_unit(purchase_amount),
+            message="El código no está disponible, venció, ya fue usado o no cumple el mínimo.",
+        )
+    source_type = (getattr(row, "source_type", None) or "").strip().lower()
+    if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        reward = getattr(row, "loyalty_reward", None)
+        if reward is None:
+            reward = (
+                db.query(models.LoyaltyReward)
+                .filter(
+                    models.LoyaltyReward.discount_code_id == row.id,
+                    models.LoyaltyReward.tenant_id == tenant_id,
+                )
+                .first()
+            )
+        if not reward:
+            return schemas.PosDiscountCodeValidateResponse(
+                valid=False,
+                code=row.code,
+                purchase_total=_round_currency_to_unit(purchase_amount),
+                message="El beneficio asociado no está disponible.",
+            )
+        effective_amount, _, message = compute_loyalty_effective_discount_amount(
+            db,
+            tenant_id=int(tenant_id),
+            reward=reward,
+            purchase_amount=purchase_amount,
+        )
+        if effective_amount <= 0:
+            return schemas.PosDiscountCodeValidateResponse(
+                valid=False,
+                code=row.code,
+                discount_type="fixed_amount",
+                discount_value=float(reward.reward_amount or 0.0),
+                minimum_purchase=float(row.minimum_purchase or 0.0),
+                reward_max_amount=float(reward.reward_amount or 0.0),
+                effective_discount_amount=0.0,
+                purchase_total=_round_currency_to_unit(purchase_amount),
+                discount_amount=0.0,
+                message=message,
+            )
+        return schemas.PosDiscountCodeValidateResponse(
+            valid=True,
+            code=row.code,
+            discount_type="fixed_amount",
+            discount_value=float(reward.reward_amount or 0.0),
+            minimum_purchase=float(row.minimum_purchase or 0.0),
+            reward_max_amount=float(reward.reward_amount or 0.0),
+            effective_discount_amount=effective_amount,
+            purchase_total=_round_currency_to_unit(purchase_amount),
+            discount_amount=effective_amount,
+            message=message,
+        )
+    discount_type, discount_value, discount_percent = _resolve_discount_code_snapshot_values(
+        discount_type=getattr(row, "discount_type", None),
+        discount_value=getattr(row, "discount_value", None),
+        discount_percent=getattr(row, "discount_percent", None),
+    )
+    discount_amount = _compute_coupon_discount_amount(
+        purchase_amount,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        discount_percent=discount_percent,
+    )
+    if discount_amount <= 0:
+        return schemas.PosDiscountCodeValidateResponse(
+            valid=False,
+            code=row.code,
+            purchase_total=_round_currency_to_unit(purchase_amount),
+            message="El código no genera descuento para esta compra.",
+        )
+    return schemas.PosDiscountCodeValidateResponse(
+        valid=True,
+        code=row.code,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        minimum_purchase=float(row.minimum_purchase or 0.0),
+        effective_discount_amount=discount_amount,
+        purchase_total=_round_currency_to_unit(purchase_amount),
+        discount_amount=discount_amount,
+        message="Código aplicado.",
+    )
+
+
+def _redeem_discount_code_atomically(
+    db: Session,
+    *,
+    discount_code_id: int,
+    tenant_id: Optional[int],
+    purchase_amount: float,
+    discount_amount: float,
+    sale_id: Optional[int] = None,
+    web_order_id: Optional[int] = None,
+) -> models.WebDiscountCode:
+    now = datetime.utcnow()
+    query = (
+        db.query(models.WebDiscountCode)
+        .filter(
+            models.WebDiscountCode.id == int(discount_code_id),
+            models.WebDiscountCode.tenant_id == tenant_id,
+            models.WebDiscountCode.is_active.is_(True),
+            or_(models.WebDiscountCode.starts_at.is_(None), models.WebDiscountCode.starts_at <= now),
+            or_(models.WebDiscountCode.ends_at.is_(None), models.WebDiscountCode.ends_at >= now),
+            or_(
+                models.WebDiscountCode.max_uses.is_(None),
+                models.WebDiscountCode.uses_count < models.WebDiscountCode.max_uses,
+            ),
+        )
+    )
+    row = query.with_for_update().first()
+    if not row:
+        raise ValueError("El código no está disponible o ya fue utilizado")
+
+    source_type = (row.source_type or "").strip().lower()
+    reward = None
+    if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        reward = (
+            db.query(models.LoyaltyReward)
+            .filter(
+                models.LoyaltyReward.discount_code_id == row.id,
+                models.LoyaltyReward.tenant_id == tenant_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        _refresh_loyalty_reward_expiration(db, reward, now=now)
+        if not reward or reward.status != LOYALTY_REWARD_STATUS_ACTIVATED:
+            raise ValueError("El beneficio no está disponible o ya fue utilizado")
+        effective_amount, _, message = compute_loyalty_effective_discount_amount(
+            db,
+            tenant_id=int(tenant_id),
+            reward=reward,
+            purchase_amount=purchase_amount,
+        )
+        if effective_amount <= 0:
+            raise ValueError(message)
+        discount_amount = effective_amount
+    else:
+        minimum_purchase = float(getattr(row, "minimum_purchase", None) or 0.0)
+        if minimum_purchase > 0 and _round_currency_to_unit(purchase_amount) < _round_currency_to_unit(minimum_purchase):
+            raise ValueError("El código no cumple el mínimo de compra")
+
+    updated = (
+        db.query(models.WebDiscountCode)
+        .filter(
+            models.WebDiscountCode.id == row.id,
+            models.WebDiscountCode.tenant_id == tenant_id,
+            models.WebDiscountCode.is_active.is_(True),
+            or_(
+                models.WebDiscountCode.max_uses.is_(None),
+                models.WebDiscountCode.uses_count < models.WebDiscountCode.max_uses,
+            ),
+        )
+        .update(
+            {
+                models.WebDiscountCode.uses_count: models.WebDiscountCode.uses_count + 1,
+                models.WebDiscountCode.updated_at: now,
+            },
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        raise ValueError("El código ya fue utilizado")
+
+    if reward:
+        reward.status = LOYALTY_REWARD_STATUS_REDEEMED
+        reward.redeemed_at = now
+        reward.redeemed_sale_id = sale_id
+        reward.redeemed_order_id = web_order_id
+        db.add(reward)
+
+    db.add(
+        models.DiscountCodeRedemption(
+            tenant_id=int(tenant_id),
+            discount_code_id=int(row.id),
+            sale_id=sale_id,
+            web_order_id=web_order_id,
+            discount_amount=float(discount_amount or 0.0),
+            redeemed_at=now,
+        )
+    )
+    db.flush()
+    db.refresh(row)
     return row
 
 
 def _resolve_cart_coupon_snapshot(
     db: Session,
     cart: models.WebCart,
+    *,
+    purchase_amount: Optional[float] = None,
 ) -> tuple[Optional[str], str, float, float, Optional[models.WebDiscountCode]]:
     saved_code = _normalize_discount_code(getattr(cart, "coupon_code", None) or "")
     saved_code_id = getattr(cart, "coupon_discount_code_id", None)
@@ -13852,9 +14968,33 @@ def _resolve_cart_coupon_snapshot(
         tenant_id=cart.tenant_id,
         code=saved_code,
         discount_code_id=saved_code_id,
+        purchase_amount=purchase_amount,
     )
     if not valid_row:
         return None, "percent", 0.0, 0.0, None
+    source_type = (getattr(valid_row, "source_type", None) or "").strip().lower()
+    if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        reward = getattr(valid_row, "loyalty_reward", None)
+        if reward is None:
+            reward = (
+                db.query(models.LoyaltyReward)
+                .filter(
+                    models.LoyaltyReward.discount_code_id == valid_row.id,
+                    models.LoyaltyReward.tenant_id == cart.tenant_id,
+                )
+                .first()
+            )
+        if not reward or purchase_amount is None:
+            return None, "percent", 0.0, 0.0, None
+        effective_amount, _, _ = compute_loyalty_effective_discount_amount(
+            db,
+            tenant_id=int(cart.tenant_id),
+            reward=reward,
+            purchase_amount=purchase_amount,
+        )
+        if effective_amount <= 0:
+            return None, "percent", 0.0, 0.0, None
+        return saved_code, "fixed_amount", effective_amount, 0.0, valid_row
     discount_type, discount_value, discount_percent = _resolve_discount_code_snapshot_values(
         discount_type=getattr(valid_row, "discount_type", None),
         discount_value=getattr(valid_row, "discount_value", None),
@@ -13905,7 +15045,11 @@ def _serialize_web_cart(
             )
         )
 
-    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, _ = _resolve_cart_coupon_snapshot(db, cart)
+    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, _ = _resolve_cart_coupon_snapshot(
+        db,
+        cart,
+        purchase_amount=subtotal_base,
+    )
     discount_amount = 0.0
     if coupon_code:
         discount_amount = _compute_coupon_discount_amount(
@@ -14069,13 +15213,23 @@ def apply_coupon_to_web_cart(
     normalized = _normalize_discount_code(code)
     if not normalized:
         raise ValueError("Ingresa un código válido")
+    purchase_amount = _serialize_web_cart(db, cart).subtotal_base
     row = _resolve_valid_discount_code(
         db,
         tenant_id=account.tenant_id,
         code=normalized,
+        purchase_amount=purchase_amount,
     )
     if not row:
         raise ValueError("El código no está disponible o ya venció")
+    validation = validate_discount_code_for_purchase(
+        db,
+        tenant_id=account.tenant_id,
+        code=normalized,
+        purchase_amount=purchase_amount,
+    )
+    if not validation.valid:
+        raise ValueError(validation.message)
 
     cart.coupon_code = normalized
     cart.coupon_discount_percent = float(row.discount_percent or 0.0)
@@ -14138,33 +15292,16 @@ def _consume_web_order_coupon_if_needed(
     if int(order.coupon_discount_code_id or 0) <= 0:
         return
 
-    consumed = _consume_discount_code_use(
+    code = _redeem_discount_code_atomically(
         db,
         discount_code_id=int(order.coupon_discount_code_id),
         tenant_id=order.tenant_id,
+        purchase_amount=float(order.subtotal or 0.0),
+        discount_amount=float(order.discount_amount or 0.0),
+        web_order_id=order.id,
     )
-    if not consumed:
-        # Si el cupón cambió de estado luego de crear la orden, no bloqueamos
-        # la confirmación del pago ya recibido. De todas formas incrementamos
-        # el contador para mantener trazabilidad de uso real.
-        fallback = (
-            db.query(models.WebDiscountCode)
-            .filter(
-                models.WebDiscountCode.id == int(order.coupon_discount_code_id),
-                models.WebDiscountCode.tenant_id == order.tenant_id,
-            )
-            .update(
-                {
-                    models.WebDiscountCode.uses_count: models.WebDiscountCode.uses_count + 1,
-                    models.WebDiscountCode.updated_at: datetime.utcnow(),
-                },
-                synchronize_session=False,
-            )
-        )
-        if not fallback:
-            return
-
     order.coupon_consumed_at = datetime.utcnow()
+    order.coupon_code = code.code
     order.updated_at = datetime.utcnow()
     db.add(order)
 
@@ -14973,6 +16110,7 @@ def convert_web_order_to_sale(
         created_by_user_id=actor_user_id,
         tenant_id=order.tenant_id,
         commit=False,
+        issue_loyalty_reward=False,
     )
 
     order.sale_id = sale.id
@@ -15046,7 +16184,11 @@ def create_web_order_from_cart(
     if subtotal_base <= 0 or not line_items_payload:
         raise ValueError("El carrito no tiene productos válidos para crear la orden")
 
-    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(db, cart)
+    coupon_code, coupon_discount_type, coupon_discount_value, coupon_discount_percent, valid_coupon = _resolve_cart_coupon_snapshot(
+        db,
+        cart,
+        purchase_amount=subtotal_base,
+    )
     discount_amount = 0.0
     if coupon_code:
         discount_amount = _compute_coupon_discount_amount(

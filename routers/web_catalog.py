@@ -262,17 +262,19 @@ def preview_web_coupon(
     if subtotal_base <= 0:
         raise HTTPException(status_code=400, detail="No se pudo calcular el subtotal del checkout.")
 
-    discount_type, discount_value, discount_percent = crud._resolve_discount_code_snapshot_values(
-        discount_type=getattr(valid_coupon, "discount_type", None),
-        discount_value=getattr(valid_coupon, "discount_value", None),
-        discount_percent=getattr(valid_coupon, "discount_percent", None),
+    validation = crud.validate_discount_code_for_purchase(
+        db,
+        tenant_id=tenant_id,
+        code=normalized_code,
+        purchase_amount=subtotal_base,
     )
-    discount_amount = crud._compute_coupon_discount_amount(
-        subtotal_base,
-        discount_type=discount_type,
-        discount_value=discount_value,
-        discount_percent=discount_percent,
-    )
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.message)
+
+    discount_type = validation.discount_type or "fixed_amount"
+    discount_value = validation.discount_value
+    discount_percent = 0.0 if discount_type == "fixed_amount" else validation.discount_value
+    discount_amount = validation.effective_discount_amount or validation.discount_amount
     total = max(0.0, subtotal_base - discount_amount)
 
     return schemas.WebGuestCouponPreviewResponse(

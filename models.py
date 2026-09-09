@@ -530,6 +530,9 @@ class Sale(Base):
     # Descuentos globales del carrito (si aplican)
     cart_discount_value = Column(Float, nullable=False, default=0)
     cart_discount_percent = Column(Float, nullable=False, default=0)
+    loyalty_discount_code_id = Column(Integer, ForeignKey("web_discount_codes.id"), nullable=True, index=True)
+    loyalty_discount_code = Column(String(64), nullable=True)
+    loyalty_discount_amount = Column(Float, nullable=False, default=0)
     surcharge_amount = Column(Float, nullable=False, default=0)
     surcharge_label = Column(String(60), nullable=True)
 
@@ -581,6 +584,16 @@ class Sale(Base):
         "SeparatedOrder",
         back_populates="sale",
         uselist=False,
+    )
+    origin_loyalty_reward = relationship(
+        "LoyaltyReward",
+        back_populates="sale",
+        uselist=False,
+        foreign_keys="LoyaltyReward.sale_id",
+    )
+    redeemed_loyalty_discount_code = relationship(
+        "WebDiscountCode",
+        foreign_keys=[loyalty_discount_code_id],
     )
 
     @property
@@ -1032,6 +1045,8 @@ class WebDiscountCode(Base):
     discount_type = Column(String(16), nullable=False, default="percent")
     discount_value = Column(Float, nullable=False, default=0)
     discount_percent = Column(Float, nullable=False, default=0)
+    minimum_purchase = Column(Float, nullable=True)
+    source_type = Column(String(32), nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
     max_uses = Column(Integer, nullable=True)
     uses_count = Column(Integer, nullable=False, default=0)
@@ -1047,6 +1062,155 @@ class WebDiscountCode(Base):
     )
 
     creator = relationship("PosUser")
+    loyalty_reward = relationship(
+        "LoyaltyReward",
+        back_populates="discount_code",
+        uselist=False,
+    )
+
+
+class LoyaltyRewardRule(Base):
+    __tablename__ = "loyalty_reward_rules"
+    __table_args__ = (
+        Index(
+            "ix_loyalty_reward_rules_tenant_active_min",
+            "tenant_id",
+            "is_active",
+            "min_purchase",
+        ),
+        CheckConstraint("min_purchase >= 0", name="loyalty_reward_rules_min_purchase_nonnegative"),
+        CheckConstraint("reward_amount > 0", name="loyalty_reward_rules_reward_amount_positive"),
+        CheckConstraint("minimum_purchase >= 0", name="loyalty_reward_rules_redeem_min_nonnegative"),
+        CheckConstraint("validity_days > 0", name="loyalty_reward_rules_validity_days_positive"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    min_purchase = Column(Float, nullable=False)
+    max_purchase = Column(Float, nullable=True)
+    reward_amount = Column(Float, nullable=False)
+    minimum_purchase = Column(Float, nullable=False)
+    validity_days = Column(Integer, nullable=False, default=30)
+    is_active = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+    rewards = relationship("LoyaltyReward", back_populates="rule")
+
+
+class LoyaltyRedemptionRule(Base):
+    __tablename__ = "loyalty_redemption_rules"
+    __table_args__ = (
+        Index(
+            "ix_loyalty_redemption_rules_tenant_active_min",
+            "tenant_id",
+            "is_active",
+            "min_purchase",
+        ),
+        CheckConstraint("min_purchase >= 0", name="loyalty_redemption_rules_min_purchase_nonnegative"),
+        CheckConstraint("discount_amount > 0", name="loyalty_redemption_rules_discount_amount_positive"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    min_purchase = Column(Float, nullable=False)
+    max_purchase = Column(Float, nullable=True)
+    discount_amount = Column(Float, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+
+
+class LoyaltyReward(Base):
+    __tablename__ = "loyalty_rewards"
+    __table_args__ = (
+        UniqueConstraint("sale_id", name="loyalty_rewards_sale_id_key"),
+        UniqueConstraint("token_hash", name="loyalty_rewards_token_hash_key"),
+        UniqueConstraint("discount_code_id", name="loyalty_rewards_discount_code_id_key"),
+        Index("ix_loyalty_rewards_tenant_status_expires", "tenant_id", "status", "expires_at"),
+        Index("ix_loyalty_rewards_tenant_issued", "tenant_id", "issued_at"),
+        CheckConstraint(
+            "status IN ('issued', 'activated', 'redeemed', 'expired', 'cancelled')",
+            name="loyalty_rewards_status_check",
+        ),
+        CheckConstraint("reward_amount > 0", name="loyalty_rewards_reward_amount_positive"),
+        CheckConstraint("minimum_purchase >= 0", name="loyalty_rewards_minimum_purchase_nonnegative"),
+        CheckConstraint("scan_count >= 0", name="loyalty_rewards_scan_count_nonnegative"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, index=True)
+    rule_id = Column(Integer, ForeignKey("loyalty_reward_rules.id"), nullable=True, index=True)
+    token_hash = Column(String(128), nullable=False, index=True)
+    token_encrypted = Column(Text, nullable=True)
+    customer_id = Column(Integer, ForeignKey("pos_customers.id"), nullable=True, index=True)
+    discount_code_id = Column(Integer, ForeignKey("web_discount_codes.id"), nullable=True, index=True)
+    reward_amount = Column(Float, nullable=False)
+    minimum_purchase = Column(Float, nullable=False)
+    issued_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    first_scanned_at = Column(DateTime, nullable=True)
+    last_scanned_at = Column(DateTime, nullable=True)
+    scan_count = Column(Integer, nullable=False, default=0)
+    activated_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    redeemed_at = Column(DateTime, nullable=True)
+    redeemed_sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True, index=True)
+    redeemed_order_id = Column(Integer, ForeignKey("web_orders.id"), nullable=True, index=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="issued")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+    sale = relationship("Sale", foreign_keys=[sale_id], back_populates="origin_loyalty_reward")
+    rule = relationship("LoyaltyRewardRule", back_populates="rewards")
+    customer = relationship("PosCustomer")
+    discount_code = relationship("WebDiscountCode", back_populates="loyalty_reward")
+    redeemed_sale = relationship("Sale", foreign_keys=[redeemed_sale_id])
+    redeemed_order = relationship("WebOrder")
+
+
+class DiscountCodeRedemption(Base):
+    __tablename__ = "discount_code_redemptions"
+    __table_args__ = (
+        Index("ix_discount_code_redemptions_tenant_redeemed", "tenant_id", "redeemed_at"),
+        Index("ix_discount_code_redemptions_discount_code", "discount_code_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    discount_code_id = Column(Integer, ForeignKey("web_discount_codes.id"), nullable=False, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True, index=True)
+    web_order_id = Column(Integer, ForeignKey("web_orders.id"), nullable=True, index=True)
+    discount_amount = Column(Float, nullable=False, default=0)
+    redeemed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    tenant = relationship("Tenant")
+    discount_code = relationship("WebDiscountCode")
+    sale = relationship("Sale", foreign_keys=[sale_id])
+    web_order = relationship("WebOrder", foreign_keys=[web_order_id])
 
 
 class WebCatalogCategory(Base):
