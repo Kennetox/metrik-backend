@@ -5530,6 +5530,23 @@ def _normalize_discount_code(value: str) -> str:
     return (value or "").strip().upper()
 
 
+def _discount_code_lookup_candidates(value: str) -> list[str]:
+    """Return compatible lookup values for a discount code.
+
+    Loyalty codes issued before the shorter format used ``KSR-XXXXXXXX``.
+    The dash (and accidental spaces) should not make a valid old benefit fail,
+    while other promotional codes retain their exact spelling.
+    """
+    normalized = _normalize_discount_code(value)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    compact = re.sub(r"[\s-]+", "", normalized)
+    if compact.startswith("KSR") and len(compact) > 3:
+        candidates.append(f"KSR-{compact[3:]}")
+    return list(dict.fromkeys(candidates))
+
+
 def _normalize_discount_source_type(value: Optional[str]) -> Optional[str]:
     normalized = (value or "").strip().lower()
     return normalized or None
@@ -5720,8 +5737,7 @@ def loyalty_reward_response_payload(
 def _generate_loyalty_discount_code(db: Session, tenant_id: int) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     for _ in range(20):
-        suffix = "".join(secrets.choice(alphabet) for _ in range(8))
-        code = f"KSR-{suffix}"
+        code = "".join(secrets.choice(alphabet) for _ in range(7))
         exists = (
             db.query(models.WebDiscountCode.id)
             .filter(
@@ -14718,7 +14734,10 @@ def _resolve_valid_discount_code(
     if discount_code_id is not None:
         query = query.filter(models.WebDiscountCode.id == int(discount_code_id))
     elif code:
-        query = query.filter(models.WebDiscountCode.code == _normalize_discount_code(code))
+        candidates = _discount_code_lookup_candidates(code)
+        if not candidates:
+            return None
+        query = query.filter(models.WebDiscountCode.code.in_(candidates))
     else:
         return None
 

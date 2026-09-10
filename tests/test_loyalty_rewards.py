@@ -1050,7 +1050,9 @@ def test_public_activation_is_idempotent_and_creates_loyalty_code(client: TestCl
     first_data = first.json()
     second_data = second.json()
     assert first_data["status"] == "activated"
-    assert first_data["code"].startswith("KSR-")
+    assert len(first_data["code"]) == 7
+    assert "-" not in first_data["code"]
+    assert first_data["code"].isalnum()
     assert second_data["code"] == first_data["code"]
 
     db = TestingSessionLocal()
@@ -1070,6 +1072,14 @@ def test_public_activation_is_idempotent_and_creates_loyalty_code(client: TestCl
         assert code.ends_at is not None
     finally:
         db.close()
+
+
+def test_legacy_loyalty_code_lookup_accepts_omitted_hyphen():
+    assert crud._discount_code_lookup_candidates("KSR-ABCD1234") == ["KSR-ABCD1234"]
+    assert crud._discount_code_lookup_candidates("ksrabcd1234") == [
+        "KSRABCD1234",
+        "KSR-ABCD1234",
+    ]
 
 
 def test_pos_loyalty_code_validation_and_atomic_redemption(client: TestClient):
@@ -1096,6 +1106,9 @@ def test_pos_loyalty_code_validation_and_atomic_redemption(client: TestClient):
 
     activated = client.post(f"/rewards/public/{raw_token}/activate")
     code = activated.json()["code"]
+    assert len(code) == 7
+    assert "-" not in code
+    assert code.isalnum()
 
     preview = client.post(
         "/pos/discount-codes/validate",
