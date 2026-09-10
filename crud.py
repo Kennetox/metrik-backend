@@ -14777,6 +14777,72 @@ def _resolve_valid_discount_code(
     return row
 
 
+def _discount_code_unavailable_message(
+    db: Session,
+    *,
+    tenant_id: Optional[int],
+    code: Optional[str] = None,
+    discount_code_id: Optional[int] = None,
+    purchase_amount: Optional[float] = None,
+) -> str:
+    """Explain why a code cannot be used without treating it as valid.
+
+    POS staff need a useful reason when a loyalty benefit is rejected. The
+    normal resolver intentionally returns only valid rows, so this diagnostic
+    lookup is kept separate from the redemption path.
+    """
+    query = db.query(models.WebDiscountCode).filter(models.WebDiscountCode.tenant_id == tenant_id)
+    if discount_code_id is not None:
+        query = query.filter(models.WebDiscountCode.id == int(discount_code_id))
+    elif code:
+        candidates = _discount_code_lookup_candidates(code)
+        if not candidates:
+            return "El código no existe o no está disponible."
+        query = query.filter(models.WebDiscountCode.code.in_(candidates))
+    else:
+        return "Ingresa un código válido."
+
+    row = query.first()
+    if not row:
+        return "El código no existe o no está disponible."
+
+    now = datetime.utcnow()
+    source_type = (getattr(row, "source_type", None) or "").strip().lower()
+    if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        reward = getattr(row, "loyalty_reward", None)
+        if reward is None:
+            reward = (
+                db.query(models.LoyaltyReward)
+                .filter(
+                    models.LoyaltyReward.discount_code_id == row.id,
+                    models.LoyaltyReward.tenant_id == tenant_id,
+                )
+                .first()
+            )
+        _refresh_loyalty_reward_expiration(db, reward, now=now)
+        if reward and reward.status == LOYALTY_REWARD_STATUS_REDEEMED:
+            return "Este beneficio ya fue usado."
+        if reward and reward.status == LOYALTY_REWARD_STATUS_EXPIRED:
+            return "Este beneficio venció."
+        if reward and reward.status == LOYALTY_REWARD_STATUS_CANCELLED:
+            return "Este beneficio ya no está disponible."
+
+    if row.max_uses is not None and int(row.uses_count or 0) >= int(row.max_uses):
+        return "Este código ya fue utilizado."
+    if row.ends_at and row.ends_at < now:
+        return "Este código venció."
+    if not bool(row.is_active):
+        return "Este código no está disponible."
+    if row.starts_at and row.starts_at > now:
+        return "Este código aún no está vigente."
+    if source_type != LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:
+        minimum_purchase = float(getattr(row, "minimum_purchase", None) or 0.0)
+        if purchase_amount is not None and minimum_purchase > 0:
+            if _round_currency_to_unit(purchase_amount) < _round_currency_to_unit(minimum_purchase):
+                return "Este código no cumple el mínimo de compra."
+    return "El código no está disponible."
+
+
 def validate_discount_code_for_purchase(
     db: Session,
     *,
@@ -14798,7 +14864,13 @@ def validate_discount_code_for_purchase(
             valid=False,
             code=normalized_code or None,
             purchase_total=_round_currency_to_unit(purchase_amount),
-            message="El código no está disponible, venció, ya fue usado o no cumple el mínimo.",
+            message=_discount_code_unavailable_message(
+                db,
+                tenant_id=tenant_id,
+                code=normalized_code or None,
+                discount_code_id=discount_code_id,
+                purchase_amount=purchase_amount,
+            ),
         )
     source_type = (getattr(row, "source_type", None) or "").strip().lower()
     if source_type == LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE:

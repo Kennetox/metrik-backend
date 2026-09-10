@@ -1263,6 +1263,7 @@ def test_loyalty_reward_partial_effective_discount_is_single_use(client: TestCli
         json={"code": code, "purchase_amount": 300000.0},
     )
     assert reused.status_code == 400
+    assert reused.json()["detail"] == "Este beneficio ya fue usado."
 
     db = TestingSessionLocal()
     try:
