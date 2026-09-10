@@ -114,26 +114,33 @@ def _ensure_sale_loyalty_discount_schema(connection, backend: str) -> None:
 
 
 LOYALTY_REWARD_RULE_SEED_ROWS = (
-    (100000.0, 249999.0, 10000.0, 100000.0, 30, 10),
-    (250000.0, 499999.0, 20000.0, 200000.0, 30, 20),
-    (500000.0, 999999.0, 30000.0, 300000.0, 30, 30),
-    (1000000.0, 1499999.0, 50000.0, 500000.0, 30, 40),
-    (1500000.0, 1999999.0, 70000.0, 700000.0, 30, 50),
-    (2000000.0, None, 100000.0, 1000000.0, 30, 60),
+    (0.0, None, 100000.0, 0.0, 30, 0),
 )
 
 
 LOYALTY_REDEMPTION_RULE_SEED_ROWS = (
-    (100000.0, 199999.0, 10000.0, 10),
-    (200000.0, 299999.0, 20000.0, 20),
-    (300000.0, 499999.0, 30000.0, 30),
-    (500000.0, 699999.0, 50000.0, 40),
-    (700000.0, 999999.0, 70000.0, 50),
-    (1000000.0, None, 100000.0, 60),
+    (50000.0, 99999.0, 5000.0, 10),
+    (100000.0, 199999.0, 10000.0, 20),
+    (200000.0, 299999.0, 20000.0, 30),
+    (300000.0, 499999.0, 30000.0, 40),
+    (500000.0, 699999.0, 50000.0, 50),
+    (700000.0, 999999.0, 70000.0, 60),
+    (1000000.0, None, 100000.0, 70),
 )
 
 
 def _seed_default_loyalty_reward_rules(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE loyalty_reward_rules
+            SET is_active = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE is_active = TRUE
+              AND NOT (min_purchase = 0 AND max_purchase IS NULL)
+            """
+        )
+    )
     tenant_rows = connection.execute(
         text(
             """
@@ -143,6 +150,8 @@ def _seed_default_loyalty_reward_rules(connection) -> None:
                 SELECT 1
                 FROM loyalty_reward_rules existing
                 WHERE existing.tenant_id = tenants.id
+                  AND existing.min_purchase = 0
+                  AND existing.max_purchase IS NULL
             )
             """
         )
@@ -189,6 +198,21 @@ def _seed_default_loyalty_reward_rules(connection) -> None:
                     "sort_order": sort_order,
                 },
             )
+    connection.execute(
+        text(
+            """
+            UPDATE loyalty_reward_rules
+            SET is_active = TRUE,
+                reward_amount = 100000,
+                minimum_purchase = 0,
+                validity_days = 30,
+                sort_order = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE min_purchase = 0
+              AND max_purchase IS NULL
+            """
+        )
+    )
 
 
 def _seed_default_loyalty_redemption_rules(connection) -> None:
@@ -197,16 +221,48 @@ def _seed_default_loyalty_redemption_rules(connection) -> None:
             """
             SELECT tenants.id AS tenant_id
             FROM tenants
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM loyalty_redemption_rules existing
-                WHERE existing.tenant_id = tenants.id
-            )
             """
         )
     ).mappings().all()
     for tenant_row in tenant_rows:
         for min_purchase, max_purchase, discount_amount, sort_order in LOYALTY_REDEMPTION_RULE_SEED_ROWS:
+            if max_purchase is None:
+                existing = connection.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM loyalty_redemption_rules
+                        WHERE tenant_id = :tenant_id
+                          AND min_purchase = :min_purchase
+                          AND max_purchase IS NULL
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant_row["tenant_id"],
+                        "min_purchase": min_purchase,
+                    },
+                ).first()
+            else:
+                existing = connection.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM loyalty_redemption_rules
+                        WHERE tenant_id = :tenant_id
+                          AND min_purchase = :min_purchase
+                          AND max_purchase = :max_purchase
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": tenant_row["tenant_id"],
+                        "min_purchase": min_purchase,
+                        "max_purchase": max_purchase,
+                    },
+                ).first()
+            if existing:
+                continue
             connection.execute(
                 text(
                     """

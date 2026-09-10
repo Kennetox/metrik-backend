@@ -5625,8 +5625,8 @@ def resolve_loyalty_reward_rule_for_purchase(
             ),
         )
         .order_by(
-            models.LoyaltyRewardRule.min_purchase.desc(),
             models.LoyaltyRewardRule.sort_order.asc(),
+            models.LoyaltyRewardRule.min_purchase.asc(),
             models.LoyaltyRewardRule.id.asc(),
         )
         .first()
@@ -5853,9 +5853,9 @@ def activate_public_loyalty_reward(
             tenant_id=reward.tenant_id,
             code=_generate_loyalty_discount_code(db, int(reward.tenant_id)),
             discount_type="fixed_amount",
-            discount_value=float(reward.reward_amount or 0.0),
+            discount_value=get_loyalty_max_redemption_discount(db, tenant_id=int(reward.tenant_id)),
             discount_percent=0.0,
-            minimum_purchase=float(reward.minimum_purchase or 0.0),
+            minimum_purchase=0.0,
             source_type=LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE,
             is_active=True,
             max_uses=1,
@@ -6062,15 +6062,13 @@ def build_public_loyalty_redemption_options(
     tenant_id: int,
     reward_max_amount: float,
 ) -> list[schemas.PublicLoyaltyRedemptionOption]:
-    max_amount = _round_currency_to_unit(reward_max_amount)
-    if tenant_id is None or max_amount <= 0:
+    if tenant_id is None:
         return []
     rows = (
         db.query(models.LoyaltyRedemptionRule)
         .filter(
             models.LoyaltyRedemptionRule.tenant_id == tenant_id,
             models.LoyaltyRedemptionRule.is_active.is_(True),
-            models.LoyaltyRedemptionRule.discount_amount <= max_amount,
         )
         .order_by(
             models.LoyaltyRedemptionRule.sort_order.asc(),
@@ -6089,6 +6087,24 @@ def build_public_loyalty_redemption_options(
     ]
 
 
+def get_loyalty_max_redemption_discount(
+    db: Session,
+    *,
+    tenant_id: int,
+) -> float:
+    if tenant_id is None:
+        return 0.0
+    value = (
+        db.query(func.coalesce(func.max(models.LoyaltyRedemptionRule.discount_amount), 0.0))
+        .filter(
+            models.LoyaltyRedemptionRule.tenant_id == tenant_id,
+            models.LoyaltyRedemptionRule.is_active.is_(True),
+        )
+        .scalar()
+    )
+    return _round_currency_to_unit(float(value or 0.0))
+
+
 def compute_loyalty_effective_discount_amount(
     db: Session,
     *,
@@ -6098,19 +6114,15 @@ def compute_loyalty_effective_discount_amount(
 ) -> tuple[float, Optional[models.LoyaltyRedemptionRule], str]:
     amount = _round_currency_to_unit(purchase_amount)
     if amount <= 0:
-        return 0.0, None, "El beneficio comienza en compras desde $100.000."
+        return 0.0, None, "El beneficio aplica en compras desde $50.000."
     rule = resolve_loyalty_redemption_rule_for_purchase(
         db,
         tenant_id=tenant_id,
         purchase_amount=amount,
     )
     if not rule:
-        return 0.0, None, "El beneficio comienza en compras desde $100.000."
-    effective = min(
-        float(reward.reward_amount or 0.0),
-        float(rule.discount_amount or 0.0),
-        amount,
-    )
+        return 0.0, None, "El beneficio aplica en compras desde $50.000."
+    effective = min(float(rule.discount_amount or 0.0), amount)
     if effective <= 0:
         return 0.0, rule, "El código no genera descuento para esta compra."
     return _round_currency_to_unit(effective), rule, "Código aplicado."
@@ -14796,10 +14808,10 @@ def validate_discount_code_for_purchase(
         )
         if effective_amount <= 0:
             return schemas.PosDiscountCodeValidateResponse(
-                valid=False,
+                valid=True,
                 code=row.code,
                 discount_type="fixed_amount",
-                discount_value=float(reward.reward_amount or 0.0),
+                discount_value=0.0,
                 minimum_purchase=float(row.minimum_purchase or 0.0),
                 reward_max_amount=float(reward.reward_amount or 0.0),
                 effective_discount_amount=0.0,
@@ -14993,7 +15005,7 @@ def _resolve_cart_coupon_snapshot(
             purchase_amount=purchase_amount,
         )
         if effective_amount <= 0:
-            return None, "percent", 0.0, 0.0, None
+            return saved_code, "fixed_amount", 0.0, 0.0, valid_row
         return saved_code, "fixed_amount", effective_amount, 0.0, valid_row
     discount_type, discount_value, discount_percent = _resolve_discount_code_snapshot_values(
         discount_type=getattr(valid_row, "discount_type", None),
@@ -15290,6 +15302,8 @@ def _consume_web_order_coupon_if_needed(
     if order.coupon_consumed_at is not None:
         return
     if int(order.coupon_discount_code_id or 0) <= 0:
+        return
+    if _round_currency_to_unit(float(order.discount_amount or 0.0)) <= 0:
         return
 
     code = _redeem_discount_code_atomically(

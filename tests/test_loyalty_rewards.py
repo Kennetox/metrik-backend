@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 import crud
+import db_migrations
 import models
 import schemas
 from tests.conftest import TestingSessionLocal
@@ -166,7 +167,7 @@ def _create_reward(
     return reward
 
 
-def test_loyalty_reward_rules_seed_default_v1_tiers():
+def test_loyalty_reward_rules_seed_universal_v1_rule():
     db = TestingSessionLocal()
     try:
         tenant_id = _default_tenant_id(db)
@@ -177,15 +178,56 @@ def test_loyalty_reward_rules_seed_default_v1_tiers():
             .all()
         )
 
-        assert [(row.min_purchase, row.max_purchase, row.reward_amount, row.minimum_purchase, row.validity_days) for row in rows] == [
-            (100000.0, 249999.0, 10000.0, 100000.0, 30),
-            (250000.0, 499999.0, 20000.0, 200000.0, 30),
-            (500000.0, 999999.0, 30000.0, 300000.0, 30),
-            (1000000.0, 1499999.0, 50000.0, 500000.0, 30),
-            (1500000.0, 1999999.0, 70000.0, 700000.0, 30),
-            (2000000.0, None, 100000.0, 1000000.0, 30),
+        assert [(row.min_purchase, row.max_purchase, row.reward_amount, row.minimum_purchase, row.validity_days, row.is_active) for row in rows] == [
+            (0.0, None, 100000.0, 0.0, 30, True),
         ]
     finally:
+        db.close()
+
+
+def test_loyalty_reward_rules_seed_adds_universal_rule_for_existing_old_rules():
+    db = TestingSessionLocal()
+    try:
+        tenant = models.Tenant(
+            slug=f"loyalty-old-rules-{uuid4().hex[:8]}",
+            name="Tenant loyalty reglas antiguas",
+            is_active=True,
+        )
+        db.add(tenant)
+        db.flush()
+        old_rule = models.LoyaltyRewardRule(
+            tenant_id=tenant.id,
+            min_purchase=100000.0,
+            max_purchase=249999.0,
+            reward_amount=10000.0,
+            minimum_purchase=100000.0,
+            validity_days=30,
+            is_active=True,
+            sort_order=10,
+        )
+        db.add(old_rule)
+        db.flush()
+
+        db_migrations._seed_default_loyalty_reward_rules(db.connection())
+        db.flush()
+
+        universal_rule = (
+            db.query(models.LoyaltyRewardRule)
+            .filter(
+                models.LoyaltyRewardRule.tenant_id == tenant.id,
+                models.LoyaltyRewardRule.min_purchase == 0.0,
+                models.LoyaltyRewardRule.max_purchase.is_(None),
+            )
+            .one()
+        )
+        db.refresh(old_rule)
+
+        assert universal_rule.is_active is True
+        assert universal_rule.reward_amount == 100000.0
+        assert universal_rule.minimum_purchase == 0.0
+        assert old_rule.is_active is False
+    finally:
+        db.rollback()
         db.close()
 
 
@@ -201,6 +243,7 @@ def test_loyalty_redemption_rules_seed_default_v1_tiers():
         )
 
         assert [(row.min_purchase, row.max_purchase, row.discount_amount) for row in rows] == [
+            (50000.0, 99999.0, 5000.0),
             (100000.0, 199999.0, 10000.0),
             (200000.0, 299999.0, 20000.0),
             (300000.0, 499999.0, 30000.0),
@@ -215,15 +258,12 @@ def test_loyalty_redemption_rules_seed_default_v1_tiers():
 @pytest.mark.parametrize(
     ("purchase_amount", "expected_reward", "expected_minimum"),
     [
-        (99999.0, None, None),
-        (100000.0, 10000.0, 100000.0),
-        (249999.0, 10000.0, 100000.0),
-        (250000.0, 20000.0, 200000.0),
-        (500000.0, 30000.0, 300000.0),
-        (1000000.0, 50000.0, 500000.0),
-        (1500000.0, 70000.0, 700000.0),
-        (2000000.0, 100000.0, 1000000.0),
-        (3500000.0, 100000.0, 1000000.0),
+        (0.0, None, None),
+        (3000.0, 100000.0, 0.0),
+        (49999.0, 100000.0, 0.0),
+        (50000.0, 100000.0, 0.0),
+        (700000.0, 100000.0, 0.0),
+        (2000000.0, 100000.0, 0.0),
     ],
 )
 def test_resolve_loyalty_reward_rule_for_purchase_uses_configured_rules(
@@ -301,19 +341,23 @@ def test_resolve_loyalty_reward_rule_is_tenant_scoped():
 @pytest.mark.parametrize(
     ("reward_amount", "purchase_amount", "expected_discount"),
     [
-        (30000.0, 99999.0, 0.0),
+        (30000.0, 3000.0, 0.0),
+        (30000.0, 49999.0, 0.0),
+        (30000.0, 50000.0, 5000.0),
+        (30000.0, 99999.0, 5000.0),
         (30000.0, 100000.0, 10000.0),
         (30000.0, 199999.0, 10000.0),
         (30000.0, 200000.0, 20000.0),
         (30000.0, 299999.0, 20000.0),
         (30000.0, 300000.0, 30000.0),
-        (30000.0, 700000.0, 30000.0),
+        (30000.0, 700000.0, 70000.0),
         (100000.0, 100000.0, 10000.0),
         (100000.0, 200000.0, 20000.0),
         (100000.0, 300000.0, 30000.0),
         (100000.0, 500000.0, 50000.0),
         (100000.0, 700000.0, 70000.0),
         (100000.0, 1000000.0, 100000.0),
+        (100000.0, 2000000.0, 100000.0),
     ],
 )
 def test_compute_loyalty_effective_discount_uses_redemption_tiers(
@@ -342,9 +386,50 @@ def test_compute_loyalty_effective_discount_uses_redemption_tiers(
         assert discount == expected_discount
         if expected_discount == 0:
             assert rule is None
-            assert "desde $100.000" in message
+            assert "desde $50.000" in message
         else:
             assert rule is not None
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_loyalty_redemption_discount_is_independent_from_origin_sale_amount():
+    db = TestingSessionLocal()
+    try:
+        tenant_id = _default_tenant_id(db)
+        low_origin = _create_sale(db, tenant_id=tenant_id)
+        low_origin.total = 3000.0
+        high_origin = _create_sale(db, tenant_id=tenant_id)
+        high_origin.total = 2000000.0
+        low_reward = _create_reward(
+            db,
+            tenant_id=tenant_id,
+            sale_id=low_origin.id,
+            reward_amount=5000.0,
+        )
+        high_reward = _create_reward(
+            db,
+            tenant_id=tenant_id,
+            sale_id=high_origin.id,
+            reward_amount=100000.0,
+        )
+
+        low_discount, _, _ = crud.compute_loyalty_effective_discount_amount(
+            db,
+            tenant_id=tenant_id,
+            reward=low_reward,
+            purchase_amount=300000.0,
+        )
+        high_discount, _, _ = crud.compute_loyalty_effective_discount_amount(
+            db,
+            tenant_id=tenant_id,
+            reward=high_reward,
+            purchase_amount=300000.0,
+        )
+
+        assert low_discount == 30000.0
+        assert high_discount == 30000.0
     finally:
         db.rollback()
         db.close()
@@ -480,17 +565,14 @@ def test_discount_code_crud_preserves_loyalty_metadata():
 @pytest.mark.parametrize(
     ("amount", "expected_reward", "expected_minimum"),
     [
-        (99999.0, None, None),
-        (100000.0, 10000.0, 100000.0),
-        (249999.0, 10000.0, 100000.0),
-        (250000.0, 20000.0, 200000.0),
-        (500000.0, 30000.0, 300000.0),
-        (1000000.0, 50000.0, 500000.0),
-        (1500000.0, 70000.0, 700000.0),
-        (2000000.0, 100000.0, 1000000.0),
+        (3000.0, 100000.0, 0.0),
+        (49999.0, 100000.0, 0.0),
+        (50000.0, 100000.0, 0.0),
+        (700000.0, 100000.0, 0.0),
+        (2000000.0, 100000.0, 0.0),
     ],
 )
-def test_create_sale_issues_loyalty_reward_for_configured_tiers(
+def test_create_sale_issues_loyalty_reward_for_any_positive_pos_total(
     amount: float,
     expected_reward: float | None,
     expected_minimum: float | None,
@@ -510,14 +592,11 @@ def test_create_sale_issues_loyalty_reward_for_configured_tiers(
             .filter(models.LoyaltyReward.sale_id == sale.id)
             .first()
         )
-        if expected_reward is None:
-            assert reward is None
-        else:
-            assert reward is not None
-            assert reward.tenant_id == tenant_id
-            assert reward.reward_amount == expected_reward
-            assert reward.minimum_purchase == expected_minimum
-            assert reward.status == crud.LOYALTY_REWARD_STATUS_ISSUED
+        assert reward is not None
+        assert reward.tenant_id == tenant_id
+        assert reward.reward_amount == expected_reward
+        assert reward.minimum_purchase == expected_minimum
+        assert reward.status == crud.LOYALTY_REWARD_STATUS_ISSUED
     finally:
         db.rollback()
         db.close()
@@ -623,7 +702,7 @@ def test_reward_snapshot_survives_rule_changes_and_validity_days():
             db.query(models.LoyaltyRewardRule)
             .filter(
                 models.LoyaltyRewardRule.tenant_id == tenant_id,
-                models.LoyaltyRewardRule.min_purchase == 100000.0,
+                models.LoyaltyRewardRule.min_purchase == 0.0,
             )
             .one()
         )
@@ -645,8 +724,8 @@ def test_reward_snapshot_survives_rule_changes_and_validity_days():
         db.flush()
         db.refresh(reward)
 
-        assert reward.reward_amount == 10000.0
-        assert reward.minimum_purchase == 100000.0
+        assert reward.reward_amount == 100000.0
+        assert reward.minimum_purchase == 0.0
         assert reward.expires_at == issued_at + timedelta(days=12)
     finally:
         db.rollback()
@@ -826,15 +905,15 @@ def test_pos_sale_response_contains_reward_when_applicable(client: TestClient):
 
     assert response.status_code == 201
     data = response.json()
-    assert data["reward"]["amount"] == 10000.0
-    assert data["reward"]["minimum_purchase"] == 100000.0
+    assert data["reward"]["amount"] == 100000.0
+    assert data["reward"]["minimum_purchase"] == 0.0
     assert data["reward"]["expires_at"]
     assert data["reward"]["public_url"].startswith(
         "https://www.kensarelectronic.com/beneficio/"
     )
 
 
-def test_pos_sale_response_contains_null_reward_when_not_applicable(client: TestClient):
+def test_pos_sale_response_contains_reward_for_sale_below_redemption_minimum(client: TestClient):
     headers = _auth_headers(client)
     db = TestingSessionLocal()
     try:
@@ -875,7 +954,12 @@ def test_pos_sale_response_contains_null_reward_when_not_applicable(client: Test
     )
 
     assert response.status_code == 201
-    assert response.json()["reward"] is None
+    data = response.json()
+    assert data["reward"]["amount"] == 100000.0
+    assert data["reward"]["minimum_purchase"] == 0.0
+    assert data["reward"]["public_url"].startswith(
+        "https://www.kensarelectronic.com/beneficio/"
+    )
 
 
 def test_public_reward_get_tracks_scan_and_hides_internal_ids(client: TestClient):
@@ -896,7 +980,13 @@ def test_public_reward_get_tracks_scan_and_hides_internal_ids(client: TestClient
     assert data["status"] == "issued"
     assert data["amount"] == 10000.0
     assert data["redemption_options"] == [
-        {"min_purchase": 100000.0, "max_purchase": 199999.0, "discount_amount": 10000.0}
+        {"min_purchase": 50000.0, "max_purchase": 99999.0, "discount_amount": 5000.0},
+        {"min_purchase": 100000.0, "max_purchase": 199999.0, "discount_amount": 10000.0},
+        {"min_purchase": 200000.0, "max_purchase": 299999.0, "discount_amount": 20000.0},
+        {"min_purchase": 300000.0, "max_purchase": 499999.0, "discount_amount": 30000.0},
+        {"min_purchase": 500000.0, "max_purchase": 699999.0, "discount_amount": 50000.0},
+        {"min_purchase": 700000.0, "max_purchase": 999999.0, "discount_amount": 70000.0},
+        {"min_purchase": 1000000.0, "max_purchase": None, "discount_amount": 100000.0},
     ]
     assert "sale_id" not in data
     assert "tenant_id" not in data
@@ -911,7 +1001,7 @@ def test_public_reward_get_tracks_scan_and_hides_internal_ids(client: TestClient
         db.close()
 
 
-def test_public_reward_redemption_options_stop_at_reward_max(client: TestClient):
+def test_public_reward_redemption_options_do_not_stop_at_origin_reward_amount(client: TestClient):
     db = TestingSessionLocal()
     try:
         tenant_id = _default_tenant_id(db)
@@ -931,8 +1021,13 @@ def test_public_reward_redemption_options_stop_at_reward_max(client: TestClient)
 
     assert response.status_code == 200
     assert [option["discount_amount"] for option in response.json()["redemption_options"]] == [
+        5000.0,
         10000.0,
         20000.0,
+        30000.0,
+        50000.0,
+        70000.0,
+        100000.0,
     ]
 
 
@@ -968,8 +1063,8 @@ def test_public_activation_is_idempotent_and_creates_loyalty_code(client: TestCl
         assert len([code for code in codes if code.code == first_data["code"]]) == 1
         code = next(code for code in codes if code.code == first_data["code"])
         assert code.discount_type == "fixed_amount"
-        assert code.discount_value == 10000.0
-        assert code.minimum_purchase == 100000.0
+        assert code.discount_value == 100000.0
+        assert code.minimum_purchase == 0.0
         assert code.max_uses == 1
         assert code.uses_count == 0
         assert code.ends_at is not None
@@ -1008,7 +1103,7 @@ def test_pos_loyalty_code_validation_and_atomic_redemption(client: TestClient):
         json={"code": code, "purchase_amount": 300000.0},
     )
     assert preview.status_code == 200
-    assert preview.json()["discount_amount"] == 10000.0
+    assert preview.json()["discount_amount"] == 30000.0
 
     sale_response = client.post(
         "/pos/sales",
@@ -1016,19 +1111,19 @@ def test_pos_loyalty_code_validation_and_atomic_redemption(client: TestClient):
         json={
             "client_request_id": f"redeem-pos-{uuid4().hex}",
             "payment_method": "cash",
-            "total": 290000.0,
-            "paid_amount": 290000.0,
+            "total": 270000.0,
+            "paid_amount": 270000.0,
             "change_amount": 0.0,
             "pos_name": "POS Web",
             "vendor_name": "Prueba loyalty",
             "loyalty_discount_code": code,
             "items": [product_payload],
-            "payments": [{"method": "cash", "amount": 290000.0}],
+            "payments": [{"method": "cash", "amount": 270000.0}],
         },
     )
     assert sale_response.status_code == 201
-    assert sale_response.json()["loyalty_discount_amount"] == 10000.0
-    assert sale_response.json()["total"] == 290000.0
+    assert sale_response.json()["loyalty_discount_amount"] == 30000.0
+    assert sale_response.json()["total"] == 270000.0
 
     reused = client.post(
         "/pos/sales",
@@ -1036,14 +1131,14 @@ def test_pos_loyalty_code_validation_and_atomic_redemption(client: TestClient):
         json={
             "client_request_id": f"redeem-pos-again-{uuid4().hex}",
             "payment_method": "cash",
-            "total": 290000.0,
-            "paid_amount": 290000.0,
+            "total": 270000.0,
+            "paid_amount": 270000.0,
             "change_amount": 0.0,
             "pos_name": "POS Web",
             "vendor_name": "Prueba loyalty",
             "loyalty_discount_code": code,
             "items": [product_payload],
-            "payments": [{"method": "cash", "amount": 290000.0}],
+            "payments": [{"method": "cash", "amount": 270000.0}],
         },
     )
     assert reused.status_code == 400
@@ -1095,8 +1190,17 @@ def test_loyalty_reward_partial_effective_discount_is_single_use(client: TestCli
         headers=headers,
         json={"code": code, "purchase_amount": 99999.0},
     )
-    assert under_minimum.status_code == 400
-    assert "desde $100.000" in under_minimum.json()["detail"]
+    assert under_minimum.status_code == 200
+    assert under_minimum.json()["discount_amount"] == 5000.0
+
+    too_low = client.post(
+        "/pos/discount-codes/validate",
+        headers=headers,
+        json={"code": code, "purchase_amount": 49999.0},
+    )
+    assert too_low.status_code == 200
+    assert too_low.json()["discount_amount"] == 0.0
+    assert "desde $50.000" in too_low.json()["message"]
 
     db = TestingSessionLocal()
     try:
@@ -1284,6 +1388,62 @@ def test_web_order_payment_redeems_loyalty_code_atomically():
         )
         with pytest.raises(ValueError, match="no está disponible"):
             crud.apply_coupon_to_web_cart(db, second_account, code)
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_web_order_loyalty_code_under_redemption_minimum_does_not_consume():
+    db = TestingSessionLocal()
+    try:
+        tenant_id = _default_tenant_id(db)
+        origin_sale = _create_sale(db, tenant_id=tenant_id)
+        reward = _create_reward(db, tenant_id=tenant_id, sale_id=origin_sale.id)
+        activated = crud.activate_public_loyalty_reward(db, reward._raw_token)
+        code = activated.code
+        assert code
+
+        account = crud.get_or_create_guest_web_customer_account(db, tenant_id=tenant_id)
+        crud.clear_web_cart(db, account)
+        product = _create_web_product(db, tenant_id=tenant_id, price=30000.0)
+        crud.add_item_to_web_cart(
+            db,
+            account,
+            schemas.WebCartItemMutationRequest(product_id=product.id, quantity=1),
+        )
+
+        cart = crud.apply_coupon_to_web_cart(db, account, code)
+        assert cart.coupon_code == code
+        assert cart.discount_amount == 0.0
+
+        order_read = crud.create_web_order_from_cart(
+            db,
+            account,
+            schemas.WebOrderCreateFromCartRequest(),
+        )
+        order = crud.get_web_order(db, order_read.id, account.id, tenant_id=tenant_id)
+        assert order is not None
+        assert order.discount_amount == 0.0
+
+        paid = crud.record_web_order_payment(
+            db,
+            order,
+            schemas.WebOrderPaymentRecordRequest(
+                method="manual",
+                amount=order_read.total,
+                provider="test",
+                provider_reference=f"loyalty-web-under-{uuid4().hex}",
+                status="approved",
+            ),
+        )
+        assert paid.payment_status == "approved"
+
+        discount_code = db.query(models.WebDiscountCode).filter_by(code=code).one()
+        db.refresh(reward)
+        redemptions = db.query(models.DiscountCodeRedemption).filter_by(discount_code_id=discount_code.id).all()
+        assert discount_code.uses_count == 0
+        assert reward.status == crud.LOYALTY_REWARD_STATUS_ACTIVATED
+        assert redemptions == []
     finally:
         db.rollback()
         db.close()
