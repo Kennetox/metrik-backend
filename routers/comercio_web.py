@@ -716,6 +716,7 @@ def list_comercio_web_discount_codes(
     limit: int = Query(default=50, ge=1, le=200),
     q: Optional[str] = Query(default=None),
     active_only: Optional[bool] = Query(default=None),
+    include_loyalty: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: models.PosUser = Depends(require_permission("commerce_web.view")),
     _: models.PosUser = Depends(require_module_access("commerce_web")),
@@ -726,6 +727,7 @@ def list_comercio_web_discount_codes(
         tenant_id=tenant_id,
         q=q,
         active_only=active_only,
+        include_loyalty=include_loyalty,
         skip=skip,
         limit=limit,
     )

@@ -6398,12 +6398,23 @@ def list_comercio_web_discount_codes_page(
     tenant_id: Optional[int] = None,
     q: Optional[str] = None,
     active_only: Optional[bool] = None,
+    include_loyalty: bool = False,
     skip: int = 0,
     limit: int = 50,
 ) -> schemas.ComercioWebDiscountCodePage:
     query = db.query(models.WebDiscountCode)
     if tenant_id is not None:
         query = query.filter(models.WebDiscountCode.tenant_id == tenant_id)
+    if not include_loyalty:
+        # Loyalty benefits are issued automatically per ticket. Keeping them
+        # out of the manual campaign list prevents that screen from becoming
+        # an operationally useless list of thousands of one-time codes.
+        query = query.filter(
+            or_(
+                models.WebDiscountCode.source_type.is_(None),
+                models.WebDiscountCode.source_type != LOYALTY_REWARD_DISCOUNT_SOURCE_TYPE,
+            )
+        )
 
     term = (q or "").strip()
     if term:
