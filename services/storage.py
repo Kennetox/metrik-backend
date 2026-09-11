@@ -11,9 +11,12 @@ from typing import Optional
 from uuid import uuid4
 
 from fastapi import UploadFile
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+PRODUCT_THUMBNAIL_MAX_EDGE = 640
+PRODUCT_THUMBNAIL_QUALITY = 82
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500MB input, streamed to disk before compression
 MAX_HOME_VIDEO_SIZE = 90 * 1024 * 1024  # Practical limit below the production proxy ceiling
@@ -115,6 +118,27 @@ def _build_public_url(filename: str, tenant_id: Optional[int] = None) -> str:
         return f"{base_url.rstrip('/')}/{relative_path}"
     storage_path = os.getenv("PRODUCT_UPLOAD_PUBLIC_PATH", "/uploads/product-images")
     return f"{storage_path.rstrip('/')}/{relative_path}"
+
+
+def build_product_thumbnail_path(source_path: Path) -> Path:
+    """Returns the thumbnail path that corresponds to an original image file."""
+    return source_path.parent / "thumbnails" / f"thumb-{source_path.stem}.webp"
+
+
+def create_product_thumbnail(source_path: Path, thumbnail_path: Path) -> None:
+    """Create a compact WebP rendition without changing the original file."""
+    with Image.open(source_path) as source:
+        image = ImageOps.exif_transpose(source)
+        if image.mode not in {"RGB", "RGBA"}:
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        image.thumbnail((PRODUCT_THUMBNAIL_MAX_EDGE, PRODUCT_THUMBNAIL_MAX_EDGE), Image.Resampling.LANCZOS)
+        thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(
+            thumbnail_path,
+            format="WEBP",
+            quality=PRODUCT_THUMBNAIL_QUALITY,
+            method=6,
+        )
 
 
 def _get_product_video_dir(tenant_id: Optional[int] = None) -> Path:
@@ -250,8 +274,16 @@ async def save_product_image(
     with open(file_path, "wb") as f:
         f.write(contents)
 
+    thumbnail_path = build_product_thumbnail_path(file_path)
+    try:
+        create_product_thumbnail(file_path, thumbnail_path)
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        file_path.unlink(missing_ok=True)
+        raise ValueError("No se pudo procesar la imagen subida.") from exc
+
     url = _build_public_url(filename, tenant_id)
-    return StoredProductImage(filename=filename, url=url, thumb_url=url)
+    thumb_url = _build_public_url(f"thumbnails/{thumbnail_path.name}", tenant_id)
+    return StoredProductImage(filename=filename, url=url, thumb_url=thumb_url)
 
 
 def _parse_frame_rate(value: object) -> float:
