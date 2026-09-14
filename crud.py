@@ -635,11 +635,14 @@ def _parse_product_gallery_urls(value: Any) -> list[str]:
 
 def _build_product_gallery_urls(product: models.Product) -> list[str]:
     urls = _parse_product_gallery_urls(getattr(product, "web_gallery_urls", None))
-    for candidate in [product.image_url, product.image_thumb_url]:
-        if isinstance(candidate, str):
-            normalized = candidate.strip()
-            if normalized and normalized not in urls:
-                urls.append(normalized)
+    # The thumbnail is an optimized representation for catalog cards, not an
+    # additional product photo. Adding it here duplicates the cover image in
+    # the public detail gallery after thumbnail generation.
+    candidate = product.image_url
+    if isinstance(candidate, str):
+        normalized = candidate.strip()
+        if normalized and normalized not in urls:
+            urls.append(normalized)
     return urls[:5]
 
 
