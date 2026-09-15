@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import hashlib
 import re
 import time
 from urllib.parse import urlsplit
@@ -277,6 +278,20 @@ _MEDIA_TRANSFER_AUDIT_PREFIXES = (
     "/uploads/product-videos/",
 )
 
+# Public product media is useful to search and social crawlers, but a crawler
+# that walks an entire catalogue in a few seconds can exhaust the bandwidth of
+# a small service. This is intentionally a modest per-client limit: it slows a
+# burst instead of blocking discovery, and it never applies to normal browsers.
+_MEDIA_BOT_USER_AGENT_MARKERS = (
+    "bot",
+    "spider",
+    "crawler",
+    "facebookexternalhit",
+    "meta-externalads",
+    "meta-webindexer",
+)
+_MEDIA_BOT_RATE_LIMIT_BUCKETS: dict[str, tuple[float, int]] = {}
+
 logger = logging.getLogger("kensar.validation")
 http_logger = logging.getLogger("kensar.http")
 scheduler_logger = logging.getLogger("kensar.scheduler")
@@ -298,6 +313,80 @@ def _resolve_request_id(request: Request) -> str:
 def _media_transfer_audit_enabled() -> bool:
     raw = os.getenv("MEDIA_TRANSFER_AUDIT_ENABLED", "true").strip().lower()
     return raw not in {"0", "false", "off", "no"}
+
+
+def _media_bot_rate_limit_enabled() -> bool:
+    raw = os.getenv("MEDIA_BOT_RATE_LIMIT_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _media_bot_rate_limit_settings() -> tuple[int, int]:
+    """Return a safe, bounded crawler quota: requests per rolling window."""
+    try:
+        requests = int(os.getenv("MEDIA_BOT_RATE_LIMIT_REQUESTS", "12"))
+    except ValueError:
+        requests = 12
+    try:
+        window_seconds = int(os.getenv("MEDIA_BOT_RATE_LIMIT_WINDOW_SECONDS", "600"))
+    except ValueError:
+        window_seconds = 600
+    return max(1, min(requests, 100)), max(60, min(window_seconds, 3600))
+
+
+def _is_recognized_media_bot(user_agent: str | None) -> bool:
+    normalized = (user_agent or "").lower()
+    return any(marker in normalized for marker in _MEDIA_BOT_USER_AGENT_MARKERS)
+
+
+def _media_bot_client_key(request: Request) -> str:
+    """Create an in-memory bucket key without ever writing a client IP to logs."""
+    forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    client_host = getattr(request.client, "host", "") if request.client else ""
+    identity = forwarded_for or client_host or "unknown"
+    fingerprint = f"{identity}|{_safe_log_header(request.headers.get('user-agent'), limit=300)}"
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+
+def _take_media_bot_rate_limit_slot(
+    key: str,
+    *,
+    now: float,
+    limit: int,
+    window_seconds: int,
+) -> int | None:
+    """Return seconds to wait when a crawler's media quota is exhausted."""
+    window_started_at, count = _MEDIA_BOT_RATE_LIMIT_BUCKETS.get(key, (now, 0))
+    if now - window_started_at >= window_seconds:
+        window_started_at, count = now, 0
+    if count >= limit:
+        return max(1, int(window_seconds - (now - window_started_at)))
+    _MEDIA_BOT_RATE_LIMIT_BUCKETS[key] = (window_started_at, count + 1)
+
+    # Keep the small in-memory protection bounded even if hostile clients use
+    # many different addresses. The limiter is only a bandwidth guardrail.
+    if len(_MEDIA_BOT_RATE_LIMIT_BUCKETS) > 2_000:
+        expired_before = now - window_seconds
+        for bucket_key, (started_at, _) in list(_MEDIA_BOT_RATE_LIMIT_BUCKETS.items()):
+            if started_at < expired_before:
+                _MEDIA_BOT_RATE_LIMIT_BUCKETS.pop(bucket_key, None)
+    return None
+
+
+def _media_bot_retry_after(request: Request) -> int | None:
+    if (
+        not _media_bot_rate_limit_enabled()
+        or request.method not in {"GET", "HEAD"}
+        or not request.url.path.startswith(_MEDIA_TRANSFER_AUDIT_PREFIXES)
+        or not _is_recognized_media_bot(request.headers.get("user-agent"))
+    ):
+        return None
+    limit, window_seconds = _media_bot_rate_limit_settings()
+    return _take_media_bot_rate_limit_slot(
+        _media_bot_client_key(request),
+        now=time.monotonic(),
+        limit=limit,
+        window_seconds=window_seconds,
+    )
 
 
 def _safe_log_header(value: str | None, *, limit: int = 300) -> str:
@@ -322,6 +411,28 @@ async def request_observability_middleware(request: Request, call_next):
     request_id = _resolve_request_id(request)
     request.state.request_id = request_id
     started_at = time.perf_counter()
+    retry_after = _media_bot_retry_after(request)
+    if retry_after is not None:
+        # Do not log client addresses. The audit event is enough to correlate
+        # the protection with a public media path and recognized bot type.
+        http_logger.warning(
+            "media_bot_rate_limited request_id=%s method=%s path=%s retry_after=%s user_agent=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            retry_after,
+            _safe_log_header(request.headers.get("user-agent")) or "-",
+        )
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Demasiadas solicitudes de medios. Intenta de nuevo pronto."},
+            headers={
+                "Retry-After": str(retry_after),
+                "X-Request-ID": request_id,
+                "Server-Timing": "app;dur=0",
+                "Cache-Control": "no-store",
+            },
+        )
     try:
         response = await call_next(request)
     except Exception:

@@ -9,7 +9,13 @@ import models
 from db_migrations import _backfill_hr_employees_from_users
 from routers import pos as pos_router
 from routers import separated_orders as separated_router
-from main import _safe_log_header, _safe_referrer
+from main import (
+    _MEDIA_BOT_RATE_LIMIT_BUCKETS,
+    _is_recognized_media_bot,
+    _safe_log_header,
+    _safe_referrer,
+    _take_media_bot_rate_limit_slot,
+)
 from security import hash_password
 from tests.conftest import TestingSessionLocal, engine
 
@@ -30,6 +36,33 @@ def test_media_audit_headers_are_bounded_and_do_not_keep_referrer_queries():
     )
     assert _safe_referrer("not a URL") == "-"
     assert _safe_log_header("bot\r\nagent", limit=20) == "bot agent"
+
+
+def test_media_bot_quota_only_identifies_known_crawler_agents():
+    assert _is_recognized_media_bot("facebookexternalhit/1.1")
+    assert _is_recognized_media_bot("Googlebot-Image/1.0")
+    assert _is_recognized_media_bot("meta-webindexer/1.1")
+    assert not _is_recognized_media_bot(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15"
+    )
+
+
+def test_media_bot_quota_rejects_only_after_the_small_burst_limit():
+    _MEDIA_BOT_RATE_LIMIT_BUCKETS.clear()
+    key = "crawler-test"
+    assert _take_media_bot_rate_limit_slot(
+        key, now=100.0, limit=2, window_seconds=600
+    ) is None
+    assert _take_media_bot_rate_limit_slot(
+        key, now=101.0, limit=2, window_seconds=600
+    ) is None
+    assert _take_media_bot_rate_limit_slot(
+        key, now=102.0, limit=2, window_seconds=600
+    ) == 598
+    # A new time window has its own small quota.
+    assert _take_media_bot_rate_limit_slot(
+        key, now=700.0, limit=2, window_seconds=600
+    ) is None
 
 
 def test_validation_logs_and_response_never_include_request_body(
