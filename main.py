@@ -354,7 +354,10 @@ async def request_observability_middleware(request: Request, call_next):
         # Content-Length is the payload served for a full response or the
         # requested range. It is enough to identify the heavy files while
         # keeping request bodies, client IPs and query strings out of logs.
-        http_logger.info(
+        # Render's application log stream suppresses this logger's INFO events.
+        # Use WARNING while the temporary audit is enabled so every media
+        # transfer remains observable; this has no effect on the response.
+        http_logger.warning(
             "media_transfer request_id=%s method=%s path=%s status=%s "
             "content_length=%s content_range=%s referrer=%s user_agent=%s",
             request_id,
