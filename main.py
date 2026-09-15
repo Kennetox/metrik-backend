@@ -3,6 +3,7 @@ import os
 import asyncio
 import re
 import time
+from urllib.parse import urlsplit
 from uuid import uuid4
 from datetime import datetime, timedelta
 from sqlalchemy import text
@@ -267,6 +268,15 @@ _CACHEABLE_UPLOAD_PREFIXES = (
     "/uploads/pos-logos/",
 )
 
+# This is deliberately limited to the public product media paths. Render only
+# exposes aggregate outbound bandwidth, so these structured log events let us
+# attribute a future spike to a file type, referrer and client without logging
+# query strings (which can contain search terms or public benefit tokens).
+_MEDIA_TRANSFER_AUDIT_PREFIXES = (
+    "/uploads/product-images/",
+    "/uploads/product-videos/",
+)
+
 logger = logging.getLogger("kensar.validation")
 http_logger = logging.getLogger("kensar.http")
 scheduler_logger = logging.getLogger("kensar.scheduler")
@@ -283,6 +293,27 @@ def _resolve_request_id(request: Request) -> str:
     if _REQUEST_ID_PATTERN.fullmatch(candidate):
         return candidate
     return uuid4().hex
+
+
+def _media_transfer_audit_enabled() -> bool:
+    raw = os.getenv("MEDIA_TRANSFER_AUDIT_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _safe_log_header(value: str | None, *, limit: int = 300) -> str:
+    """Return a one-line bounded header value suitable for structured logs."""
+    return re.sub(r"[\r\n\t]+", " ", (value or "").strip())[:limit]
+
+
+def _safe_referrer(value: str | None) -> str:
+    """Keep only referrer origin/path; never persist its query string or fragment."""
+    raw = _safe_log_header(value)
+    if not raw:
+        return "-"
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return "-"
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"[:300]
 
 
 @app.middleware("http")
@@ -312,6 +343,29 @@ async def request_observability_middleware(request: Request, call_next):
         and request.url.path.startswith(_CACHEABLE_UPLOAD_PREFIXES)
     ):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+    is_audited_media = request.url.path.startswith(_MEDIA_TRANSFER_AUDIT_PREFIXES)
+    if (
+        _media_transfer_audit_enabled()
+        and is_audited_media
+        and request.method in {"GET", "HEAD"}
+        and response.status_code in {200, 206}
+    ):
+        # Content-Length is the payload served for a full response or the
+        # requested range. It is enough to identify the heavy files while
+        # keeping request bodies, client IPs and query strings out of logs.
+        http_logger.info(
+            "media_transfer request_id=%s method=%s path=%s status=%s "
+            "content_length=%s content_range=%s referrer=%s user_agent=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            response.headers.get("content-length", "-"),
+            _safe_log_header(response.headers.get("content-range"), limit=120) or "-",
+            _safe_referrer(request.headers.get("referer")),
+            _safe_log_header(request.headers.get("user-agent")) or "-",
+        )
     is_pos_path = request.url.path.startswith(("/pos", "/separated-orders"))
     is_critical_sale_write = request.method == "POST" and request.url.path in {
         "/pos/sales",
