@@ -14,7 +14,7 @@ def test_expired_access_date_blocks_tenant_and_session_exposes_remaining_days():
         access_expires_on=date.today() - timedelta(days=1),
     )
 
-    assert crud.get_tenant_access_issue(tenant) == "El acceso de esta empresa venció. Contáctanos para renovarlo."
+    assert crud.get_tenant_access_issue(tenant) == "El acceso de esta empresa venció."
     session = crud.build_tenant_session_read(tenant)
     assert session is not None
     assert session.access_expires_on == tenant.access_expires_on

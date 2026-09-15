@@ -1394,7 +1394,7 @@ def get_tenant_access_issue(tenant: Optional[models.Tenant]) -> Optional[str]:
         return "Esta empresa fue archivada y ya no está disponible."
     today = datetime.now(ZoneInfo("America/Bogota")).date()
     if tenant.access_expires_on and today > tenant.access_expires_on:
-        return "El acceso de esta empresa venció. Contáctanos para renovarlo."
+        return "El acceso de esta empresa venció."
     if stage == "demo" and tenant.trial_ends_at and tenant.trial_ends_at < datetime.utcnow():
         return "Tu demo expiró. Contáctanos para activar tu empresa."
     return None
