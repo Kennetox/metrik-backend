@@ -532,7 +532,10 @@ def session_status(
     if access_issue:
         return {"status": "invalid", "reason": "tenant_blocked", "detail": access_issue}
 
-    return {"status": "active"}
+    return {
+        "status": "active",
+        "tenant": crud.build_tenant_session_read(tenant, session_user),
+    }
 
 
 @router.post("/pos-login", response_model=schemas.AuthLoginResponse)
