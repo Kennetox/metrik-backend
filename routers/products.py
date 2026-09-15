@@ -986,21 +986,35 @@ def delete_product(
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    audit_changes = {
+        "before": {
+            "id": db_product.id,
+            "sku": db_product.sku,
+            "name": db_product.name,
+            "active": db_product.active,
+        }
+    }
+    try:
+        crud.delete_product(db, db_product)
+    except IntegrityError as exc:
+        # A product can be part of inventory, sales, receiving, or other
+        # historical records.  Do not expose the database error nor leave the
+        # request session in a failed transaction state.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No se puede eliminar este producto porque tiene movimientos o "
+                "registros históricos asociados. Desactívalo para conservar el historial."
+            ),
+        ) from exc
     crud.create_product_audit_log(
         db,
-        product_id=db_product.id,
+        product_id=product_id,
         action="delete",
         actor_user=actor,
-        changes={
-            "before": {
-                "id": db_product.id,
-                "sku": db_product.sku,
-                "name": db_product.name,
-                "active": db_product.active,
-            }
-        },
+        changes=audit_changes,
     )
-    crud.delete_product(db, db_product)
     return Response(status_code=204)
 
 

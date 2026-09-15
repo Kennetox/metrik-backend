@@ -1986,6 +1986,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "investment_status",
                     "TEXT DEFAULT 'active'",
                 )
+                _ensure_column_postgres(connection, "products", "internal_notes", "TEXT")
                 _ensure_column_postgres(connection, "products", "web_slug", "VARCHAR(160)")
                 _ensure_column_postgres(connection, "products", "web_name", "VARCHAR(255)")
                 _ensure_column_postgres(
@@ -2767,6 +2768,7 @@ def run_schema_upgrades(engine: Engine) -> None:
                     "investment_status",
                     "TEXT DEFAULT 'active'",
                 )
+                _ensure_column(connection, "products", "internal_notes", "TEXT")
                 if _table_exists(connection, "investment_participants"):
                     _ensure_column(
                         connection,

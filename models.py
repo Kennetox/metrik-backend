@@ -157,6 +157,8 @@ class Product(Base):
     group_name = Column(String, nullable=True)   # viene de 'grupo' en Excel
     brand = Column(String, nullable=True)        # 'marca'
     supplier = Column(String, nullable=True)
+    # Nota operativa privada: nunca se usa en el catálogo público.
+    internal_notes = Column(Text, nullable=True)
     investment_enabled_at = Column(DateTime, nullable=True)
     investment_disabled_at = Column(DateTime, nullable=True)
     investment_status = Column(String(16), nullable=False, default="active")

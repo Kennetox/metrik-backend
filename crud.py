@@ -6784,6 +6784,7 @@ def create_product(
         group_name=product_in.group_name,
         brand=product_in.brand,
         supplier=product_in.supplier,
+        internal_notes=((product_in.internal_notes or "").strip() or None),
         web_name=product_in.web_name,
         web_slug=build_product_web_slug(
             product_in.web_slug or product_in.web_name or product_in.name,
@@ -6824,6 +6825,8 @@ def update_product(
     product_in: schemas.ProductBase,
 ):
     data = product_in.dict(exclude_unset=True)
+    if "internal_notes" in data:
+        data["internal_notes"] = ((data.get("internal_notes") or "").strip() or None)
     if "web_gallery_urls" in data:
         gallery = _parse_product_gallery_urls(data.get("web_gallery_urls"))
         data["web_gallery_urls"] = json.dumps(gallery, ensure_ascii=False) if gallery else None

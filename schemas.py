@@ -64,6 +64,7 @@ class ProductBase(BaseModel):
 
 
 class ProductCreate(ProductBase):
+    internal_notes: Optional[str] = Field(default=None, max_length=4000)
     cost_suggestion_meta: Optional[Dict[str, Any]] = None
     auto_generate_codes: bool = False
 
@@ -91,6 +92,7 @@ class ProductUpdate(BaseModel):
     group_name: Optional[str] = None
     brand: Optional[str] = None
     supplier: Optional[str] = None
+    internal_notes: Optional[str] = Field(default=None, max_length=4000)
     web_name: Optional[str] = None
     image_url: Optional[str] = None
     image_thumb_url: Optional[str] = None
@@ -185,6 +187,7 @@ class ProductGroupRead(ProductGroupBase):
 
 class ProductRead(ProductBase):
     id: int
+    internal_notes: Optional[str] = None
     web_published_at: Optional[datetime] = None
     group_meta: Optional[ProductGroupRead] = None
     qty_on_hand: Optional[float] = None
@@ -213,6 +216,23 @@ class ProductRead(ProductBase):
             if normalized and normalized not in clean:
                 clean.append(normalized)
         return clean[:5]
+
+    class Config:
+        from_attributes = True
+
+
+class ProductPublicRead(ProductBase):
+    """Product shape exposed by public web endpoints; excludes internal notes."""
+
+    id: int
+    web_published_at: Optional[datetime] = None
+    group_meta: Optional[ProductGroupRead] = None
+    qty_on_hand: Optional[float] = None
+
+    @field_validator("web_gallery_urls", mode="before")
+    @classmethod
+    def _parse_gallery_urls(cls, value: Any):
+        return ProductRead._parse_gallery_urls(value)
 
     class Config:
         from_attributes = True

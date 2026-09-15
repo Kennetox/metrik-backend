@@ -179,7 +179,7 @@ def get_web_brand_collage_images(
 
 @router.get(
     "/personalization/service-by-sku",
-    response_model=schemas.ProductRead,
+    response_model=schemas.ProductPublicRead,
 )
 def get_web_personalization_service_by_sku(
     sku: str = Query(min_length=1),
