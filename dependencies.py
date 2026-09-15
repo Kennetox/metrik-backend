@@ -50,6 +50,14 @@ def require_pos_auth(
             detail="Usuario sin empresa asignada",
         )
 
+    tenant = crud.get_tenant(db, user.tenant_id)
+    tenant_access_issue = crud.get_tenant_access_issue(tenant)
+    if tenant_access_issue:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=tenant_access_issue,
+        )
+
     session = crud.get_session_by_token(db, token)
     if not session or session.revoked_at:
         raise HTTPException(

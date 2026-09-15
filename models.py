@@ -32,6 +32,7 @@ class Tenant(Base):
     lifecycle_stage = Column(String(24), nullable=False, default="active")
     trial_started_at = Column(DateTime, nullable=True)
     trial_ends_at = Column(DateTime, nullable=True)
+    access_expires_on = Column(Date, nullable=True)
     converted_at = Column(DateTime, nullable=True)
     enabled_modules = Column(JSON, nullable=True)
     module_user_access = Column(JSON, nullable=True)

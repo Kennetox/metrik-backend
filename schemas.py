@@ -3942,6 +3942,7 @@ class TenantRead(BaseModel):
     lifecycle_stage: Literal["demo", "active", "inactive", "suspended", "archived"] = "active"
     trial_started_at: Optional[datetime] = None
     trial_ends_at: Optional[datetime] = None
+    access_expires_on: Optional[date] = None
     converted_at: Optional[datetime] = None
     enabled_modules: List[str] = []
     module_user_access: Dict[str, List[int]] = {}
@@ -3992,6 +3993,7 @@ class PlatformTenantRead(TenantRead):
     admin_user: Optional[PlatformTenantAdminRead] = None
     company_details: Optional[PlatformTenantCompanyRead] = None
     trial_days_remaining: Optional[int] = None
+    access_days_remaining: Optional[int] = None
     module_catalog: List[TenantModuleCatalogItem] = []
 
 
@@ -4018,6 +4020,7 @@ class PlatformTenantUpdateRequest(BaseModel):
     lifecycle_stage: Optional[
         Literal["demo", "active", "inactive", "suspended", "archived"]
     ] = None
+    access_expires_on: Optional[date] = None
 
 
 class PlatformTenantRecoveryResponse(BaseModel):
@@ -4038,6 +4041,8 @@ class TenantSessionRead(BaseModel):
     trial_started_at: Optional[datetime] = None
     trial_ends_at: Optional[datetime] = None
     trial_days_remaining: Optional[int] = None
+    access_expires_on: Optional[date] = None
+    access_days_remaining: Optional[int] = None
     enabled_modules: List[str] = []
     module_access: Dict[str, bool] = {}
 

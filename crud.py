@@ -1289,6 +1289,13 @@ def get_tenant_trial_days_remaining(tenant: Optional[models.Tenant]) -> Optional
     return max(0, int((delta.total_seconds() + 86399) // 86400))
 
 
+def get_tenant_access_days_remaining(tenant: Optional[models.Tenant]) -> Optional[int]:
+    if not tenant or not tenant.access_expires_on:
+        return None
+    today = datetime.now(ZoneInfo("America/Bogota")).date()
+    return max(0, (tenant.access_expires_on - today).days)
+
+
 def get_tenant_enabled_modules(tenant: Optional[models.Tenant]) -> List[str]:
     if not tenant:
         return tenant_modules.normalize_enabled_modules(None)
@@ -1368,6 +1375,8 @@ def build_tenant_session_read(
         trial_started_at=tenant.trial_started_at,
         trial_ends_at=tenant.trial_ends_at,
         trial_days_remaining=get_tenant_trial_days_remaining(tenant),
+        access_expires_on=tenant.access_expires_on,
+        access_days_remaining=get_tenant_access_days_remaining(tenant),
         enabled_modules=get_tenant_enabled_modules(tenant),
         module_access=build_tenant_module_access_map(tenant, user),
     )
@@ -1383,6 +1392,9 @@ def get_tenant_access_issue(tenant: Optional[models.Tenant]) -> Optional[str]:
         return "Esta empresa está inactiva. Contáctanos para reactivar el acceso."
     if stage == "archived":
         return "Esta empresa fue archivada y ya no está disponible."
+    today = datetime.now(ZoneInfo("America/Bogota")).date()
+    if tenant.access_expires_on and today > tenant.access_expires_on:
+        return "El acceso de esta empresa venció. Contáctanos para renovarlo."
     if stage == "demo" and tenant.trial_ends_at and tenant.trial_ends_at < datetime.utcnow():
         return "Tu demo expiró. Contáctanos para activar tu empresa."
     return None
@@ -1777,10 +1789,12 @@ def build_platform_tenant_read(
         lifecycle_stage=(tenant.lifecycle_stage or "active"),
         trial_started_at=tenant.trial_started_at,
         trial_ends_at=tenant.trial_ends_at,
+        access_expires_on=tenant.access_expires_on,
         converted_at=tenant.converted_at,
         created_at=tenant.created_at,
         updated_at=tenant.updated_at,
         trial_days_remaining=get_tenant_trial_days_remaining(tenant),
+        access_days_remaining=get_tenant_access_days_remaining(tenant),
         enabled_modules=get_tenant_enabled_modules(tenant),
         module_user_access=normalize_module_user_access(tenant.module_user_access),
         module_catalog=tenant_modules.get_tenant_module_catalog(),
@@ -1899,6 +1913,13 @@ def update_tenant(
         tenant.lifecycle_stage = data["lifecycle_stage"]
         if tenant.lifecycle_stage == "active":
             tenant.converted_at = tenant.converted_at or datetime.utcnow()
+    if "access_expires_on" in data:
+        tenant.access_expires_on = data["access_expires_on"]
+        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        if data["access_expires_on"] is None or data["access_expires_on"] >= today:
+            if tenant.lifecycle_stage == "suspended":
+                tenant.lifecycle_stage = "active"
+            tenant.is_active = True
     if "enabled_modules" in data and data["enabled_modules"] is not None:
         tenant.enabled_modules = tenant_modules.normalize_enabled_modules(
             data["enabled_modules"]

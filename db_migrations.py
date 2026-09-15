@@ -27,15 +27,18 @@ def _rename_column_if_exists(
     return True
 
 
-def _ensure_column(connection, table: str, column: str, ddl: str) -> None:
-    if not _column_exists(connection, table, column):
-        # Corrige intentos previos donde se añadió una columna sin nombre (FLOAT)
-        if _rename_column_if_exists(connection, table, "FLOAT", column):
-            return
+def _ensure_column(connection, table: str, column: str, ddl: str) -> bool:
+    if _column_exists(connection, table, column):
+        return False
 
-        connection.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-        )
+    # Corrige intentos previos donde se añadió una columna sin nombre (FLOAT)
+    if _rename_column_if_exists(connection, table, "FLOAT", column):
+        return True
+
+    connection.execute(
+        text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    )
+    return True
 
 
 def _table_exists(connection, table: str) -> bool:
@@ -50,10 +53,21 @@ def _table_exists(connection, table: str) -> bool:
 
 def _ensure_column_postgres(
     connection, table: str, column: str, ddl: str
-) -> None:
+) -> bool:
+    exists = connection.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name = :table AND column_name = :column"
+        ),
+        {"table": table, "column": column},
+    ).first()
+    if exists:
+        return False
     connection.execute(
-        text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
+        text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     )
+    return True
 
 
 def _ensure_web_discount_code_schema(connection, backend: str) -> None:
@@ -1959,6 +1973,16 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column_postgres(connection, "tenants", "lifecycle_stage", "TEXT DEFAULT 'active'")
                 _ensure_column_postgres(connection, "tenants", "trial_started_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "tenants", "trial_ends_at", "TIMESTAMP")
+                access_expiry_column_added = _ensure_column_postgres(
+                    connection, "tenants", "access_expires_on", "DATE"
+                )
+                if access_expiry_column_added:
+                    connection.execute(
+                        text(
+                            "UPDATE tenants SET access_expires_on = DATE '2026-09-28' "
+                            "WHERE id = 3 AND slug = 'kensar'"
+                        )
+                    )
                 _ensure_column_postgres(connection, "tenants", "converted_at", "TIMESTAMP")
                 _ensure_column_postgres(connection, "tenants", "enabled_modules", "JSONB")
                 _ensure_column_postgres(connection, "tenants", "module_user_access", "JSONB")
@@ -2741,6 +2765,16 @@ def run_schema_upgrades(engine: Engine) -> None:
                 _ensure_column(connection, "tenants", "lifecycle_stage", "TEXT DEFAULT 'active'")
                 _ensure_column(connection, "tenants", "trial_started_at", "TIMESTAMP")
                 _ensure_column(connection, "tenants", "trial_ends_at", "TIMESTAMP")
+                access_expiry_column_added = _ensure_column(
+                    connection, "tenants", "access_expires_on", "DATE"
+                )
+                if access_expiry_column_added:
+                    connection.execute(
+                        text(
+                            "UPDATE tenants SET access_expires_on = '2026-09-28' "
+                            "WHERE id = 3 AND slug = 'kensar'"
+                        )
+                    )
                 _ensure_column(connection, "tenants", "converted_at", "TIMESTAMP")
                 _ensure_column(connection, "tenants", "enabled_modules", "TEXT")
                 _ensure_column(connection, "tenants", "module_user_access", "TEXT")
