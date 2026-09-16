@@ -11,6 +11,7 @@ from routers import pos as pos_router
 from routers import separated_orders as separated_router
 from main import (
     _MEDIA_BOT_RATE_LIMIT_BUCKETS,
+    _MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS,
     _is_recognized_media_bot,
     _safe_log_header,
     _safe_referrer,
@@ -63,6 +64,31 @@ def test_media_bot_quota_rejects_only_after_the_small_burst_limit():
     assert _take_media_bot_rate_limit_slot(
         key, now=700.0, limit=2, window_seconds=600
     ) is None
+
+
+def test_media_bot_global_quota_uses_a_shared_bucket_across_clients():
+    _MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS.clear()
+    assert _take_media_bot_rate_limit_slot(
+        "all-recognized-media-bots",
+        now=100.0,
+        limit=2,
+        window_seconds=3600,
+        buckets=_MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS,
+    ) is None
+    assert _take_media_bot_rate_limit_slot(
+        "all-recognized-media-bots",
+        now=101.0,
+        limit=2,
+        window_seconds=3600,
+        buckets=_MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS,
+    ) is None
+    assert _take_media_bot_rate_limit_slot(
+        "all-recognized-media-bots",
+        now=102.0,
+        limit=2,
+        window_seconds=3600,
+        buckets=_MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS,
+    ) == 3598
 
 
 def test_validation_logs_and_response_never_include_request_body(

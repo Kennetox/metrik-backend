@@ -291,6 +291,7 @@ _MEDIA_BOT_USER_AGENT_MARKERS = (
     "meta-webindexer",
 )
 _MEDIA_BOT_RATE_LIMIT_BUCKETS: dict[str, tuple[float, int]] = {}
+_MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS: dict[str, tuple[float, int]] = {}
 
 logger = logging.getLogger("kensar.validation")
 http_logger = logging.getLogger("kensar.http")
@@ -333,6 +334,21 @@ def _media_bot_rate_limit_settings() -> tuple[int, int]:
     return max(1, min(requests, 100)), max(60, min(window_seconds, 3600))
 
 
+def _media_bot_global_rate_limit_settings() -> tuple[int, int]:
+    """Bound aggregate crawler media traffic even when it rotates addresses."""
+    try:
+        requests = int(os.getenv("MEDIA_BOT_GLOBAL_RATE_LIMIT_REQUESTS", "24"))
+    except ValueError:
+        requests = 24
+    try:
+        window_seconds = int(
+            os.getenv("MEDIA_BOT_GLOBAL_RATE_LIMIT_WINDOW_SECONDS", "3600")
+        )
+    except ValueError:
+        window_seconds = 3600
+    return max(1, min(requests, 200)), max(60, min(window_seconds, 3600))
+
+
 def _is_recognized_media_bot(user_agent: str | None) -> bool:
     normalized = (user_agent or "").lower()
     return any(marker in normalized for marker in _MEDIA_BOT_USER_AGENT_MARKERS)
@@ -353,39 +369,64 @@ def _take_media_bot_rate_limit_slot(
     now: float,
     limit: int,
     window_seconds: int,
+    buckets: dict[str, tuple[float, int]] | None = None,
 ) -> int | None:
     """Return seconds to wait when a crawler's media quota is exhausted."""
-    window_started_at, count = _MEDIA_BOT_RATE_LIMIT_BUCKETS.get(key, (now, 0))
+    buckets = buckets if buckets is not None else _MEDIA_BOT_RATE_LIMIT_BUCKETS
+    window_started_at, count = buckets.get(key, (now, 0))
     if now - window_started_at >= window_seconds:
         window_started_at, count = now, 0
     if count >= limit:
         return max(1, int(window_seconds - (now - window_started_at)))
-    _MEDIA_BOT_RATE_LIMIT_BUCKETS[key] = (window_started_at, count + 1)
+    buckets[key] = (window_started_at, count + 1)
 
     # Keep the small in-memory protection bounded even if hostile clients use
     # many different addresses. The limiter is only a bandwidth guardrail.
-    if len(_MEDIA_BOT_RATE_LIMIT_BUCKETS) > 2_000:
+    if len(buckets) > 2_000:
         expired_before = now - window_seconds
-        for bucket_key, (started_at, _) in list(_MEDIA_BOT_RATE_LIMIT_BUCKETS.items()):
+        for bucket_key, (started_at, _) in list(buckets.items()):
             if started_at < expired_before:
-                _MEDIA_BOT_RATE_LIMIT_BUCKETS.pop(bucket_key, None)
+                buckets.pop(bucket_key, None)
     return None
+
+
+def _is_media_bot_request(request: Request) -> bool:
+    return (
+        request.method in {"GET", "HEAD"}
+        and request.url.path.startswith(_MEDIA_TRANSFER_AUDIT_PREFIXES)
+        and _is_recognized_media_bot(request.headers.get("user-agent"))
+    )
+
+
+def _should_reject_media_bot_request(request: Request) -> bool:
+    """Crawlers have no product need for raw video files, which are expensive."""
+    return _is_media_bot_request(request) and request.url.path.startswith(
+        "/uploads/product-videos/"
+    )
 
 
 def _media_bot_retry_after(request: Request) -> int | None:
     if (
         not _media_bot_rate_limit_enabled()
-        or request.method not in {"GET", "HEAD"}
-        or not request.url.path.startswith(_MEDIA_TRANSFER_AUDIT_PREFIXES)
-        or not _is_recognized_media_bot(request.headers.get("user-agent"))
+        or not _is_media_bot_request(request)
     ):
         return None
     limit, window_seconds = _media_bot_rate_limit_settings()
-    return _take_media_bot_rate_limit_slot(
+    retry_after = _take_media_bot_rate_limit_slot(
         _media_bot_client_key(request),
         now=time.monotonic(),
         limit=limit,
         window_seconds=window_seconds,
+    )
+    if retry_after is not None:
+        return retry_after
+    global_limit, global_window_seconds = _media_bot_global_rate_limit_settings()
+    return _take_media_bot_rate_limit_slot(
+        "all-recognized-media-bots",
+        now=time.monotonic(),
+        limit=global_limit,
+        window_seconds=global_window_seconds,
+        buckets=_MEDIA_BOT_GLOBAL_RATE_LIMIT_BUCKETS,
     )
 
 
@@ -411,6 +452,23 @@ async def request_observability_middleware(request: Request, call_next):
     request_id = _resolve_request_id(request)
     request.state.request_id = request_id
     started_at = time.perf_counter()
+    if _should_reject_media_bot_request(request):
+        http_logger.warning(
+            "media_bot_video_rejected request_id=%s method=%s path=%s user_agent=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            _safe_log_header(request.headers.get("user-agent")) or "-",
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Los crawlers no pueden descargar videos de producto."},
+            headers={
+                "X-Request-ID": request_id,
+                "Server-Timing": "app;dur=0",
+                "Cache-Control": "no-store",
+            },
+        )
     retry_after = _media_bot_retry_after(request)
     if retry_after is not None:
         # Do not log client addresses. The audit event is enough to correlate
