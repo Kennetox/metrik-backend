@@ -758,6 +758,20 @@ def list_receiving_documents(
             closer_user.name.label("closed_by_user_name"),
             func.count(models.ReceivingLotItem.id).label("lines_count"),
             func.coalesce(func.sum(models.ReceivingLotItem.qty_received), 0.0).label("units_total"),
+            func.coalesce(
+                func.sum(
+                    models.ReceivingLotItem.qty_received
+                    * models.ReceivingLotItem.unit_cost_snapshot
+                ),
+                0.0,
+            ).label("total_cost"),
+            func.coalesce(
+                func.sum(
+                    models.ReceivingLotItem.qty_received
+                    * models.ReceivingLotItem.unit_price_snapshot
+                ),
+                0.0,
+            ).label("total_price"),
         )
         .outerjoin(models.ReceivingLotItem, models.ReceivingLotItem.lot_id == models.ReceivingLot.id)
         .outerjoin(creator_user, creator_user.id == models.ReceivingLot.created_by_user_id)
@@ -813,6 +827,8 @@ def list_receiving_documents(
             stock_device_name=row.stock_device_name,
             lines_count=int(row.lines_count or 0),
             units_total=float(row.units_total or 0.0),
+            total_cost=float(row.total_cost or 0.0),
+            total_price=float(row.total_price or 0.0),
             created_by_user_id=row.created_by_user_id,
             created_by_user_name=row.created_by_user_name,
             closed_by_user_id=row.closed_by_user_id,
