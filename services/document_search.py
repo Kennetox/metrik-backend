@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from sqlalchemy import false, func, or_, text, true
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 import models
 
@@ -616,12 +616,20 @@ def search_documents(
             ))
         if cleaned_pos:
             query = query.filter(models.ReceivingLot.origin_name.ilike(f"%{cleaned_pos}%"))
-        for lot in query.order_by(models.ReceivingLot.closed_at.desc(), models.ReceivingLot.id.desc()).limit(scan_limit):
+        for lot in (
+            query.options(selectinload(models.ReceivingLot.items))
+            .order_by(models.ReceivingLot.closed_at.desc(), models.ReceivingLot.id.desc())
+            .limit(scan_limit)
+        ):
+            total_sale_price = sum(
+                float(item.qty_received or 0) * float(item.unit_price_snapshot or 0)
+                for item in lot.items
+            )
             rows.append(_base_item(
                 key=f"receiving-{lot.id}", document_type="recepcion", record_id=lot.id,
                 occurred_at=lot.closed_at or lot.created_at, document_number=lot.lot_number or f"RC-{lot.id:06d}",
                 reference=f"Recepción - {lot.origin_name}", detail=lot.invoice_reference or lot.notes or "Recepción de inventario",
-                payment_method="recepcion", pos=lot.origin_name, status=lot.status,
+                total=total_sale_price, payment_method="recepcion", pos=lot.origin_name, status=lot.status,
             ))
 
     if normalized_type in {"all", "recuento"} and not cleaned_customer and not cleaned_payment:
